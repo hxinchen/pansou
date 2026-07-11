@@ -147,6 +147,7 @@ func migrateLegacyCredentials(ctx context.Context, store *storage.Store, service
 
 	prepared := make([]storage.CreatePluginCredentialInput, 0, len(files))
 	counts := make(map[string]int, len(accountPluginKeys))
+	skippedCounts := make(map[string]int, len(accountPluginKeys))
 	for _, file := range files {
 		data, err := os.ReadFile(file.Path)
 		if err != nil {
@@ -154,7 +155,12 @@ func migrateLegacyCredentials(ctx context.Context, store *storage.Store, service
 		}
 		material, err := parsers[file.PluginKey].ParseLegacyCredential(data)
 		if err != nil {
-			return fmt.Errorf("parse legacy credential %s: %w", filepath.Base(file.Path), err)
+			// A single stale or partially-written legacy account must not keep the
+			// whole service in a restart loop. The original file is retained for
+			// manual repair/import and the skip is recorded in migration metadata.
+			skippedCounts[file.PluginKey]++
+			fmt.Printf("跳过无效的旧 %s 账号文件 %s: %v\n", file.PluginKey, filepath.Base(file.Path), err)
+			continue
 		}
 		input, err := service.Prepare(credential.CreateInput{
 			PluginKey: file.PluginKey, Scope: storage.CredentialScopeAdminPrivate,
@@ -171,7 +177,14 @@ func migrateLegacyCredentials(ctx context.Context, store *storage.Store, service
 		prepared = append(prepared, input)
 		counts[file.PluginKey]++
 	}
-	summary := map[string]any{"total": len(prepared), "counts": counts, "legacy_files_retained": true}
+	skipped := 0
+	for _, count := range skippedCounts {
+		skipped += count
+	}
+	summary := map[string]any{
+		"total": len(prepared), "counts": counts, "skipped": skipped,
+		"skipped_counts": skippedCounts, "legacy_files_retained": true,
+	}
 	result, err := store.ImportPluginCredentialsAndCompleteMigration(ctx, storage.ImportPluginCredentialsInput{
 		MigrationKey: legacyCredentialMigrationKey, Credentials: prepared, Summary: summary, CompletedAt: time.Now(),
 	})
