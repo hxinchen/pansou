@@ -22,6 +22,12 @@ func getCheckService() *service.CheckService {
 	return checkService
 }
 
+// SharedCheckService exposes the same checker used by the HTTP endpoint so the
+// asynchronous resource-library workers share its cache and singleflight map.
+func SharedCheckService() *service.CheckService {
+	return getCheckService()
+}
+
 func CheckHandler(c *gin.Context) {
 	var req model.CheckRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

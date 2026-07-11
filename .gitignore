@@ -1,2 +1,16 @@
 .DS_Store
 cache
+
+# Local deployment build artifacts
+/pansou-linux-amd64
+/pansou-web-dist.tar.gz
+
+# Local database credentials and backups
+/secrets/database.env
+/backups/
+
+# Local analysis and browser verification artifacts
+/.codegraph/
+/.playwright-cli/
+/output/
+/.superpowers/

@@ -1,0 +1,3760 @@
+(function () {
+  'use strict';
+
+  var API = {
+    overview: '/api/admin/overview',
+    trends: '/api/admin/trends',
+    resources: '/api/admin/resources',
+    keywords: '/api/admin/keywords',
+    keywordAPISources: '/api/admin/keyword-api-sources',
+    keywordAPISourceTest: '/api/admin/keyword-api-sources/test',
+    runs: '/api/admin/runs',
+    users: '/api/admin/users',
+    usageOverview: '/api/admin/usage/overview',
+    usageTrends: '/api/admin/usage/trends',
+    usageLogs: '/api/admin/usage/logs',
+    sourceCatalog: '/api/admin/search-sources/catalog',
+    sourceConfig: '/api/admin/search-sources/config',
+    sourceValidate: '/api/admin/search-sources/validate',
+    credentials: '/api/admin/plugin-credentials',
+    userCredentials: '/api/admin/user-plugin-credentials',
+    credentialLoginFlows: '/api/admin/plugin-credentials/login-flows'
+  };
+
+  var TOKEN_KEY = 'pansou.admin.token';
+  var USER_KEY = 'pansou.admin.user';
+  var ROLE_KEY = 'pansou.admin.role';
+  var PAGE_SIZE = 20;
+  var ACTIVE_STATUSES = ['pending', 'running'];
+  var viewLabels = {
+    overview: '数据概览',
+    resources: '资源库',
+    keywords: '关键词',
+    runs: '采集任务',
+    users: '用户管理',
+    usage: 'API 监控',
+    sources: '搜索来源'
+  };
+
+  var state = {
+    view: 'overview',
+    token: localStorage.getItem(TOKEN_KEY) || '',
+    username: localStorage.getItem(USER_KEY) || '管理员',
+    role: localStorage.getItem(ROLE_KEY) || '',
+    loaded: {},
+    charts: {},
+    overview: null,
+    resources: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
+    keywords: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, selected: new Set(), query: {}, tab: 'list' },
+    keywordSources: { items: [], loaded: false, editing: null, testResponse: null, selectedPath: '', testedSignature: '', originalSignature: '', requestSerial: 0, editorModes: { query: 'kv', header: 'kv', form: 'kv' } },
+    runs: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
+    users: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
+    usage: { overview: null, trends: [], logs: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, range: '7d', query: {} },
+    sources: { catalog: [], config: null, credentials: [], tab: 'admin', configTab: 'tg', dirty: false, sharedTotal: 0, pluginSearch: '', credentialEditing: null, credentialEditMode: 'login', loginFlow: null, loginFlowTimer: null, credentialQuery: {} },
+    runPicker: { items: [], selected: new Set(), search: '' },
+    currentRunDetail: null,
+    pollTimer: null,
+    detailPollTimer: null,
+    requestSerial: { resources: 0, keywords: 0, runs: 0, users: 0, usage: 0, usageLogs: 0, sources: 0 },
+    confirmCallback: null
+  };
+
+  var statusLabels = {
+    pending: '待处理',
+    running: '运行中',
+    valid: '有效',
+    invalid: '失效',
+    unknown: '未知',
+    unsupported: '不支持',
+    success: '成功',
+    success_empty: '无结果',
+    failed: '失败',
+    active: '可用',
+    expired: '已过期',
+    disabled: '已停用',
+    admin_suspended: '管理员暂停'
+  };
+
+  var diskLabels = {
+    baidu: '百度',
+    aliyun: '阿里云',
+    quark: '夸克',
+    guangya: '光鸭',
+    tianyi: '天翼',
+    uc: 'UC',
+    mobile: '移动云盘',
+    '115': '115',
+    pikpak: 'PikPak',
+    xunlei: '迅雷',
+    '123': '123',
+    magnet: '磁力',
+    ed2k: '电驴',
+    others: '其他'
+  };
+
+  var keywordTypeLabels = {
+    general: '通用',
+    movie: '电影',
+    series: '剧集',
+    book: '图书',
+    software: '软件',
+    course: '课程'
+  };
+
+  var triggerLabels = {
+    scheduled: '自动调度',
+    schedule: '自动调度',
+    manual: '手动',
+    external: '外部搜索'
+  };
+
+  var sourceTypeLabels = {
+    manual: '手动',
+    api: 'API',
+    import: '导入',
+    tg: 'Telegram',
+    plugin: '插件',
+    external: '外部搜索'
+  };
+
+  function byId(id) {
+    return document.getElementById(id);
+  }
+
+  function pick(object, keys, fallback) {
+    if (!object || typeof object !== 'object') return fallback;
+    for (var i = 0; i < keys.length; i += 1) {
+      if (Object.prototype.hasOwnProperty.call(object, keys[i]) && object[keys[i]] !== null && object[keys[i]] !== undefined) {
+        return object[keys[i]];
+      }
+    }
+    return fallback;
+  }
+
+  function arrayFrom(data, keys) {
+    if (Array.isArray(data)) return data;
+    var value = pick(data, keys, []);
+    return Array.isArray(value) ? value : [];
+  }
+
+  function numberValue(value, fallback) {
+    var parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : (fallback || 0);
+  }
+
+  function boolValue(value, fallback) {
+    if (typeof value === 'boolean') return value;
+    if (value === 1 || value === '1' || value === 'true') return true;
+    if (value === 0 || value === '0' || value === 'false') return false;
+    return Boolean(fallback);
+  }
+
+  function escapeHTML(value) {
+    return String(value === null || value === undefined ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  function icon(name, className) {
+    return '<i data-lucide="' + escapeHTML(name) + '"' + (className ? ' class="' + escapeHTML(className) + '"' : '') + ' aria-hidden="true"></i>';
+  }
+
+  function refreshIcons(root) {
+    if (window.lucide && typeof window.lucide.createIcons === 'function') {
+      window.lucide.createIcons({ attrs: { 'stroke-width': 1.8 }, root: root || document });
+    }
+  }
+
+  function formatNumber(value) {
+    return new Intl.NumberFormat('zh-CN').format(numberValue(value, 0));
+  }
+
+  function toDate(value) {
+    if (value === null || value === undefined || value === '') return null;
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+    if (typeof value === 'number') {
+      return new Date(value < 100000000000 ? value * 1000 : value);
+    }
+    if (/^\d+$/.test(String(value))) {
+      var numeric = Number(value);
+      return new Date(numeric < 100000000000 ? numeric * 1000 : numeric);
+    }
+    var parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  function formatDate(value, includeTime) {
+    var date = toDate(value);
+    if (!date) return '—';
+    var options = includeTime === false
+      ? { year: 'numeric', month: '2-digit', day: '2-digit' }
+      : { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false };
+    return new Intl.DateTimeFormat('zh-CN', options).format(date).replace(/\//g, '-');
+  }
+
+  function relativeTime(value) {
+    var date = toDate(value);
+    if (!date) return '—';
+    var seconds = Math.round((date.getTime() - Date.now()) / 1000);
+    var absolute = Math.abs(seconds);
+    var unit = 'second';
+    var amount = seconds;
+    if (absolute >= 86400) {
+      unit = 'day';
+      amount = Math.round(seconds / 86400);
+    } else if (absolute >= 3600) {
+      unit = 'hour';
+      amount = Math.round(seconds / 3600);
+    } else if (absolute >= 60) {
+      unit = 'minute';
+      amount = Math.round(seconds / 60);
+    }
+    try {
+      return new Intl.RelativeTimeFormat('zh-CN', { numeric: 'auto' }).format(amount, unit);
+    } catch (error) {
+      return formatDate(date, true);
+    }
+  }
+
+  function durationFrom(item) {
+    var milliseconds = pick(item, ['duration_ms', 'elapsed_ms'], null);
+    var seconds = pick(item, ['duration_seconds', 'elapsed_seconds', 'duration'], null);
+    if (milliseconds !== null) seconds = numberValue(milliseconds) / 1000;
+    if (seconds === null || seconds === undefined) {
+      var start = toDate(pick(item, ['started_at', 'start_time', 'created_at'], null));
+      var end = toDate(pick(item, ['finished_at', 'ended_at', 'completed_at'], null));
+      if (start) seconds = ((end || new Date()).getTime() - start.getTime()) / 1000;
+    }
+    if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds))) return '—';
+    seconds = Math.max(0, Math.round(Number(seconds)));
+    if (seconds < 60) return seconds + ' 秒';
+    var minutes = Math.floor(seconds / 60);
+    var remaining = seconds % 60;
+    if (minutes < 60) return minutes + ' 分 ' + remaining + ' 秒';
+    var hours = Math.floor(minutes / 60);
+    return hours + ' 小时 ' + (minutes % 60) + ' 分';
+  }
+
+  function normalizedStatus(item) {
+    var value = pick(item, ['status', 'check_status', 'state'], 'unknown');
+    if (value === 'ok') return 'valid';
+    if (value === 'bad') return 'invalid';
+    if (value === 'uncertain') return 'unknown';
+    return String(value || 'unknown').toLowerCase();
+  }
+
+  function statusBadge(status) {
+    var normalized = String(status || 'unknown').toLowerCase();
+    return '<span class="status-badge status-' + escapeHTML(normalized) + '">' + escapeHTML(statusLabels[normalized] || normalized) + '</span>';
+  }
+
+  function runProgress(run) {
+    var total = numberValue(pick(run, ['total_items', 'total_keywords', 'keyword_count', 'total'], 0));
+    var completed = numberValue(pick(run, ['completed_items', 'completed_keywords', 'processed', 'completed'], 0));
+    var explicit = pick(run, ['progress', 'progress_percent', 'percent'], null);
+    var percent = explicit !== null ? numberValue(explicit) : (total > 0 ? completed / total * 100 : 0);
+    if (percent > 0 && percent <= 1) percent *= 100;
+    percent = Math.min(100, Math.max(0, Math.round(percent)));
+    return { total: total, completed: completed, percent: percent };
+  }
+
+  function paginationMeta(data, items, page, pageSize) {
+    var pagination = pick(data, ['pagination', 'meta'], {});
+    var total = numberValue(pick(data, ['total', 'total_count', 'count'], pick(pagination, ['total', 'total_count'], items.length)));
+    var currentPage = numberValue(pick(data, ['page', 'current_page'], pick(pagination, ['page', 'current_page'], page)), page);
+    var size = numberValue(pick(data, ['page_size', 'per_page', 'limit'], pick(pagination, ['page_size', 'per_page', 'limit'], pageSize)), pageSize);
+    var pages = numberValue(pick(data, ['total_pages', 'pages'], pick(pagination, ['total_pages', 'pages'], Math.max(1, Math.ceil(total / size)))), 1);
+    return { total: total, page: currentPage, pageSize: size, pages: Math.max(1, pages) };
+  }
+
+  function queryString(query) {
+    var params = new URLSearchParams();
+    Object.keys(query || {}).forEach(function (key) {
+      var value = query[key];
+      if (value === undefined || value === null || value === '') return;
+      if (Array.isArray(value)) {
+        value.forEach(function (item) { params.append(key, item); });
+      } else {
+        params.set(key, String(value));
+      }
+    });
+    var result = params.toString();
+    return result ? '?' + result : '';
+  }
+
+  function APIError(message, status, payload) {
+    this.name = 'APIError';
+    this.message = message || '请求失败';
+    this.status = status || 0;
+    this.payload = payload;
+  }
+  APIError.prototype = Object.create(Error.prototype);
+
+  async function apiRequest(path, options) {
+    options = options || {};
+    var headers = Object.assign({ Accept: 'application/json' }, options.headers || {});
+    if (options.auth !== false && state.token) headers.Authorization = 'Bearer ' + state.token;
+    if (options.body !== undefined && options.body !== null && !(options.body instanceof FormData)) {
+      headers['Content-Type'] = 'application/json';
+    }
+
+    var response;
+    try {
+      response = await fetch(path + queryString(options.query), {
+        method: options.method || 'GET',
+        headers: headers,
+        body: options.body === undefined || options.body === null
+          ? undefined
+          : (options.body instanceof FormData ? options.body : JSON.stringify(options.body)),
+        signal: options.signal
+      });
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw error;
+      throw new APIError('无法连接到 PanSou 服务', 0, null);
+    }
+
+    var text = await response.text();
+    var payload = null;
+    if (text) {
+      try {
+        payload = JSON.parse(text);
+      } catch (error) {
+        payload = { message: text };
+      }
+    }
+
+    var wrappedCode = payload && pick(payload, ['code'], null);
+    var numericCode = Number(wrappedCode);
+    var isWrappedError = wrappedCode !== null && Number.isFinite(numericCode) && numericCode >= 400;
+    if (!response.ok || isWrappedError) {
+      var status = isWrappedError ? numericCode : response.status;
+      var message = pick(payload, ['message', 'error', 'detail'], response.statusText || '请求失败');
+      if (status === 401 && !options.skipAuthRedirect) expireSession('登录状态已失效，请重新登录');
+      if (status === 403 && String(path).indexOf('/api/admin/') === 0 && !options.skipAuthRedirect) {
+        expireSession('当前账号需要管理员权限，请使用管理员账号登录');
+      }
+      throw new APIError(String(message), status, payload);
+    }
+
+    if (payload && Object.prototype.hasOwnProperty.call(payload, 'data')) return payload.data;
+    return payload === null ? {} : payload;
+  }
+
+  async function apiFallback(requests) {
+    var lastError = null;
+    for (var i = 0; i < requests.length; i += 1) {
+      try {
+        return await apiRequest(requests[i].path, requests[i].options || {});
+      } catch (error) {
+        lastError = error;
+        if (!(error instanceof APIError) || (error.status !== 404 && error.status !== 405)) throw error;
+      }
+    }
+    throw lastError || new APIError('请求失败', 0);
+  }
+
+  function setButtonLoading(button, loading, label) {
+    if (!button) return;
+    if (loading) {
+      button.dataset.originalHtml = button.innerHTML;
+      button.disabled = true;
+      button.innerHTML = icon('loader-circle', 'spin') + '<span>' + escapeHTML(label || '处理中') + '</span>';
+    } else {
+      button.disabled = false;
+      if (button.dataset.originalHtml) {
+        button.innerHTML = button.dataset.originalHtml;
+        delete button.dataset.originalHtml;
+      }
+    }
+    refreshIcons(button);
+  }
+
+  function showAlert(id, message, type) {
+    var element = byId(id);
+    if (!element) return;
+    if (!message) {
+      element.hidden = true;
+      element.textContent = '';
+      return;
+    }
+    element.className = 'inline-alert ' + (type || 'error');
+    element.textContent = message;
+    element.hidden = false;
+  }
+
+  function toast(message, type) {
+    type = type || 'info';
+    var region = byId('toast-region');
+    var node = document.createElement('div');
+    node.className = 'toast ' + type;
+    node.innerHTML = icon(type === 'success' ? 'circle-check' : type === 'error' ? 'circle-alert' : 'info') +
+      '<span>' + escapeHTML(message) + '</span>' +
+      '<button type="button" aria-label="关闭通知">' + icon('x') + '</button>';
+    region.appendChild(node);
+    refreshIcons(node);
+    var remove = function () {
+      if (node.parentNode) node.parentNode.removeChild(node);
+    };
+    node.querySelector('button').addEventListener('click', remove);
+    window.setTimeout(remove, 4200);
+  }
+
+  function tableLoading(bodyId, columns) {
+    byId(bodyId).innerHTML = '<tr class="table-loading"><td colspan="' + columns + '"><span>' + icon('loader-circle', 'spin') + '正在加载</span></td></tr>';
+    refreshIcons(byId(bodyId));
+  }
+
+  function closeAllDialogs() {
+    document.querySelectorAll('dialog[open]').forEach(function (dialog) {
+      dialog.close();
+    });
+    stopDetailPolling();
+  }
+
+  function showLogin(message) {
+    byId('app-shell').hidden = true;
+    byId('login-view').hidden = false;
+    var error = byId('login-error');
+    error.textContent = message || '';
+    error.hidden = !message;
+    window.setTimeout(function () { byId('login-username').focus(); }, 0);
+    closeAllDialogs();
+    stopRunPolling();
+  }
+
+  function showApp() {
+    byId('login-view').hidden = true;
+    byId('app-shell').hidden = false;
+    byId('account-name').textContent = state.username || '管理员';
+    byId('account-avatar').textContent = (state.username || 'A').trim().charAt(0).toUpperCase() || 'A';
+    refreshIcons();
+  }
+
+  function expireSession(message) {
+    state.token = '';
+    state.role = '';
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+    localStorage.removeItem(ROLE_KEY);
+    showLogin(message);
+  }
+
+  async function submitLogin(event) {
+    event.preventDefault();
+    var username = byId('login-username').value.trim();
+    var password = byId('login-password').value;
+    var error = byId('login-error');
+    error.hidden = true;
+    if (!username || !password) {
+      error.textContent = '请输入用户名和密码';
+      error.hidden = false;
+      return;
+    }
+
+    var button = byId('login-submit');
+    setButtonLoading(button, true, '登录中');
+    try {
+      var result = await apiRequest('/api/auth/login', {
+        method: 'POST',
+        body: { username: username, password: password },
+        auth: false,
+        skipAuthRedirect: true
+      });
+      var token = pick(result, ['token', 'access_token', 'jwt'], '');
+      if (!token) throw new APIError('登录响应中缺少令牌', 500, result);
+      state.token = token;
+      state.username = pick(result, ['username', 'user_name'], username);
+      state.role = pick(result, ['role'], pick(pick(result, ['user'], {}), ['role'], ''));
+      localStorage.setItem(TOKEN_KEY, state.token);
+      localStorage.setItem(USER_KEY, state.username);
+      if (state.role) localStorage.setItem(ROLE_KEY, state.role);
+      showApp();
+      navigate(location.hash.slice(1) || 'overview', true);
+      checkHealth();
+    } catch (loginError) {
+      error.textContent = loginError.message || '登录失败';
+      error.hidden = false;
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  async function logout() {
+    var token = state.token;
+    expireSession('');
+    if (token) {
+      try {
+        await fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + token } });
+      } catch (error) {
+        // Logout is client-side; a network failure does not retain the local token.
+      }
+    }
+  }
+
+  async function restoreSession() {
+    if (!state.token) {
+      showLogin('');
+      return;
+    }
+    var sessionToken = state.token;
+    showApp();
+    navigate(location.hash.slice(1) || 'overview', true);
+    checkHealth();
+    try {
+      var verified = await apiRequest('/api/auth/verify', { method: 'POST', skipAuthRedirect: true });
+      if (!state.token || state.token !== sessionToken) return;
+      state.role = pick(verified, ['role'], pick(pick(verified, ['user'], {}), ['role'], state.role));
+      if (state.role) localStorage.setItem(ROLE_KEY, state.role);
+    } catch (error) {
+      if (error instanceof APIError && error.status === 401) expireSession('登录状态已失效，请重新登录');
+    }
+  }
+
+  async function checkHealth() {
+    var dot = byId('health-dot');
+    var label = byId('health-label');
+    var detail = byId('health-detail');
+    try {
+      var health = await apiRequest('/api/health', { auth: false, skipAuthRedirect: true });
+      dot.className = 'status-dot online';
+      label.textContent = '服务正常';
+      var database = pick(health, ['database', 'database_status', 'db_status'], '');
+      detail.textContent = database ? '数据库 ' + database : 'API 服务';
+    } catch (error) {
+      dot.className = 'status-dot offline';
+      label.textContent = '服务不可用';
+      detail.textContent = error.message || '连接失败';
+    }
+  }
+
+  function navigate(view, force) {
+    if (!viewLabels[view]) view = 'overview';
+    if (!force && state.view === view && state.loaded[view]) return;
+    state.view = view;
+    if (location.hash !== '#' + view) history.replaceState(null, '', '#' + view);
+
+    document.querySelectorAll('.view').forEach(function (section) {
+      var active = section.dataset.page === view;
+      section.hidden = !active;
+      section.classList.toggle('active', active);
+    });
+    document.querySelectorAll('[data-view]').forEach(function (link) {
+      link.classList.toggle('active', link.dataset.view === view);
+      if (link.dataset.view === view) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+    });
+    byId('current-view-label').textContent = viewLabels[view];
+    closeMenu();
+    stopDetailPolling();
+    loadView(view, force);
+    byId('main-content').focus({ preventScroll: true });
+    window.setTimeout(resizeCharts, 50);
+  }
+
+  function loadView(view, force) {
+    if (view === 'overview') return loadOverview(force);
+    if (view === 'resources') return loadResources(force);
+    if (view === 'keywords') return state.keywords.tab === 'api' ? loadKeywordSources(force) : loadKeywords(force);
+    if (view === 'runs') return loadRuns({ force: force });
+    if (view === 'users') return loadUsers(force);
+    if (view === 'usage') return loadUsage(force);
+    if (view === 'sources') return loadSources(force);
+  }
+
+  function refreshCurrentView() {
+    state.loaded[state.view] = false;
+    var button = document.querySelector('[data-action="refresh-view"] svg');
+    if (button) button.classList.add('spin');
+    Promise.resolve(loadView(state.view, true)).finally(function () {
+      if (button) button.classList.remove('spin');
+      checkHealth();
+    });
+  }
+
+  function updateTimestamp() {
+    byId('last-updated').textContent = '更新于 ' + new Intl.DateTimeFormat('zh-CN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).format(new Date());
+  }
+
+  function openMenu() {
+    byId('sidebar').classList.add('open');
+    byId('sidebar-backdrop').hidden = false;
+  }
+
+  function closeMenu() {
+    byId('sidebar').classList.remove('open');
+    byId('sidebar-backdrop').hidden = true;
+  }
+
+  function resizeCharts() {
+    Object.keys(state.charts).forEach(function (key) {
+      if (state.charts[key] && typeof state.charts[key].resize === 'function') state.charts[key].resize();
+    });
+  }
+
+  function chartFor(id) {
+    var element = byId(id);
+    if (!element) return null;
+    if (!window.echarts) {
+      element.innerHTML = '<div class="no-active-batch"><span>图表组件加载失败</span></div>';
+      return null;
+    }
+    if (!state.charts[id]) state.charts[id] = window.echarts.init(element, null, { renderer: 'canvas' });
+    return state.charts[id];
+  }
+
+  function renderPagination(id, page, pages, scope) {
+    var container = byId(id);
+    if (pages <= 1) {
+      container.innerHTML = '';
+      return;
+    }
+    var values = [];
+    var start = Math.max(1, page - 2);
+    var end = Math.min(pages, page + 2);
+    if (start > 1) values.push(1);
+    if (start > 2) values.push('ellipsis-left');
+    for (var value = start; value <= end; value += 1) values.push(value);
+    if (end < pages - 1) values.push('ellipsis-right');
+    if (end < pages) values.push(pages);
+
+    var html = '<button class="page-button" type="button" data-page-scope="' + scope + '" data-page="' + (page - 1) + '" aria-label="上一页"' + (page <= 1 ? ' disabled' : '') + '>' + icon('chevron-left') + '</button>';
+    values.forEach(function (item) {
+      if (typeof item === 'string') {
+        html += '<span class="page-button" aria-hidden="true">…</span>';
+      } else {
+        html += '<button class="page-button' + (item === page ? ' active' : '') + '" type="button" data-page-scope="' + scope + '" data-page="' + item + '"' + (item === page ? ' aria-current="page"' : '') + '>' + item + '</button>';
+      }
+    });
+    html += '<button class="page-button" type="button" data-page-scope="' + scope + '" data-page="' + (page + 1) + '" aria-label="下一页"' + (page >= pages ? ' disabled' : '') + '>' + icon('chevron-right') + '</button>';
+    container.innerHTML = html;
+    refreshIcons(container);
+  }
+
+  function debounce(callback, delay) {
+    var timeout;
+    return function () {
+      var args = arguments;
+      clearTimeout(timeout);
+      timeout = setTimeout(function () { callback.apply(null, args); }, delay);
+    };
+  }
+
+  function copyText(text, label) {
+    if (!text) return;
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(function () {
+        toast((label || '内容') + '已复制', 'success');
+      }).catch(function () {
+        fallbackCopy(text, label);
+      });
+    } else {
+      fallbackCopy(text, label);
+    }
+  }
+
+  function fallbackCopy(text, label) {
+    var area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (error) { ok = false; }
+    document.body.removeChild(area);
+    toast(ok ? (label || '内容') + '已复制' : '复制失败，请手动复制', ok ? 'success' : 'error');
+  }
+
+  function safeExternalURL(value) {
+    var text = String(value || '').trim();
+    if (/^(https?:|magnet:|ed2k:)/i.test(text)) return text;
+    return '';
+  }
+
+  function setupDialogBehavior() {
+    document.querySelectorAll('dialog').forEach(function (dialog) {
+      dialog.addEventListener('click', function (event) {
+        if (event.target === dialog) {
+          if (dialog.id === 'credential-dialog') attemptCloseCredentials();
+          else dialog.close();
+        }
+      });
+      dialog.addEventListener('cancel', function (event) {
+        if (dialog.id === 'credential-dialog') {
+          event.preventDefault();
+          attemptCloseCredentials();
+        }
+      });
+      dialog.addEventListener('close', function () {
+        if (dialog.id === 'run-detail-dialog') stopDetailPolling();
+      });
+    });
+  }
+
+  function confirmAction(title, message, confirmLabel) {
+    return new Promise(function (resolve) {
+      var dialog = byId('confirm-dialog');
+      byId('confirm-title').textContent = title;
+      byId('confirm-message').textContent = message;
+      byId('confirm-submit').textContent = confirmLabel || '确认';
+      state.confirmCallback = resolve;
+      dialog.showModal();
+    });
+  }
+
+  function settleConfirm(result) {
+    var callback = state.confirmCallback;
+    state.confirmCallback = null;
+    byId('confirm-dialog').close();
+    if (callback) callback(result);
+  }
+
+  async function loadOverview(force) {
+    if (state.loaded.overview && !force) return;
+    state.loaded.overview = true;
+    showAlert('overview-alert', '');
+    byId('stat-grid').innerHTML = '<article class="stat-card skeleton-card"></article>'.repeat(4);
+    byId('recent-runs-body').innerHTML = '<tr class="table-loading"><td colspan="7"><span>' + icon('loader-circle', 'spin') + '正在加载</span></td></tr>';
+    refreshIcons();
+
+    var overviewResult;
+    var trendsResult;
+    try {
+      var settled = await Promise.allSettled([
+        apiRequest(API.overview),
+        apiRequest(API.trends, { query: { days: 7 } })
+      ]);
+      if (settled[0].status === 'rejected') throw settled[0].reason;
+      overviewResult = settled[0].value || {};
+      trendsResult = settled[1].status === 'fulfilled'
+        ? settled[1].value
+        : pick(overviewResult, ['trends', 'trend', 'daily_stats'], []);
+      state.overview = overviewResult;
+      renderOverview(overviewResult, trendsResult);
+      updateTimestamp();
+    } catch (error) {
+      state.loaded.overview = false;
+      showAlert('overview-alert', error.message || '概览数据加载失败');
+      renderOverview({}, []);
+    }
+  }
+
+  function renderOverview(data, trends) {
+    var statusCounts = normalizeStatusCounts(pick(data, ['status_counts', 'resource_statuses', 'validation_status'], {}));
+    var totalResources = numberValue(pick(data, ['resource_count', 'resources_total', 'total_resources', 'total'], 0));
+    var validCount = numberValue(pick(data, ['valid_count', 'valid_resources'], pick(statusCounts, ['valid'], 0)));
+    var todayNew = numberValue(pick(data, ['new_today', 'today_new', 'resources_today'], 0));
+    var sevenDayNew = numberValue(pick(data, ['last_seven_days_new', 'new_last_7_days', 'new_7d', 'seven_day_new'], 0));
+    var keywordCount = numberValue(pick(data, ['keyword_count', 'keywords_total', 'total_keywords'], 0));
+    var enabledKeywords = numberValue(pick(data, ['enabled_keyword_count', 'enabled_keywords'], keywordCount));
+
+    var statCards = [
+      { label: '资源总数', value: totalResources, icon: 'database', tone: 'blue', foot: validCount + ' 条有效链接' },
+      { label: '今日新增', value: todayNew, icon: 'sparkles', tone: 'green', foot: '截至当前时间' },
+      { label: '近 7 日新增', value: sevenDayNew, icon: 'trending-up', tone: 'amber', foot: '滚动 7 日统计' },
+      { label: '关键词', value: keywordCount, icon: 'tags', tone: 'violet', foot: enabledKeywords + ' 个已启用' }
+    ];
+    byId('stat-grid').innerHTML = statCards.map(function (card) {
+      return '<article class="stat-card">' +
+        '<div class="stat-head"><span>' + escapeHTML(card.label) + '</span><span class="stat-icon ' + card.tone + '">' + icon(card.icon) + '</span></div>' +
+        '<div class="stat-value">' + formatNumber(card.value) + '</div>' +
+        '<div class="stat-foot">' + escapeHTML(card.foot) + '</div>' +
+      '</article>';
+    }).join('');
+
+    renderTrendChart(trends);
+    renderStatusChart(statusCounts, totalResources);
+    renderSourceChart(pick(data, ['top_sources', 'source_contributions', 'source_stats', 'sources'], []));
+    renderActiveBatch(pick(data, ['active_run', 'active_batch', 'current_run', 'current_batch'], null));
+    renderRecentRuns(arrayFrom(pick(data, ['recent_runs', 'runs', 'collection_runs'], []), ['items', 'runs']));
+    refreshIcons();
+  }
+
+  function normalizeStatusCounts(data) {
+    if (Array.isArray(data)) {
+      return data.reduce(function (result, item) {
+        var key = String(pick(item, ['status', 'state'], 'unknown')).toLowerCase();
+        result[key] = numberValue(pick(item, ['count', 'resource_count', 'total'], 0));
+        return result;
+      }, {});
+    }
+    return data && typeof data === 'object' ? data : {};
+  }
+
+  function normalizeTrend(trends) {
+    if (Array.isArray(trends)) {
+      return trends.map(function (item) {
+        return {
+          date: pick(item, ['date', 'day', 'label'], ''),
+          added: numberValue(pick(item, ['new_resources', 'added', 'new_count', 'count'], 0)),
+          valid: numberValue(pick(item, ['discoveries', 'valid_resources', 'valid', 'valid_count'], 0))
+        };
+      });
+    }
+    var dates = pick(trends, ['dates', 'labels'], []);
+    var added = pick(trends, ['new_resources', 'added', 'counts'], []);
+    var valid = pick(trends, ['valid_resources', 'valid', 'valid_counts'], []);
+    return dates.map(function (date, index) {
+      return { date: date, added: numberValue(added[index]), valid: numberValue(valid[index]) };
+    });
+  }
+
+  function renderTrendChart(trends) {
+    var chart = chartFor('trend-chart');
+    if (!chart) return;
+    var points = normalizeTrend(trends);
+    chart.setOption({
+      animationDuration: 420,
+      color: ['#1769e0', '#16835b'],
+      tooltip: { trigger: 'axis', backgroundColor: '#17191d', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
+      grid: { left: 8, right: 10, top: 24, bottom: 4, containLabel: true },
+      xAxis: {
+        type: 'category',
+        boundaryGap: false,
+        data: points.map(function (point) { return String(point.date).slice(5); }),
+        axisLine: { lineStyle: { color: '#dfe2e6' } },
+        axisTick: { show: false },
+        axisLabel: { color: '#8c939d', fontSize: 10 }
+      },
+      yAxis: {
+        type: 'value',
+        minInterval: 1,
+        splitLine: { lineStyle: { color: '#eceef0', type: 'dashed' } },
+        axisLabel: { color: '#8c939d', fontSize: 10 }
+      },
+      series: [
+        {
+          name: '新增资源',
+          type: 'line',
+          smooth: 0.28,
+          symbol: 'circle',
+          symbolSize: 5,
+          lineStyle: { width: 2 },
+          areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(23,105,224,0.18)' }, { offset: 1, color: 'rgba(23,105,224,0.01)' }] } },
+          data: points.map(function (point) { return point.added; })
+        },
+        {
+          name: '发现次数',
+          type: 'line',
+          smooth: 0.28,
+          symbol: 'none',
+          lineStyle: { width: 1.5, type: 'dashed' },
+          data: points.map(function (point) { return point.valid; })
+        }
+      ]
+    }, true);
+  }
+
+  function renderStatusChart(counts, totalResources) {
+    var chart = chartFor('status-chart');
+    var statuses = [
+      { key: 'valid', label: '有效', color: '#16835b' },
+      { key: 'pending', label: '待检测', color: '#9ca3ad' },
+      { key: 'unknown', label: '未知', color: '#d28a24' },
+      { key: 'unsupported', label: '不支持', color: '#7557c5' },
+      { key: 'invalid', label: '失效', color: '#c23838' }
+    ];
+    var values = statuses.map(function (item) {
+      return { name: item.label, value: numberValue(pick(counts, [item.key], 0)), itemStyle: { color: item.color } };
+    });
+    var computedTotal = values.reduce(function (sum, item) { return sum + item.value; }, 0);
+    var total = totalResources || computedTotal;
+    if (chart) {
+      chart.setOption({
+        animationDuration: 420,
+        tooltip: { trigger: 'item', formatter: '{b}<br/>{c} ({d}%)', backgroundColor: '#17191d', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
+        title: {
+          text: formatNumber(total),
+          subtext: '全部资源',
+          left: 'center',
+          top: '34%',
+          textStyle: { color: '#1c1f24', fontSize: 20, fontWeight: 700 },
+          subtextStyle: { color: '#9299a3', fontSize: 9 }
+        },
+        series: [{
+          type: 'pie',
+          radius: ['57%', '77%'],
+          center: ['50%', '48%'],
+          avoidLabelOverlap: false,
+          label: { show: false },
+          emphasis: { scaleSize: 4 },
+          data: values
+        }]
+      }, true);
+    }
+    byId('status-legend').innerHTML = statuses.map(function (item) {
+      return '<span><i style="background:' + item.color + '"></i>' + item.label + ' ' + formatNumber(pick(counts, [item.key], 0)) + '</span>';
+    }).join('');
+  }
+
+  function normalizeSources(data) {
+    if (Array.isArray(data)) {
+      return data.map(function (item) {
+        return {
+          name: pick(item, ['source', 'name', 'label'], '') || ((pick(item, ['source_type'], '') ? pick(item, ['source_type'], '') + ':' : '') + pick(item, ['source_key'], '未知来源')),
+          count: numberValue(pick(item, ['count', 'resource_count', 'total', 'value'], 0))
+        };
+      }).sort(function (a, b) { return b.count - a.count; }).slice(0, 8);
+    }
+    if (data && typeof data === 'object') {
+      return Object.keys(data).map(function (key) { return { name: key, count: numberValue(data[key]) }; })
+        .sort(function (a, b) { return b.count - a.count; }).slice(0, 8);
+    }
+    return [];
+  }
+
+  function renderSourceChart(data) {
+    var chart = chartFor('source-chart');
+    if (!chart) return;
+    var sources = normalizeSources(data).reverse();
+    chart.setOption({
+      animationDuration: 420,
+      color: ['#1769e0'],
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: '#17191d', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
+      grid: { left: 8, right: 16, top: 12, bottom: 5, containLabel: true },
+      xAxis: {
+        type: 'value',
+        minInterval: 1,
+        splitLine: { lineStyle: { color: '#eceef0', type: 'dashed' } },
+        axisLabel: { color: '#8c939d', fontSize: 9 }
+      },
+      yAxis: {
+        type: 'category',
+        data: sources.map(function (source) { return String(source.name).slice(0, 18); }),
+        axisLine: { show: false },
+        axisTick: { show: false },
+        axisLabel: { color: '#59616b', fontSize: 10 }
+      },
+      series: [{
+        type: 'bar',
+        barMaxWidth: 13,
+        itemStyle: { borderRadius: [0, 3, 3, 0] },
+        data: sources.map(function (source) { return source.count; })
+      }]
+    }, true);
+  }
+
+  function renderActiveBatch(run) {
+    var container = byId('active-batch');
+    if (!run || !ACTIVE_STATUSES.includes(normalizedStatus(run))) {
+      container.innerHTML = '<div class="no-active-batch">' + icon('circle-check-big') + '<strong>当前没有运行中的批次</strong><span>调度器处于待命状态</span></div>';
+      refreshIcons(container);
+      return;
+    }
+    var progress = runProgress(run);
+    var id = pick(run, ['id', 'run_id', 'batch_id'], '—');
+    var added = numberValue(pick(run, ['new_count', 'created_count', 'added_count'], 0));
+    var duplicate = numberValue(pick(run, ['duplicate_count', 'duplicates'], 0));
+    container.innerHTML =
+      '<div class="batch-id">BATCH / ' + escapeHTML(id) + '</div>' +
+      '<div class="batch-progress-label"><span>' + progress.completed + ' / ' + progress.total + ' 关键词</span><span>' + progress.percent + '%</span></div>' +
+      '<div class="progress-track"><div class="progress-bar" style="width:' + progress.percent + '%"></div></div>' +
+      '<div class="batch-metrics">' +
+        '<div><strong>' + formatNumber(added) + '</strong><span>新增资源</span></div>' +
+        '<div><strong>' + formatNumber(duplicate) + '</strong><span>重复资源</span></div>' +
+        '<div><strong>' + escapeHTML(durationFrom(run)) + '</strong><span>运行时间</span></div>' +
+      '</div>';
+  }
+
+  function renderRecentRuns(runs) {
+    var body = byId('recent-runs-body');
+    if (!runs.length) {
+      body.innerHTML = '<tr class="table-empty"><td colspan="7">暂无任务记录</td></tr>';
+      return;
+    }
+    body.innerHTML = runs.slice(0, 6).map(function (run) {
+      var id = pick(run, ['id', 'run_id', 'batch_id'], '—');
+      var status = normalizedStatus(run);
+      var trigger = pick(run, ['trigger', 'trigger_type'], 'scheduled');
+      var keywordCount = numberValue(pick(run, ['keyword_count', 'total_keywords', 'total_items'], 0));
+      var added = numberValue(pick(run, ['new_count', 'created_count', 'added_count'], 0));
+      var duplicate = numberValue(pick(run, ['duplicate_count', 'duplicates'], 0));
+      return '<tr data-action="view-run" data-id="' + escapeHTML(id) + '" tabindex="0">' +
+        '<td class="mono">#' + escapeHTML(id) + '</td>' +
+        '<td>' + escapeHTML(triggerLabels[trigger] || trigger) + '</td>' +
+        '<td>' + statusBadge(status) + '</td>' +
+        '<td>' + formatNumber(keywordCount) + '</td>' +
+        '<td><span class="success-text">+' + formatNumber(added) + '</span> / ' + formatNumber(duplicate) + '</td>' +
+        '<td>' + escapeHTML(formatDate(pick(run, ['started_at', 'created_at', 'start_time'], null), true)) + '</td>' +
+        '<td>' + escapeHTML(durationFrom(run)) + '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  async function loadResources(force) {
+    if (state.loaded.resources && !force) return;
+    state.loaded.resources = true;
+    var serial = ++state.requestSerial.resources;
+    showAlert('resources-alert', '');
+    byId('resources-empty').hidden = true;
+    byId('resources-pagination').innerHTML = '';
+    tableLoading('resources-body', 7);
+
+    var query = Object.assign({}, state.resources.query, {
+      page: state.resources.page,
+      page_size: state.resources.pageSize
+    });
+    try {
+      var data = await apiRequest(API.resources, { query: query });
+      if (serial !== state.requestSerial.resources) return;
+      var items = arrayFrom(data, ['resources', 'items', 'results']);
+      var meta = paginationMeta(data, items, state.resources.page, state.resources.pageSize);
+      state.resources.items = items;
+      Object.assign(state.resources, meta);
+      renderResources();
+      updateTimestamp();
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      if (serial !== state.requestSerial.resources) return;
+      state.loaded.resources = false;
+      byId('resources-body').innerHTML = '';
+      showAlert('resources-alert', error.message || '资源加载失败');
+    }
+  }
+
+  function resourceSources(resource) {
+    var sources = arrayFrom(pick(resource, ['sources', 'resource_sources'], []), ['items', 'sources']);
+    if (!sources.length) {
+      var source = pick(resource, ['source', 'source_key', 'source_type'], '');
+      if (source) sources = [{ source: source, source_type: pick(resource, ['source_type'], '') }];
+    }
+    return sources;
+  }
+
+  function sourceBadge(source) {
+    var type = String(pick(source, ['source_type', 'type'], '')).toLowerCase();
+    var name = pick(source, ['source_key', 'source', 'name', 'channel', 'plugin'], type || '未知');
+    if (!type && String(name).indexOf(':') > -1) type = String(name).split(':')[0];
+    var display = sourceTypeLabels[type] || name;
+    if (name && name !== type && sourceTypeLabels[type]) display += ' · ' + name;
+    return '<span class="source-badge ' + escapeHTML(type) + '" title="' + escapeHTML(name) + '">' + escapeHTML(display) + '</span>';
+  }
+
+  function renderResources() {
+    var body = byId('resources-body');
+    var empty = byId('resources-empty');
+    byId('resource-total-label').textContent = formatNumber(state.resources.total) + ' 条资源';
+    if (!state.resources.items.length) {
+      body.innerHTML = '';
+      empty.hidden = false;
+      byId('resources-pagination').innerHTML = '';
+      refreshIcons(empty);
+      return;
+    }
+    empty.hidden = true;
+    body.innerHTML = state.resources.items.map(function (resource) {
+      var id = pick(resource, ['id', 'resource_id'], '');
+      var title = pick(resource, ['title', 'work_title', 'name', 'note'], '未命名资源');
+      var url = pick(resource, ['url', 'original_url', 'normalized_url', 'link'], '');
+      var diskType = String(pick(resource, ['disk_type', 'platform', 'cloud_type', 'type'], 'others')).toLowerCase();
+      var status = normalizedStatus(resource);
+      var sources = resourceSources(resource);
+      var discoveryCount = numberValue(pick(resource, ['discovery_count', 'found_count', 'discover_count'], 1));
+      var lastSeen = pick(resource, ['last_seen_at', 'last_discovered_at', 'updated_at', 'discovered_at'], null);
+      return '<tr>' +
+        '<td><div class="resource-cell"><div class="resource-title" title="' + escapeHTML(title) + '">' + escapeHTML(title) + '</div><div class="resource-link" title="' + escapeHTML(url) + '">' + escapeHTML(url) + '</div></div></td>' +
+        '<td><span class="type-badge">' + escapeHTML(diskLabels[diskType] || diskType) + '</span></td>' +
+        '<td>' + statusBadge(status) + '</td>' +
+        '<td><div class="source-stack">' + sources.slice(0, 2).map(sourceBadge).join('') + (sources.length > 2 ? '<span class="muted">+' + (sources.length - 2) + '</span>' : '') + '</div></td>' +
+        '<td>' + formatNumber(discoveryCount) + '</td>' +
+        '<td title="' + escapeHTML(formatDate(lastSeen, true)) + '">' + escapeHTML(relativeTime(lastSeen)) + '</td>' +
+        '<td><div class="row-actions">' +
+          '<button class="row-action" type="button" data-action="copy-resource" data-url="' + escapeHTML(url) + '" aria-label="复制链接" title="复制链接">' + icon('copy') + '</button>' +
+          '<button class="row-action" type="button" data-action="view-resource" data-id="' + escapeHTML(id) + '" aria-label="查看详情" title="查看详情">' + icon('panel-right-open') + '</button>' +
+        '</div></td>' +
+      '</tr>';
+    }).join('');
+    renderPagination('resources-pagination', state.resources.page, state.resources.pages, 'resources');
+    refreshIcons(body);
+  }
+
+  function readResourceFilters() {
+    var data = new FormData(byId('resource-filters'));
+    var values = Object.fromEntries(data.entries());
+    var query = {
+      q: String(values.q || '').trim(),
+      keyword_type: String(values.keyword_type || '').trim(),
+      platform: String(values.disk_type || '').trim(),
+      status: String(values.status || '').trim(),
+      include_invalid: String(values.status || '').trim() === 'invalid' ? 'true' : '',
+      source_type: String(values.source || '').trim(),
+      from: dateBoundary(values.date_from, false),
+      to: dateBoundary(values.date_to, true)
+    };
+    state.resources.query = query;
+    state.resources.page = 1;
+    state.loaded.resources = false;
+    loadResources(true);
+  }
+
+  function dateBoundary(value, exclusiveEnd) {
+    if (!value) return '';
+    var parts = String(value).split('-').map(Number);
+    if (parts.length !== 3 || parts.some(function (part) { return !Number.isFinite(part); })) return '';
+    var date = new Date(parts[0], parts[1] - 1, parts[2] + (exclusiveEnd ? 1 : 0), 0, 0, 0, 0);
+    return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+  }
+
+  async function openResourceDetail(id) {
+    var dialog = byId('resource-dialog');
+    var container = byId('resource-detail');
+    dialog.showModal();
+    container.innerHTML = '<div class="table-loading"><span>' + icon('loader-circle', 'spin') + '正在加载</span></div>';
+    refreshIcons(container);
+    try {
+      var data = await apiRequest(API.resources + '/' + encodeURIComponent(id));
+      var resource = pick(data, ['resource'], data);
+      renderResourceDetail(resource);
+    } catch (error) {
+      container.innerHTML = '<div class="inline-alert error">' + escapeHTML(error.message || '资源详情加载失败') + '</div>';
+    }
+  }
+
+  function renderResourceDetail(resource) {
+    var title = pick(resource, ['title', 'work_title', 'name', 'note'], '未命名资源');
+    var content = pick(resource, ['content', 'description'], '');
+    var url = pick(resource, ['url', 'original_url', 'normalized_url', 'link'], '');
+    var normalizedURL = pick(resource, ['normalized_url'], url);
+    var password = pick(resource, ['password', 'extraction_code', 'code'], '');
+    var diskType = String(pick(resource, ['disk_type', 'platform', 'cloud_type', 'type'], 'others')).toLowerCase();
+    var sources = resourceSources(resource);
+    var keywords = arrayFrom(pick(resource, ['keywords', 'resource_keywords'], []), ['items', 'keywords']);
+    var externalURL = safeExternalURL(url);
+    var linkHTML = '<div class="link-box">' +
+      (externalURL ? '<a href="' + escapeHTML(externalURL) + '" target="_blank" rel="noopener noreferrer">' + escapeHTML(url) + '</a>' : '<span class="resource-link">' + escapeHTML(url) + '</span>') +
+      '<button class="row-action" type="button" data-action="copy-resource" data-url="' + escapeHTML(url) + '" aria-label="复制链接">' + icon('copy') + '</button>' +
+    '</div>';
+
+    byId('resource-detail').innerHTML =
+      '<section class="detail-section">' +
+        '<h1 class="detail-title">' + escapeHTML(title) + '</h1>' +
+        (content ? '<p class="detail-content">' + escapeHTML(content) + '</p>' : '') +
+        '<div class="source-stack" style="margin-top:12px"><span class="type-badge">' + escapeHTML(diskLabels[diskType] || diskType) + '</span>' + statusBadge(normalizedStatus(resource)) + '</div>' +
+      '</section>' +
+      '<section class="detail-section"><h3>分享链接</h3>' + linkHTML +
+        '<dl class="detail-grid" style="margin-top:13px">' +
+          '<div class="detail-pair"><dt>提取码</dt><dd class="mono">' + escapeHTML(password || '无') + '</dd></div>' +
+          '<div class="detail-pair"><dt>规范化链接</dt><dd class="mono">' + escapeHTML(normalizedURL) + '</dd></div>' +
+        '</dl>' +
+      '</section>' +
+      '<section class="detail-section"><h3>发现信息</h3><dl class="detail-grid">' +
+        '<div class="detail-pair"><dt>首次发现</dt><dd>' + escapeHTML(formatDate(pick(resource, ['first_seen_at', 'first_discovered_at', 'created_at'], null), true)) + '</dd></div>' +
+        '<div class="detail-pair"><dt>最近发现</dt><dd>' + escapeHTML(formatDate(pick(resource, ['last_seen_at', 'last_discovered_at', 'updated_at'], null), true)) + '</dd></div>' +
+        '<div class="detail-pair"><dt>发现次数</dt><dd>' + formatNumber(pick(resource, ['discovery_count', 'found_count', 'discover_count'], 1)) + '</dd></div>' +
+        '<div class="detail-pair"><dt>最近检测</dt><dd>' + escapeHTML(formatDate(pick(resource, ['checked_at', 'last_checked_at'], null), true)) + '</dd></div>' +
+      '</dl></section>' +
+      '<section class="detail-section"><h3>关联关键词</h3><div class="source-stack">' +
+        (keywords.length ? keywords.map(function (keyword) {
+          return '<span class="type-badge">' + escapeHTML(typeof keyword === 'string' ? keyword : pick(keyword, ['keyword', 'name'], '')) + '</span>';
+        }).join('') : '<span class="muted">无关联关键词</span>') +
+      '</div></section>' +
+      '<section class="detail-section"><h3>来源明细</h3><div class="source-list">' +
+        (sources.length ? sources.map(function (source) {
+          return '<article class="source-item"><strong>' + escapeHTML(pick(source, ['source_key', 'source', 'name', 'channel', 'plugin'], '未知来源')) + '</strong>' +
+            sourceBadge(source) +
+            '<small class="full-row">发现于 ' + escapeHTML(formatDate(pick(source, ['discovered_at', 'created_at', 'first_seen_at'], null), true)) + '</small>' +
+          '</article>';
+        }).join('') : '<span class="muted">暂无来源记录</span>') +
+      '</div></section>';
+    refreshIcons(byId('resource-detail'));
+  }
+
+  async function loadKeywords(force, options) {
+    options = options || {};
+    if (state.loaded.keywords && !force && !options.picker) return state.keywords.items;
+    if (!options.picker) {
+      state.loaded.keywords = true;
+      var serial = ++state.requestSerial.keywords;
+      showAlert('keywords-alert', '');
+      byId('keywords-empty').hidden = true;
+      byId('keywords-pagination').innerHTML = '';
+      tableLoading('keywords-body', 8);
+    }
+    var query = options.picker
+      ? { page: 1, page_size: 1000, enabled: true }
+      : Object.assign({}, state.keywords.query, { page: state.keywords.page, page_size: state.keywords.pageSize });
+    try {
+      var data = await apiRequest(API.keywords, { query: query });
+      var items = arrayFrom(data, ['keywords', 'items', 'results']);
+      if (options.picker) return items;
+      if (serial !== state.requestSerial.keywords) return [];
+      var meta = paginationMeta(data, items, state.keywords.page, state.keywords.pageSize);
+      state.keywords.items = items;
+      Object.assign(state.keywords, meta);
+      var currentIds = new Set(items.map(function (item) { return String(pick(item, ['id', 'keyword_id'], '')); }));
+      state.keywords.selected.forEach(function (id) {
+        if (!currentIds.has(id)) state.keywords.selected.delete(id);
+      });
+      renderKeywords();
+      updateTimestamp();
+      return items;
+    } catch (error) {
+      if (options.picker) throw error;
+      if (serial !== state.requestSerial.keywords) return [];
+      state.loaded.keywords = false;
+      byId('keywords-body').innerHTML = '';
+      showAlert('keywords-alert', error.message || '关键词加载失败');
+      return [];
+    }
+  }
+
+  function renderKeywords() {
+    var body = byId('keywords-body');
+    var empty = byId('keywords-empty');
+    if (!state.keywords.items.length) {
+      body.innerHTML = '';
+      empty.hidden = false;
+      byId('keywords-pagination').innerHTML = '';
+      updateKeywordBulkBar();
+      refreshIcons(empty);
+      return;
+    }
+    empty.hidden = true;
+    body.innerHTML = state.keywords.items.map(function (keyword) {
+      var id = String(pick(keyword, ['id', 'keyword_id'], ''));
+      var name = pick(keyword, ['keyword', 'name'], '');
+      var type = String(pick(keyword, ['keyword_type', 'type'], 'general'));
+      var sourceType = String(pick(keyword, ['source_type'], 'manual'));
+      var sourceKey = pick(keyword, ['source_key', 'external_id'], '');
+      var priority = numberValue(pick(keyword, ['priority'], 0));
+      var cooldownSeconds = keywordCooldownSeconds(keyword);
+      var cooldownLabel = cooldownSeconds === null ? '默认（7 天）' : formatCooldownDays(cooldownSeconds);
+      var enabled = boolValue(pick(keyword, ['enabled', 'is_enabled'], true), true);
+      var selected = state.keywords.selected.has(id);
+      var nextEligible = pick(keyword, ['next_eligible_at', 'next_run_at'], null);
+      return '<tr>' +
+        '<td class="check-cell"><input type="checkbox" data-action="select-keyword" data-id="' + escapeHTML(id) + '" aria-label="选择 ' + escapeHTML(name) + '"' + (selected ? ' checked' : '') + '></td>' +
+        '<td><div class="keyword-name"><strong>' + escapeHTML(name) + '</strong><small>最近执行 ' + escapeHTML(relativeTime(pick(keyword, ['last_run_at', 'last_executed_at'], null))) + '</small></div></td>' +
+        '<td><div class="type-source-stack"><span class="type-badge">' + escapeHTML(keywordTypeLabels[type] || type) + '</span><span class="source-badge">' + escapeHTML(sourceTypeLabels[sourceType] || sourceType) + (sourceKey ? ' · ' + escapeHTML(sourceKey) : '') + '</span></div></td>' +
+        '<td><span class="mono">' + priority + '</span></td>' +
+        '<td>' + escapeHTML(cooldownLabel) + '</td>' +
+        '<td title="' + escapeHTML(formatDate(nextEligible, true)) + '">' + escapeHTML(nextEligible ? relativeTime(nextEligible) : '立即可用') + '</td>' +
+        '<td><button class="toggle-field compact-toggle" type="button" data-action="toggle-keyword" data-id="' + escapeHTML(id) + '" role="switch" aria-checked="' + enabled + '" aria-label="' + (enabled ? '停用' : '启用') + ' ' + escapeHTML(name) + '"><input type="checkbox"' + (enabled ? ' checked' : '') + ' tabindex="-1"><span class="toggle" aria-hidden="true"></span></button></td>' +
+        '<td><div class="row-actions">' +
+          '<button class="row-action" type="button" data-action="run-keyword" data-id="' + escapeHTML(id) + '" aria-label="采集 ' + escapeHTML(name) + '" title="立即采集">' + icon('play') + '</button>' +
+          '<button class="row-action" type="button" data-action="edit-keyword" data-id="' + escapeHTML(id) + '" aria-label="编辑 ' + escapeHTML(name) + '" title="编辑">' + icon('pencil') + '</button>' +
+          '<button class="row-action danger" type="button" data-action="delete-keyword" data-id="' + escapeHTML(id) + '" aria-label="删除 ' + escapeHTML(name) + '" title="删除">' + icon('trash-2') + '</button>' +
+        '</div></td>' +
+      '</tr>';
+    }).join('');
+    renderPagination('keywords-pagination', state.keywords.page, state.keywords.pages, 'keywords');
+    updateKeywordBulkBar();
+    refreshIcons(body);
+  }
+
+  function updateKeywordFilters() {
+    state.keywords.query = {
+      q: byId('keyword-search').value.trim(),
+      enabled: byId('keyword-enabled-filter').value,
+      keyword_type: byId('keyword-type-filter').value
+    };
+    state.keywords.page = 1;
+    state.keywords.selected.clear();
+    state.loaded.keywords = false;
+    loadKeywords(true);
+  }
+
+  function updateKeywordBulkBar() {
+    var count = state.keywords.selected.size;
+    byId('keyword-selected-count').textContent = count;
+    byId('keyword-bulkbar').hidden = count === 0;
+    var all = state.keywords.items.length > 0 && state.keywords.items.every(function (item) {
+      return state.keywords.selected.has(String(pick(item, ['id', 'keyword_id'], '')));
+    });
+    byId('select-all-keywords').checked = all;
+    byId('select-all-keywords').indeterminate = count > 0 && !all;
+  }
+
+  function setKeywordDialogMode(mode, locked) {
+    var form = byId('keyword-form');
+    mode = mode === 'api' ? 'api' : 'manual';
+    form.dataset.mode = mode;
+    document.querySelectorAll('[data-keyword-mode]').forEach(function (button) {
+      var active = button.dataset.keywordMode === mode;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+      button.disabled = Boolean(locked) && !active;
+    });
+    document.querySelectorAll('[data-keyword-mode-panel]').forEach(function (panel) {
+      panel.hidden = panel.dataset.keywordModePanel !== mode;
+    });
+    byId('keyword-save').querySelector('span').textContent = mode === 'api' ? '保存 API 来源' : '保存';
+    byId('keyword-dialog-title').textContent = mode === 'api'
+      ? (state.keywordSources.editing ? '编辑 API 关键词来源' : '新增 API 关键词来源')
+      : (form.elements.id.value ? '编辑关键词' : '新增关键词');
+  }
+
+  function openKeywordDialog(keyword, mode) {
+    var dialog = byId('keyword-dialog');
+    var form = byId('keyword-form');
+    form.reset();
+    state.keywordSources.editing = null;
+    state.keywordSources.testResponse = null;
+    state.keywordSources.selectedPath = '';
+    state.keywordSources.testedSignature = '';
+    state.keywordSources.originalSignature = '';
+    byId('keyword-form-error').hidden = true;
+    form.elements.id.value = keyword ? pick(keyword, ['id', 'keyword_id'], '') : '';
+    form.elements.keyword.value = keyword ? pick(keyword, ['keyword', 'name'], '') : '';
+    form.elements.keyword_type.value = keyword ? pick(keyword, ['keyword_type', 'type'], 'general') : 'general';
+    form.elements.source_type.value = keyword ? pick(keyword, ['source_type'], 'manual') : 'manual';
+    form.elements.source_key.value = keyword ? pick(keyword, ['source_key'], '') : '';
+    form.elements.priority.value = keyword ? numberValue(pick(keyword, ['priority'], 0)) : 0;
+    var seconds = keyword ? keywordCooldownSeconds(keyword) : null;
+    form.elements.cooldown_days.value = seconds === null ? '' : formatCooldownInputDays(seconds);
+    form.elements.enabled.checked = keyword ? boolValue(pick(keyword, ['enabled', 'is_enabled'], true), true) : true;
+    resetKeywordAPIBuilder();
+    setKeywordDialogMode(mode === 'api' ? 'api' : 'manual', Boolean(keyword));
+    dialog.showModal();
+    window.setTimeout(function () { (form.dataset.mode === 'api' ? form.elements.api_name : form.elements.keyword).focus(); }, 0);
+  }
+
+  function keywordPayloadFromForm(form) {
+    return {
+      keyword: form.elements.keyword.value.trim(),
+      keyword_type: form.elements.keyword_type.value.trim() || 'general',
+      source_type: form.elements.source_type.value || 'manual',
+      source_key: form.elements.source_key.value.trim(),
+      priority: numberValue(form.elements.priority.value),
+      cooldown_seconds: form.elements.cooldown_days.value.trim() === '' ? null : Math.round(numberValue(form.elements.cooldown_days.value) * 86400),
+      enabled: form.elements.enabled.checked
+    };
+  }
+
+  async function saveKeyword(event) {
+    event.preventDefault();
+    var form = event.currentTarget;
+    if (form.dataset.mode === 'api') {
+      await saveKeywordAPISource(form);
+      return;
+    }
+    var id = form.elements.id.value;
+    var payload = keywordPayloadFromForm(form);
+    var error = byId('keyword-form-error');
+    error.hidden = true;
+    if (!payload.keyword) {
+      error.textContent = '关键词不能为空';
+      error.hidden = false;
+      return;
+    }
+    var button = byId('keyword-save');
+    setButtonLoading(button, true, '保存中');
+    try {
+      await apiRequest(id ? API.keywords + '/' + encodeURIComponent(id) : API.keywords, {
+        method: id ? 'PUT' : 'POST',
+        body: payload
+      });
+      byId('keyword-dialog').close();
+      toast(id ? '关键词已更新' : '关键词已新增', 'success');
+      state.loaded.keywords = false;
+      await loadKeywords(true);
+    } catch (saveError) {
+      error.textContent = saveError.message || '保存失败';
+      error.hidden = false;
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  async function toggleKeyword(id, button) {
+    var keyword = state.keywords.items.find(function (item) {
+      return String(pick(item, ['id', 'keyword_id'], '')) === String(id);
+    });
+    if (!keyword) return;
+    var nextEnabled = !boolValue(pick(keyword, ['enabled', 'is_enabled'], true), true);
+    button.disabled = true;
+    try {
+      await apiRequest(API.keywords + '/' + encodeURIComponent(id) + '/toggle', { method: 'POST', body: { enabled: nextEnabled } });
+      keyword.enabled = nextEnabled;
+      keyword.is_enabled = nextEnabled;
+      renderKeywords();
+      toast(nextEnabled ? '关键词已启用' : '关键词已停用', 'success');
+    } catch (error) {
+      toast(error.message || '状态更新失败', 'error');
+      button.disabled = false;
+    }
+  }
+
+  function keywordPayloadFromItem(keyword) {
+    return {
+      keyword: pick(keyword, ['keyword', 'name'], ''),
+      keyword_type: pick(keyword, ['keyword_type', 'type'], 'general'),
+      source_type: pick(keyword, ['source_type'], 'manual'),
+      source_key: pick(keyword, ['source_key'], ''),
+      priority: numberValue(pick(keyword, ['priority'], 0)),
+      cooldown_seconds: keywordCooldownSeconds(keyword),
+      enabled: boolValue(pick(keyword, ['enabled', 'is_enabled'], true), true)
+    };
+  }
+
+  function keywordCooldownSeconds(keyword) {
+    if (keyword && Object.prototype.hasOwnProperty.call(keyword, 'cooldown_seconds')) {
+      return keyword.cooldown_seconds === null || keyword.cooldown_seconds === '' ? null : numberValue(keyword.cooldown_seconds);
+    }
+    var legacyDays = pick(keyword, ['cooldown_days'], null);
+    if (legacyDays !== null) return Math.round(numberValue(legacyDays) * 86400);
+    var legacyHours = pick(keyword, ['cooldown_hours'], null);
+    return legacyHours === null ? null : Math.round(numberValue(legacyHours) * 3600);
+  }
+
+  function formatCooldownDays(seconds) {
+    var numeric = numberValue(seconds);
+    if (numeric > 0 && numeric < 86400) {
+      var hours = Math.round(numeric / 360) / 10;
+      return hours + ' 小时';
+    }
+    var days = numeric / 86400;
+    var rounded = Math.round(days * 10) / 10;
+    return rounded + ' 天';
+  }
+
+  function formatCooldownInputDays(seconds) {
+    var days = numberValue(seconds) / 86400;
+    return String(Math.round(days * 1000000) / 1000000);
+  }
+
+  async function deleteKeyword(id) {
+    var keyword = state.keywords.items.find(function (item) {
+      return String(pick(item, ['id', 'keyword_id'], '')) === String(id);
+    });
+    if (!keyword) return;
+    var confirmed = await confirmAction('删除关键词', '将删除“' + pick(keyword, ['keyword', 'name'], '') + '”，历史任务记录不会被移除。', '删除');
+    if (!confirmed) return;
+    try {
+      await apiRequest(API.keywords + '/' + encodeURIComponent(id), { method: 'DELETE' });
+      state.keywords.selected.delete(String(id));
+      toast('关键词已删除', 'success');
+      state.loaded.keywords = false;
+      loadKeywords(true);
+    } catch (error) {
+      toast(error.message || '删除失败', 'error');
+    }
+  }
+
+  function switchKeywordTab(tab) {
+    state.keywords.tab = tab === 'api' ? 'api' : 'list';
+    document.querySelectorAll('[data-keyword-tab]').forEach(function (button) {
+      var active = button.dataset.keywordTab === state.keywords.tab;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-keyword-panel]').forEach(function (panel) {
+      panel.hidden = panel.dataset.keywordPanel !== state.keywords.tab;
+    });
+    var createLabel = document.querySelector('[data-action="new-keyword"] span');
+    if (createLabel) createLabel.textContent = state.keywords.tab === 'api' ? '新增 API 来源' : '新增关键词';
+    if (state.keywords.tab === 'api') loadKeywordSources(false);
+    else loadKeywords(false);
+  }
+
+  async function loadKeywordSources(force) {
+    if (state.keywordSources.loaded && !force) return;
+    state.keywordSources.loaded = true;
+    var serial = ++state.keywordSources.requestSerial;
+    showAlert('keyword-api-alert', '');
+    tableLoading('keyword-api-body', 6);
+    byId('keyword-api-empty').hidden = true;
+    try {
+      var data = await apiRequest(API.keywordAPISources, { query: { page: 1, page_size: 200 } });
+      if (serial !== state.keywordSources.requestSerial) return;
+      state.keywordSources.items = arrayFrom(data, ['items', 'sources', 'results']);
+      renderKeywordSources();
+      updateTimestamp();
+    } catch (error) {
+      if (serial !== state.keywordSources.requestSerial) return;
+      state.keywordSources.loaded = false;
+      state.keywordSources.items = [];
+      byId('keyword-api-body').innerHTML = '';
+      showAlert('keyword-api-alert', error.message || 'API 关键词来源加载失败');
+    }
+  }
+
+  function keywordSourceID(source) {
+    return String(pick(source, ['id', 'source_id'], ''));
+  }
+
+  function keywordSourceStatus(source) {
+    var status = String(pick(source, ['last_status', 'status'], 'pending'));
+    var labels = { pending: '尚未同步', success: '同步成功', partial: '部分成功', failed: '同步失败', running: '同步中' };
+    return '<span class="status-badge status-' + escapeHTML(status) + '">' + escapeHTML(labels[status] || status) + '</span>';
+  }
+
+  function renderKeywordSources() {
+    var body = byId('keyword-api-body');
+    var empty = byId('keyword-api-empty');
+    var items = state.keywordSources.items || [];
+    var enabledCount = items.filter(function (item) { return boolValue(item.enabled, false); }).length;
+    var extractedCount = items.reduce(function (total, item) { return total + numberValue(pick(item, ['last_item_count', 'item_count'], 0)); }, 0);
+    byId('keyword-api-total').textContent = String(items.length);
+    byId('keyword-api-enabled').textContent = String(enabledCount);
+    byId('keyword-api-items').textContent = formatNumber(extractedCount);
+    if (!items.length) {
+      body.innerHTML = '';
+      empty.hidden = false;
+      refreshIcons(empty);
+      return;
+    }
+    empty.hidden = true;
+    body.innerHTML = items.map(function (source) {
+      var id = keywordSourceID(source);
+      var method = String(pick(source, ['request_method', 'method'], 'GET')).toUpperCase();
+      var url = pick(source, ['request_url', 'url'], '');
+      var interval = Math.max(1, Math.round(numberValue(pick(source, ['sync_interval_seconds'], 3600)) / 60));
+      var enabled = boolValue(source.enabled, false);
+      var requestCount = numberValue(pick(source, ['last_request_count'], 0));
+      var successCount = numberValue(pick(source, ['last_success_count'], 0));
+      var failureCount = numberValue(pick(source, ['last_failure_count'], 0));
+      var roundSummary = requestCount > 0 ? ('请求 ' + requestCount + ' 轮 · 成功 ' + successCount + (failureCount ? ' · 失败 ' + failureCount : '')) : '';
+      return '<tr><td><div class="keyword-api-name"><strong>' + escapeHTML(source.name || '未命名来源') + '</strong><small>' + (enabled ? '自动同步已启用' : '草稿 / 已停用') + '</small></div></td>' +
+        '<td><div class="api-request-summary"><span class="http-status status-ok">' + escapeHTML(method) + '</span><code title="' + escapeHTML(url) + '">' + escapeHTML(url) + '</code></div></td>' +
+        '<td>每 ' + interval + ' 分钟<small class="table-subline">下次 ' + escapeHTML(relativeTime(pick(source, ['next_sync_at'], null))) + '</small></td>' +
+        '<td>' + keywordSourceStatus(source) + '<small class="table-subline">' + escapeHTML(roundSummary || pick(source, ['last_error'], '') || relativeTime(pick(source, ['last_synced_at'], null))) + '</small></td>' +
+        '<td><strong>' + formatNumber(pick(source, ['last_item_count'], 0)) + '</strong></td>' +
+        '<td><div class="row-actions"><button class="row-action" type="button" data-action="sync-keyword-api" data-id="' + escapeHTML(id) + '" title="立即同步" aria-label="立即同步 ' + escapeHTML(source.name || '') + '">' + icon('refresh-cw') + '</button><button class="row-action" type="button" data-action="copy-keyword-api" data-id="' + escapeHTML(id) + '" title="复制来源" aria-label="复制 ' + escapeHTML(source.name || '') + '">' + icon('copy') + '</button><button class="row-action" type="button" data-action="edit-keyword-api" data-id="' + escapeHTML(id) + '" title="编辑" aria-label="编辑 ' + escapeHTML(source.name || '') + '">' + icon('pencil') + '</button><button class="row-action danger" type="button" data-action="delete-keyword-api" data-id="' + escapeHTML(id) + '" title="删除" aria-label="删除 ' + escapeHTML(source.name || '') + '">' + icon('trash-2') + '</button></div></td></tr>';
+    }).join('');
+    refreshIcons(body);
+  }
+
+  function normalizeKVValues(values) {
+    if (!values) return [];
+    if (Array.isArray(values)) return values.map(function (item) { return { key: pick(item, ['key', 'name'], ''), value: pick(item, ['value'], '') }; });
+    return Object.keys(values).map(function (key) { return { key: key, value: values[key] }; });
+  }
+
+  function renderAPIRows(targetID, values) {
+    var target = byId(targetID);
+    var rows = normalizeKVValues(values);
+    target.innerHTML = rows.map(function (item) {
+      return '<div class="api-kv-row"><input data-api-kv-key type="text" placeholder="键" value="' + escapeHTML(item.key) + '"><input data-api-kv-value type="text" placeholder="值" value="' + escapeHTML(item.value) + '"><button class="row-action danger" type="button" data-action="remove-api-kv" aria-label="删除字段">' + icon('x') + '</button></div>';
+    }).join('');
+    refreshIcons(target);
+  }
+
+  function addAPIRow(targetID, key, value) {
+    var target = byId(targetID);
+    var wrapper = document.createElement('div');
+    wrapper.className = 'api-kv-row';
+    wrapper.innerHTML = '<input data-api-kv-key type="text" placeholder="键" value="' + escapeHTML(key || '') + '"><input data-api-kv-value type="text" placeholder="值" value="' + escapeHTML(value || '') + '"><button class="row-action danger" type="button" data-action="remove-api-kv" aria-label="删除字段">' + icon('x') + '</button>';
+    target.appendChild(wrapper);
+    refreshIcons(wrapper);
+    wrapper.querySelector('[data-api-kv-key]').focus();
+  }
+
+  function collectAPIRows(targetID) {
+    var result = {};
+    byId(targetID).querySelectorAll('.api-kv-row').forEach(function (row) {
+      var key = row.querySelector('[data-api-kv-key]').value.trim();
+      if (key) result[key] = row.querySelector('[data-api-kv-value]').value;
+    });
+    return result;
+  }
+
+  var apiEditorDefinitions = {
+    query: { rows: 'api-query-rows', json: 'api-query-json', error: 'api-query-json-error', label: 'Query' },
+    header: { rows: 'api-header-rows', json: 'api-header-json', error: 'api-header-json-error', label: 'Header' },
+    form: { rows: 'api-form-rows', json: 'api-form-json', error: 'api-form-json-error', label: 'Form' }
+  };
+
+  function formatAPIObject(value) {
+    return JSON.stringify(value && typeof value === 'object' && !Array.isArray(value) ? value : {}, null, 2);
+  }
+
+  function parseAPIObjectEditor(target) {
+    var definition = apiEditorDefinitions[target];
+    var text = byId(definition.json).value.trim();
+    var value;
+    try { value = text ? JSON.parse(text) : {}; }
+    catch (error) { throw new Error(definition.label + ' JSON 格式无效：' + error.message); }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(definition.label + ' JSON 的根节点必须是对象');
+    }
+    var normalized = {};
+    Object.keys(value).forEach(function (key) {
+      var item = value[key];
+      if (item !== null && (item === undefined || typeof item === 'object')) {
+        throw new Error(definition.label + ' JSON 的字段值必须是文本、数字、布尔值或 null：' + key);
+      }
+      normalized[key] = item === null ? '' : String(item);
+    });
+    return normalized;
+  }
+
+  function showAPIEditorError(target, message) {
+    var error = byId(apiEditorDefinitions[target].error);
+    error.textContent = message || '';
+    error.hidden = !message;
+    byId(apiEditorDefinitions[target].json).setAttribute('aria-invalid', message ? 'true' : 'false');
+  }
+
+  function renderAPIEditorMode(target) {
+    var mode = state.keywordSources.editorModes[target] || 'kv';
+    var definition = apiEditorDefinitions[target];
+    document.querySelectorAll('[data-editor-target="' + target + '"]').forEach(function (button) {
+      var active = button.dataset.editorMode === mode;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-api-editor-panel^="' + target + '-"]').forEach(function (panel) {
+      panel.hidden = panel.dataset.apiEditorPanel !== target + '-' + mode;
+    });
+    var section = target === 'form' ? byId('api-body-form') : document.querySelector('[data-api-config="' + target + '"]');
+    var addButton = section ? section.querySelector('.api-add-row') : null;
+    if (addButton) addButton.hidden = mode !== 'kv';
+  }
+
+  function switchAPIEditorMode(target, nextMode) {
+    var definition = apiEditorDefinitions[target];
+    if (!definition || (nextMode !== 'kv' && nextMode !== 'json')) return false;
+    var currentMode = state.keywordSources.editorModes[target] || 'kv';
+    if (currentMode === nextMode) return true;
+    if (currentMode === 'kv') {
+      byId(definition.json).value = formatAPIObject(collectAPIRows(definition.rows));
+    } else {
+      try {
+        var value = parseAPIObjectEditor(target);
+        renderAPIRows(definition.rows, value);
+        byId(definition.json).value = formatAPIObject(value);
+        showAPIEditorError(target, '');
+      } catch (error) {
+        showAPIEditorError(target, error.message);
+        byId(definition.json).focus();
+        return false;
+      }
+    }
+    state.keywordSources.editorModes[target] = nextMode;
+    renderAPIEditorMode(target);
+    return true;
+  }
+
+  function validateAPIObjectEditor(target) {
+    if ((state.keywordSources.editorModes[target] || 'kv') !== 'json') return true;
+    try {
+      var value = parseAPIObjectEditor(target);
+      byId(apiEditorDefinitions[target].json).value = formatAPIObject(value);
+      renderAPIRows(apiEditorDefinitions[target].rows, value);
+      showAPIEditorError(target, '');
+      return true;
+    } catch (error) {
+      showAPIEditorError(target, error.message);
+      return false;
+    }
+  }
+
+  function collectAPIEditorValue(target) {
+    var definition = apiEditorDefinitions[target];
+    return state.keywordSources.editorModes[target] === 'json' ? parseAPIObjectEditor(target) : collectAPIRows(definition.rows);
+  }
+
+  function resetAPIEditor(target, value) {
+    var definition = apiEditorDefinitions[target];
+    var normalized = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    renderAPIRows(definition.rows, normalized);
+    byId(definition.json).value = formatAPIObject(normalized);
+    state.keywordSources.editorModes[target] = 'kv';
+    showAPIEditorError(target, '');
+    renderAPIEditorMode(target);
+  }
+
+  function updateAPIIterationPreview() {
+    var enabled = byId('api-iteration-enabled').checked;
+    var fields = byId('api-iteration-fields');
+    fields.hidden = !enabled;
+    var location = byId('api-iteration-location').value;
+    var bodyType = byId('api-body-type').value;
+    var hint = byId('api-iteration-hint');
+    if (location === 'query') hint.textContent = '将覆盖 Query 中对应键的值；现场测试只注入起始值。';
+    else if (location === 'header') hint.textContent = '将以十进制文本覆盖 Header 中对应键的值。';
+    else if (bodyType === 'json') hint.textContent = '使用点路径定位 JSON 字段，例如 pagination.offset。';
+    else if (bodyType === 'form') hint.textContent = '参数路径为 Form 字段名，迭代值将按文本发送。';
+    else hint.textContent = 'Body 迭代仅支持 JSON 或 Form，请先调整 Body 类型。';
+    if (!enabled) return;
+    var start = Math.trunc(numberValue(byId('api-iteration-start').value, 0));
+    var step = Math.trunc(numberValue(byId('api-iteration-step').value, 20));
+    var count = Math.max(1, Math.min(100, Math.trunc(numberValue(byId('api-iteration-count').value, 1))));
+    var delay = Math.max(0, Math.min(3600, Math.trunc(numberValue(byId('api-iteration-delay').value, 0))));
+    var previewCount = Math.min(count, 6);
+    var values = [];
+    for (var index = 0; index < previewCount; index += 1) values.push(start + step * index);
+    var sequence = values.join(' → ');
+    if (count > 6) sequence += ' → … → ' + (start + step * (count - 1));
+    var seconds = Math.max(0, (count - 1) * delay);
+    var duration = seconds === 0 ? '立即完成' : (seconds < 60 ? seconds + ' 秒' : (seconds % 60 === 0 ? (seconds / 60) + ' 分钟' : Math.floor(seconds / 60) + ' 分 ' + (seconds % 60) + ' 秒'));
+    byId('api-iteration-preview').innerHTML = '<div><span>请求序列 · 共 ' + count + ' 轮</span><strong>' + escapeHTML(sequence) + '</strong></div><div><span>预计最低耗时</span><strong>' + escapeHTML(duration) + '</strong><small>不含网络请求时间</small></div>';
+  }
+
+  function syncAPIBodyEditor() {
+    var type = byId('api-body-type').value;
+    ['json', 'form', 'raw'].forEach(function (name) { byId('api-body-' + name).hidden = type !== name; });
+    updateAPIIterationPreview();
+  }
+
+  function resetKeywordAPIBuilder() {
+    var form = byId('keyword-form');
+    resetAPIEditor('query', {});
+    resetAPIEditor('header', {});
+    resetAPIEditor('form', {});
+    form.elements.request_method.value = 'GET';
+    form.elements.body_type.value = 'none';
+    form.elements.timeout_seconds.value = 15;
+    form.elements.sync_interval_minutes.value = 60;
+    form.elements.default_keyword_type.value = 'general';
+    form.elements.default_priority.value = 0;
+    form.elements.default_cooldown_days.value = '';
+    form.elements.default_enabled.checked = true;
+    form.elements.api_enabled.checked = false;
+    form.elements.iteration_enabled.checked = false;
+    form.elements.iteration_location.value = 'query';
+    form.elements.iteration_path.value = '';
+    form.elements.iteration_start.value = 0;
+    form.elements.iteration_step.value = 20;
+    form.elements.iteration_count.value = 1;
+    form.elements.iteration_delay_seconds.value = 0;
+    byId('api-response-path').value = '';
+    byId('api-test-meta').innerHTML = '<span>尚未测试</span>';
+    byId('api-json-tree').innerHTML = '<div class="api-inspector-empty">' + icon('braces') + '<span>测试成功后在此查看 JSON</span></div>';
+    byId('api-extract-preview').innerHTML = '<strong>提取预览</strong><p>选择路径后显示匹配值。</p>';
+    syncAPIBodyEditor();
+    updateAPIIterationPreview();
+    refreshIcons(byId('keyword-api-fields'));
+  }
+
+  function keywordAPIPayload(form) {
+    var bodyType = form.elements.body_type.value;
+    var requestBody = null;
+    if (bodyType === 'json') {
+      var jsonText = form.elements.json_body.value.trim();
+      try { requestBody = jsonText ? JSON.parse(jsonText) : {}; }
+      catch (error) { throw new Error('JSON Body 格式无效：' + error.message); }
+    } else if (bodyType === 'form') requestBody = collectAPIEditorValue('form');
+    else if (bodyType === 'raw') requestBody = form.elements.raw_body.value;
+    return {
+      name: form.elements.api_name.value.trim(),
+      enabled: form.elements.api_enabled.checked,
+      request_method: form.elements.request_method.value,
+      request_url: form.elements.request_url.value.trim(),
+      request_headers: collectAPIEditorValue('header'),
+      query_params: collectAPIEditorValue('query'),
+      body_type: bodyType,
+      request_body: requestBody,
+      proxy_url: form.elements.proxy_url.value.trim(),
+      timeout_seconds: numberValue(form.elements.timeout_seconds.value, 15),
+      response_path: form.elements.response_path.value.trim(),
+      sync_interval_seconds: Math.max(60, Math.round(numberValue(form.elements.sync_interval_minutes.value, 60) * 60)),
+      default_keyword_type: form.elements.default_keyword_type.value.trim() || 'general',
+      default_priority: numberValue(form.elements.default_priority.value),
+      default_cooldown_seconds: form.elements.default_cooldown_days.value.trim() === '' ? null : Math.round(numberValue(form.elements.default_cooldown_days.value) * 86400),
+      default_enabled: form.elements.default_enabled.checked,
+      iteration_enabled: form.elements.iteration_enabled.checked,
+      iteration_location: form.elements.iteration_location.value || 'query',
+      iteration_path: form.elements.iteration_path.value.trim(),
+      iteration_start: Math.trunc(numberValue(form.elements.iteration_start.value, 0)),
+      iteration_step: Math.trunc(numberValue(form.elements.iteration_step.value, 20)),
+      iteration_count: Math.max(1, Math.min(100, Math.trunc(numberValue(form.elements.iteration_count.value, 1)))),
+      iteration_delay_seconds: Math.max(0, Math.min(3600, Math.trunc(numberValue(form.elements.iteration_delay_seconds.value, 0))))
+    };
+  }
+
+  function keywordAPIRequestSignature(payload) {
+    return JSON.stringify({
+      request_method: payload.request_method,
+      request_url: payload.request_url,
+      request_headers: payload.request_headers,
+      query_params: payload.query_params,
+      body_type: payload.body_type,
+      request_body: payload.request_body,
+      proxy_url: payload.proxy_url,
+      timeout_seconds: payload.timeout_seconds,
+      iteration_enabled: payload.iteration_enabled,
+      iteration_location: payload.iteration_location,
+      iteration_path: payload.iteration_path,
+      iteration_start: payload.iteration_start,
+      iteration_step: payload.iteration_step,
+      iteration_count: payload.iteration_count,
+      iteration_delay_seconds: payload.iteration_delay_seconds
+    });
+  }
+
+  async function saveKeywordAPISource(form) {
+    var error = byId('keyword-form-error');
+    error.hidden = true;
+    var payload;
+    try { payload = keywordAPIPayload(form); } catch (parseError) {
+      error.textContent = parseError.message || '请求配置 JSON 格式无效';
+      error.hidden = false;
+      return;
+    }
+    if (!payload.name || !/^https?:\/\//i.test(payload.request_url)) {
+      error.textContent = '请填写来源名称和有效的 HTTP/HTTPS URL';
+      error.hidden = false;
+      return;
+    }
+    if (payload.enabled && !payload.response_path) {
+      error.textContent = '启用自动同步前必须测试并选择响应路径';
+      error.hidden = false;
+      return;
+    }
+    if (payload.iteration_enabled && !payload.iteration_path) {
+      error.textContent = '启用分页迭代后必须填写参数路径';
+      error.hidden = false;
+      return;
+    }
+    if (payload.iteration_enabled && payload.iteration_location === 'body' && ['json', 'form'].indexOf(payload.body_type) < 0) {
+      error.textContent = 'Body 迭代仅支持 JSON 或 Form 请求体';
+      error.hidden = false;
+      return;
+    }
+    var editing = state.keywordSources.editing;
+    var requestSignature = keywordAPIRequestSignature(payload);
+    var existingConfigurationIsStillValid = editing && requestSignature === state.keywordSources.originalSignature && payload.response_path === String(editing.response_path || '');
+    if (payload.enabled && requestSignature !== state.keywordSources.testedSignature && !existingConfigurationIsStillValid) {
+      error.textContent = '启用自动同步前，请先测试当前请求配置';
+      error.hidden = false;
+      return;
+    }
+    var button = byId('keyword-save');
+    setButtonLoading(button, true, '保存中');
+    try {
+      await apiRequest(editing ? API.keywordAPISources + '/' + encodeURIComponent(keywordSourceID(editing)) : API.keywordAPISources, { method: editing ? 'PUT' : 'POST', body: payload });
+      byId('keyword-dialog').close();
+      toast(editing ? 'API 来源已更新' : 'API 来源已新增', 'success');
+      state.keywordSources.loaded = false;
+      await loadKeywordSources(true);
+    } catch (saveError) {
+      error.textContent = saveError.message || 'API 来源保存失败';
+      error.hidden = false;
+    } finally { setButtonLoading(button, false); }
+  }
+
+  async function openKeywordAPISource(id) {
+    try {
+      var detail = await apiRequest(API.keywordAPISources + '/' + encodeURIComponent(id));
+      var source = pick(detail, ['source', 'item'], detail);
+      state.keywordSources.editing = source;
+      var form = byId('keyword-form');
+      form.reset();
+      resetKeywordAPIBuilder();
+      state.keywordSources.editing = source;
+      form.elements.api_name.value = source.name || '';
+      form.elements.api_enabled.checked = boolValue(source.enabled, false);
+      form.elements.request_method.value = String(source.request_method || 'GET').toUpperCase();
+      form.elements.request_url.value = source.request_url || '';
+      form.elements.body_type.value = source.body_type || 'none';
+      form.elements.proxy_url.value = source.proxy_url || '';
+      form.elements.timeout_seconds.value = numberValue(source.timeout_seconds, 15);
+      form.elements.sync_interval_minutes.value = Math.max(1, numberValue(source.sync_interval_seconds, 3600) / 60);
+      form.elements.response_path.value = source.response_path || '';
+      form.elements.default_keyword_type.value = source.default_keyword_type || 'general';
+      form.elements.default_priority.value = numberValue(source.default_priority, 0);
+      form.elements.default_cooldown_days.value = source.default_cooldown_seconds === null || source.default_cooldown_seconds === undefined ? '' : numberValue(source.default_cooldown_seconds) / 86400;
+      form.elements.default_enabled.checked = pick(source, ['default_enabled'], true) !== false;
+      form.elements.iteration_enabled.checked = boolValue(source.iteration_enabled, false);
+      form.elements.iteration_location.value = source.iteration_location || 'query';
+      form.elements.iteration_path.value = source.iteration_path || '';
+      form.elements.iteration_start.value = numberValue(source.iteration_start, 0);
+      form.elements.iteration_step.value = numberValue(source.iteration_step, 20);
+      form.elements.iteration_count.value = Math.max(1, numberValue(source.iteration_count, 1));
+      form.elements.iteration_delay_seconds.value = Math.max(0, numberValue(source.iteration_delay_seconds, 0));
+      resetAPIEditor('header', source.request_headers || {});
+      resetAPIEditor('query', source.query_params || {});
+      if (source.body_type === 'json') form.elements.json_body.value = typeof source.request_body === 'string' ? source.request_body : JSON.stringify(source.request_body || {}, null, 2);
+      else if (source.body_type === 'form') resetAPIEditor('form', source.request_body || {});
+      else if (source.body_type === 'raw') form.elements.raw_body.value = String(source.request_body || '');
+      syncAPIBodyEditor();
+      updateAPIIterationPreview();
+      state.keywordSources.originalSignature = keywordAPIRequestSignature(keywordAPIPayload(form));
+      setKeywordDialogMode('api', true);
+      byId('keyword-dialog').showModal();
+      refreshIcons(byId('keyword-dialog'));
+    } catch (error) { toast(error.message || 'API 来源详情加载失败', 'error'); }
+  }
+
+  function JSONPathJoin(parent, key) {
+    return parent ? parent + '.' + key : key;
+  }
+
+  function renderJSONTreeNode(value, path, label, depth) {
+    var type = Array.isArray(value) ? 'array' : (value === null ? 'null' : typeof value);
+    var selectable = path ? ' data-action="select-json-path" data-path="' + escapeHTML(path) + '"' : '';
+    if (Array.isArray(value)) {
+      var sample = value.length ? value[0] : null;
+      var wildcardPath = path + '[]';
+      return '<div class="json-tree-node" style="--depth:' + depth + '"><button type="button" class="json-tree-key"' + selectable + '><span>' + escapeHTML(label) + '</span><em>[' + value.length + ']</em></button>' + (value.length ? renderJSONTreeNode(sample, wildcardPath, '[]', depth + 1) : '') + '</div>';
+    }
+    if (value && typeof value === 'object') {
+      return '<div class="json-tree-node" style="--depth:' + depth + '"><button type="button" class="json-tree-key"' + selectable + '><span>' + escapeHTML(label) + '</span><em>{}</em></button><div class="json-tree-children">' + Object.keys(value).map(function (key) { return renderJSONTreeNode(value[key], JSONPathJoin(path, key), key, depth + 1); }).join('') + '</div></div>';
+    }
+    return '<div class="json-tree-leaf" style="--depth:' + depth + '"><button type="button" data-action="select-json-path" data-path="' + escapeHTML(path) + '"><span>' + escapeHTML(label) + '</span><code>' + escapeHTML(JSON.stringify(value)) + '</code><em>' + type + '</em></button></div>';
+  }
+
+  function renderKeywordAPITest(result) {
+    var response = pick(result, ['response', 'json', 'body'], result);
+    state.keywordSources.testResponse = response;
+    var status = numberValue(pick(result, ['status_code', 'status'], 200), 200);
+    var iterationValue = pick(result, ['iteration_value'], null);
+    byId('api-test-meta').innerHTML = '<span class="http-status ' + (status >= 200 && status < 300 ? 'status-ok' : 'status-error') + '">' + status + '</span><span>' + numberValue(pick(result, ['duration_ms', 'elapsed_ms'], 0)) + ' ms</span><span>' + formatNumber(pick(result, ['response_size', 'size_bytes'], JSON.stringify(response).length)) + ' B</span>' + (iterationValue !== null && iterationValue !== undefined ? '<span class="api-test-iteration">首轮参数 <strong>' + escapeHTML(iterationValue) + '</strong></span>' : '');
+    byId('api-json-tree').innerHTML = renderJSONTreeNode(response, '', '$', 0);
+    refreshIcons(byId('keyword-api-fields'));
+    updateKeywordAPIExtractPreview();
+  }
+
+  async function testKeywordAPI() {
+    var form = byId('keyword-form');
+    var error = byId('keyword-form-error');
+    error.hidden = true;
+    var payload;
+    try { payload = keywordAPIPayload(form); } catch (parseError) {
+      error.textContent = parseError.message || '请求配置 JSON 格式无效';
+      error.hidden = false;
+      return;
+    }
+    if (!/^https?:\/\//i.test(payload.request_url)) {
+      error.textContent = '请输入有效的 HTTP/HTTPS URL';
+      error.hidden = false;
+      return;
+    }
+    if (payload.iteration_enabled && !payload.iteration_path) {
+      error.textContent = '测试迭代参数前，请填写参数路径';
+      error.hidden = false;
+      return;
+    }
+    if (payload.iteration_enabled && payload.iteration_location === 'body' && ['json', 'form'].indexOf(payload.body_type) < 0) {
+      error.textContent = 'Body 迭代仅支持 JSON 或 Form 请求体';
+      error.hidden = false;
+      return;
+    }
+    var button = byId('api-test-button');
+    setButtonLoading(button, true, '测试中');
+    try {
+      var result = await apiRequest(API.keywordAPISourceTest, { method: 'POST', body: payload });
+      state.keywordSources.testedSignature = keywordAPIRequestSignature(payload);
+      renderKeywordAPITest(result);
+      toast('请求测试成功，请选择提取字段', 'success');
+    } catch (testError) {
+      error.textContent = testError.message || '请求测试失败';
+      error.hidden = false;
+    } finally { setButtonLoading(button, false); }
+  }
+
+  function extractJSONPath(root, path) {
+    if (!path) return [];
+    var nodes = [root];
+    path.split('.').forEach(function (segment) {
+      var match = segment.match(/^([^\[\]]+)?(?:\[(\d*)\])?$/);
+      if (!match) { nodes = []; return; }
+      var key = match[1];
+      var arrayToken = match[2];
+      var next = [];
+      nodes.forEach(function (node) {
+        var value = key ? (node && typeof node === 'object' ? node[key] : undefined) : node;
+        if (arrayToken !== undefined) {
+          if (!Array.isArray(value)) return;
+          if (arrayToken === '') next = next.concat(value);
+          else if (value[Number(arrayToken)] !== undefined) next.push(value[Number(arrayToken)]);
+        } else if (value !== undefined) next.push(value);
+      });
+      nodes = next;
+    });
+    return nodes.reduce(function (result, value) { return result.concat(Array.isArray(value) ? value : [value]); }, []);
+  }
+
+  function updateKeywordAPIExtractPreview() {
+    var target = byId('api-extract-preview');
+    var path = byId('api-response-path').value.trim();
+    if (!state.keywordSources.testResponse || !path) {
+      target.innerHTML = '<strong>提取预览</strong><p>选择路径后显示匹配值。</p>';
+      return;
+    }
+    var raw = extractJSONPath(state.keywordSources.testResponse, path);
+    var scalars = raw.filter(function (value) { return value === null || ['string', 'number', 'boolean'].indexOf(typeof value) >= 0; }).map(function (value) { return String(value === null ? '' : value).trim(); }).filter(Boolean);
+    var seen = new Set();
+    var unique = scalars.filter(function (value) { var key = value.toLowerCase(); if (seen.has(key)) return false; seen.add(key); return true; });
+    var objectCount = raw.length - scalars.length;
+    target.innerHTML = '<div class="api-preview-heading"><strong>提取预览</strong><span>原始 ' + raw.length + ' · 去重 ' + unique.length + '</span></div>' + (objectCount ? '<p class="form-error">包含 ' + objectCount + ' 个对象节点，请继续选择子字段。</p>' : '') + '<div class="api-preview-values">' + unique.slice(0, 30).map(function (value) { return '<span>' + escapeHTML(value) + '</span>'; }).join('') + (unique.length > 30 ? '<em>另有 ' + (unique.length - 30) + ' 项</em>' : '') + '</div>';
+  }
+
+  function selectKeywordAPIPath(path) {
+    state.keywordSources.selectedPath = path;
+    byId('api-response-path').value = path;
+    updateKeywordAPIExtractPreview();
+  }
+
+  async function syncKeywordAPISource(id) {
+    try {
+      await apiRequest(API.keywordAPISources + '/' + encodeURIComponent(id) + '/sync', { method: 'POST' });
+      toast('API 来源已开始后台同步', 'success');
+      state.keywordSources.loaded = false;
+      await loadKeywordSources(true);
+      state.loaded.keywords = false;
+    } catch (error) { toast(error.message || '立即同步失败', 'error'); }
+  }
+
+  async function copyKeywordAPISource(id, button) {
+    if (button) button.disabled = true;
+    try {
+      await apiRequest(API.keywordAPISources + '/' + encodeURIComponent(id) + '/copy', { method: 'POST' });
+      toast('来源已复制，副本默认停用', 'success');
+      state.keywordSources.loaded = false;
+      await loadKeywordSources(true);
+    } catch (error) {
+      toast(error.message || '复制 API 来源失败', 'error');
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function deleteKeywordAPISource(id) {
+    var source = state.keywordSources.items.find(function (item) { return keywordSourceID(item) === String(id); });
+    var confirmed = await confirmAction('删除 API 来源', '删除“' + pick(source, ['name'], '该来源') + '”及来源关系，已生成的关键词不会删除。', '删除来源');
+    if (!confirmed) return;
+    try {
+      await apiRequest(API.keywordAPISources + '/' + encodeURIComponent(id), { method: 'DELETE' });
+      toast('API 来源已删除', 'success');
+      state.keywordSources.loaded = false;
+      await loadKeywordSources(true);
+    } catch (error) { toast(error.message || 'API 来源删除失败', 'error'); }
+  }
+
+  async function loadRuns(options) {
+    options = options || {};
+    if (state.loaded.runs && !options.force && !options.silent) return;
+    if (!options.silent) {
+      state.loaded.runs = true;
+      showAlert('runs-alert', '');
+      byId('runs-empty').hidden = true;
+      byId('runs-pagination').innerHTML = '';
+      tableLoading('runs-body', 9);
+    }
+    var serial = ++state.requestSerial.runs;
+    var query = Object.assign({}, state.runs.query, { page: state.runs.page, page_size: state.runs.pageSize });
+    try {
+      var data = await apiRequest(API.runs, { query: query });
+      if (serial !== state.requestSerial.runs) return;
+      var items = arrayFrom(data, ['runs', 'collection_runs', 'items', 'results']);
+      var meta = paginationMeta(data, items, state.runs.page, state.runs.pageSize);
+      state.runs.items = items;
+      Object.assign(state.runs, meta);
+      renderRuns();
+      updateTimestamp();
+      configureRunPolling();
+    } catch (error) {
+      if (serial !== state.requestSerial.runs) return;
+      if (!options.silent) {
+        state.loaded.runs = false;
+        byId('runs-body').innerHTML = '';
+        showAlert('runs-alert', error.message || '任务加载失败');
+      }
+      stopRunPolling();
+    }
+  }
+
+  function renderRuns() {
+    var body = byId('runs-body');
+    var empty = byId('runs-empty');
+    if (!state.runs.items.length) {
+      body.innerHTML = '';
+      empty.hidden = false;
+      byId('runs-pagination').innerHTML = '';
+      byId('runs-live-region').innerHTML = '';
+      refreshIcons(empty);
+      return;
+    }
+    empty.hidden = true;
+    body.innerHTML = state.runs.items.map(function (run) {
+      var id = pick(run, ['id', 'run_id', 'batch_id'], '—');
+      var status = normalizedStatus(run);
+      var trigger = pick(run, ['trigger', 'trigger_type'], 'scheduled');
+      var progress = runProgress(run);
+      var added = numberValue(pick(run, ['new_count', 'created_count', 'added_count'], 0));
+      var duplicate = numberValue(pick(run, ['duplicate_count', 'duplicates'], 0));
+      return '<tr>' +
+        '<td class="mono">#' + escapeHTML(id) + '</td>' +
+        '<td>' + escapeHTML(triggerLabels[trigger] || trigger) + (boolValue(pick(run, ['force', 'forced'], false)) ? ' <span class="type-badge">强制</span>' : '') + '</td>' +
+        '<td>' + statusBadge(status) + '</td>' +
+        '<td><div class="mini-progress"><div class="mini-progress-label"><span>' + progress.completed + '/' + progress.total + '</span><span>' + progress.percent + '%</span></div><div class="progress-track"><div class="progress-bar" style="width:' + progress.percent + '%"></div></div></div></td>' +
+        '<td class="success-text">+' + formatNumber(added) + '</td>' +
+        '<td>' + formatNumber(duplicate) + '</td>' +
+        '<td>' + escapeHTML(formatDate(pick(run, ['started_at', 'created_at', 'start_time'], null), true)) + '</td>' +
+        '<td>' + escapeHTML(durationFrom(run)) + '</td>' +
+        '<td><div class="row-actions"><button class="row-action" type="button" data-action="view-run" data-id="' + escapeHTML(id) + '" aria-label="查看批次 ' + escapeHTML(id) + '" title="查看详情">' + icon('panel-right-open') + '</button></div></td>' +
+      '</tr>';
+    }).join('');
+    renderPagination('runs-pagination', state.runs.page, state.runs.pages, 'runs');
+    renderRunLiveBanner();
+    refreshIcons(body);
+  }
+
+  function renderRunLiveBanner() {
+    var active = state.runs.items.find(function (run) { return ACTIVE_STATUSES.includes(normalizedStatus(run)); });
+    var container = byId('runs-live-region');
+    if (!active) {
+      container.innerHTML = '';
+      return;
+    }
+    var progress = runProgress(active);
+    var id = pick(active, ['id', 'run_id', 'batch_id'], '—');
+    container.innerHTML = '<div class="inline-alert info"><strong>批次 #' + escapeHTML(id) + ' ' + (normalizedStatus(active) === 'pending' ? '等待执行' : '正在采集') + '</strong> · ' + progress.completed + '/' + progress.total + ' 关键词，完成 ' + progress.percent + '%</div>';
+  }
+
+  function configureRunPolling() {
+    var hasActive = state.runs.items.some(function (run) { return ACTIVE_STATUSES.includes(normalizedStatus(run)); });
+    if (state.view === 'runs' && hasActive) {
+      if (!state.pollTimer) {
+        state.pollTimer = window.setInterval(function () {
+          if (document.visibilityState === 'visible' && state.view === 'runs') loadRuns({ silent: true, force: true });
+        }, 5000);
+      }
+    } else {
+      stopRunPolling();
+    }
+  }
+
+  function stopRunPolling() {
+    if (state.pollTimer) {
+      clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
+  }
+
+  function updateRunFilters() {
+    state.runs.query = {
+      status: byId('run-status-filter').value,
+      trigger: byId('run-trigger-filter').value
+    };
+    state.runs.page = 1;
+    state.loaded.runs = false;
+    loadRuns({ force: true });
+  }
+
+  async function openRunDialog(preselected, forced) {
+    var dialog = byId('run-dialog');
+    var list = byId('run-keyword-list');
+    byId('run-form-error').hidden = true;
+    byId('run-keyword-search').value = '';
+    byId('run-form').elements.force.checked = Boolean(forced);
+    state.runPicker.search = '';
+    state.runPicker.selected = new Set((preselected || []).map(String));
+    list.innerHTML = '<div class="table-loading"><span>' + icon('loader-circle', 'spin') + '正在加载</span></div>';
+    dialog.showModal();
+    refreshIcons(list);
+    try {
+      state.runPicker.items = await loadKeywords(true, { picker: true });
+      renderRunKeywordPicker();
+    } catch (error) {
+      list.innerHTML = '<div class="inline-alert error" style="margin:12px">' + escapeHTML(error.message || '关键词加载失败') + '</div>';
+    }
+  }
+
+  function renderRunKeywordPicker() {
+    var list = byId('run-keyword-list');
+    var search = state.runPicker.search.toLowerCase();
+    var items = state.runPicker.items.filter(function (keyword) {
+      return String(pick(keyword, ['keyword', 'name'], '')).toLowerCase().includes(search);
+    });
+    if (!items.length) {
+      list.innerHTML = '<div class="table-empty" style="padding:50px 12px;text-align:center">没有匹配的关键词</div>';
+    } else {
+      list.innerHTML = items.map(function (keyword) {
+        var id = String(pick(keyword, ['id', 'keyword_id'], ''));
+        var name = pick(keyword, ['keyword', 'name'], '');
+        var enabled = boolValue(pick(keyword, ['enabled', 'is_enabled'], true), true);
+        var selected = state.runPicker.selected.has(id);
+        return '<label class="picker-item">' +
+          '<input type="checkbox" data-action="select-run-keyword" data-id="' + escapeHTML(id) + '"' + (selected ? ' checked' : '') + (enabled ? '' : ' disabled') + '>' +
+          '<span class="picker-copy"><strong>' + escapeHTML(name) + '</strong><small>' + escapeHTML(keywordTypeLabels[pick(keyword, ['keyword_type', 'type'], 'general')] || pick(keyword, ['keyword_type', 'type'], 'general')) + ' · ' + (enabled ? '已启用' : '已停用') + '</small></span>' +
+          (enabled ? '' : '<span class="type-badge">不可用</span>') +
+        '</label>';
+      }).join('');
+    }
+    byId('run-selected-label').textContent = '已选 ' + state.runPicker.selected.size + ' 项';
+  }
+
+  async function createRun(keywordIds, force, button) {
+    if (!keywordIds.length) {
+      toast('请至少选择一个关键词', 'error');
+      return null;
+    }
+    if (button) setButtonLoading(button, true, '启动中');
+    try {
+      var result = await apiRequest(API.runs, {
+        method: 'POST',
+        body: { keyword_ids: keywordIds.map(function (id) { return /^\d+$/.test(String(id)) ? Number(id) : id; }), force: Boolean(force) }
+      });
+      toast(force ? '强制采集任务已创建' : '采集任务已创建', 'success');
+      byId('run-dialog').close();
+      state.keywords.selected.clear();
+      updateKeywordBulkBar();
+      state.loaded.runs = false;
+      if (state.view !== 'runs') navigate('runs', true);
+      else loadRuns({ force: true });
+      return result;
+    } catch (error) {
+      toast(error.message || '任务创建失败', 'error');
+      return null;
+    } finally {
+      if (button) setButtonLoading(button, false);
+    }
+  }
+
+  async function submitRun(event) {
+    event.preventDefault();
+    var error = byId('run-form-error');
+    error.hidden = true;
+    var ids = Array.from(state.runPicker.selected);
+    if (!ids.length) {
+      error.textContent = '请至少选择一个关键词';
+      error.hidden = false;
+      return;
+    }
+    await createRun(ids, event.currentTarget.elements.force.checked, byId('run-submit'));
+  }
+
+  async function launchSelectedRun(force) {
+    var ids = Array.from(state.keywords.selected);
+    if (!ids.length) return;
+    if (force) {
+      var confirmed = await confirmAction('强制采集', '所选关键词将绕过冷却期立即执行。', '强制执行');
+      if (!confirmed) return;
+    }
+    createRun(ids, force);
+  }
+
+  async function openRunDetail(id, silent) {
+    var dialog = byId('run-detail-dialog');
+    var container = byId('run-detail');
+    state.currentRunDetail = String(id);
+    if (!silent) {
+      dialog.showModal();
+      container.innerHTML = '<div class="table-loading"><span>' + icon('loader-circle', 'spin') + '正在加载</span></div>';
+      refreshIcons(container);
+    }
+    try {
+      var data = await apiRequest(API.runs + '/' + encodeURIComponent(id));
+      if (state.currentRunDetail !== String(id)) return;
+      var run = pick(data, ['run', 'collection_run'], data);
+      renderRunDetail(run);
+      if (ACTIVE_STATUSES.includes(normalizedStatus(run))) startDetailPolling(id);
+      else stopDetailPolling();
+    } catch (error) {
+      if (!silent) container.innerHTML = '<div class="inline-alert error">' + escapeHTML(error.message || '任务详情加载失败') + '</div>';
+    }
+  }
+
+  function renderRunDetail(run) {
+    var id = pick(run, ['id', 'run_id', 'batch_id'], '—');
+    var status = normalizedStatus(run);
+    var progress = runProgress(run);
+    var trigger = pick(run, ['trigger', 'trigger_type'], 'scheduled');
+    var items = arrayFrom(pick(run, ['items', 'run_items', 'keywords'], []), ['items', 'run_items']);
+    byId('run-detail-title').textContent = '批次 #' + id;
+    byId('run-detail').innerHTML =
+      '<section class="detail-section">' +
+        '<div class="panel-heading"><div><div class="source-stack">' + statusBadge(status) + '<span class="type-badge">' + escapeHTML(triggerLabels[trigger] || trigger) + '</span>' + (boolValue(pick(run, ['force', 'forced'], false)) ? '<span class="type-badge">强制</span>' : '') + '</div></div><span class="batch-id">BATCH / ' + escapeHTML(id) + '</span></div>' +
+        '<div class="batch-progress-label"><span>' + progress.completed + ' / ' + progress.total + ' 关键词</span><span>' + progress.percent + '%</span></div>' +
+        '<div class="progress-track"><div class="progress-bar" style="width:' + progress.percent + '%"></div></div>' +
+        '<div class="batch-metrics">' +
+          '<div><strong>' + formatNumber(pick(run, ['new_count', 'created_count', 'added_count'], 0)) + '</strong><span>新增资源</span></div>' +
+          '<div><strong>' + formatNumber(pick(run, ['duplicate_count', 'duplicates'], 0)) + '</strong><span>重复资源</span></div>' +
+          '<div><strong>' + escapeHTML(durationFrom(run)) + '</strong><span>耗时</span></div>' +
+        '</div>' +
+      '</section>' +
+      '<section class="detail-section"><h3>执行信息</h3><dl class="detail-grid">' +
+        '<div class="detail-pair"><dt>创建时间</dt><dd>' + escapeHTML(formatDate(pick(run, ['created_at'], null), true)) + '</dd></div>' +
+        '<div class="detail-pair"><dt>开始时间</dt><dd>' + escapeHTML(formatDate(pick(run, ['started_at', 'start_time'], null), true)) + '</dd></div>' +
+        '<div class="detail-pair"><dt>完成时间</dt><dd>' + escapeHTML(formatDate(pick(run, ['finished_at', 'completed_at', 'ended_at'], null), true)) + '</dd></div>' +
+        '<div class="detail-pair"><dt>错误信息</dt><dd class="danger-text">' + escapeHTML(pick(run, ['error', 'error_message'], '无')) + '</dd></div>' +
+      '</dl></section>' +
+      '<section class="detail-section"><h3>关键词执行项</h3><div class="run-item-list">' +
+        (items.length ? items.map(renderRunItem).join('') : '<span class="muted">暂无执行项明细</span>') +
+      '</div></section>';
+    refreshIcons(byId('run-detail'));
+  }
+
+  function renderRunItem(item) {
+    var keyword = pick(item, ['keyword', 'keyword_name', 'name'], '');
+    if (keyword && typeof keyword === 'object') keyword = pick(keyword, ['keyword', 'name'], '');
+    var summary = pick(item, ['source_summary', 'sources'], {});
+    var chips = [];
+    if (summary && typeof summary === 'object' && !Array.isArray(summary)) {
+      Object.keys(summary).forEach(function (key) {
+        var value = summary[key];
+        var text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+        chips.push('<span class="summary-chip">' + escapeHTML(key) + ': ' + escapeHTML(text) + '</span>');
+      });
+    }
+    return '<article class="run-item">' +
+      '<strong>' + escapeHTML(keyword || '未命名关键词') + '</strong>' +
+      statusBadge(normalizedStatus(item)) +
+      '<small>新增 ' + formatNumber(pick(item, ['new_count', 'created_count', 'added_count'], 0)) + ' · 重复 ' + formatNumber(pick(item, ['duplicate_count', 'duplicates'], 0)) + ' · ' + escapeHTML(durationFrom(item)) + '</small>' +
+      (pick(item, ['error', 'error_message'], '') ? '<small class="danger-text">' + escapeHTML(pick(item, ['error', 'error_message'], '')) + '</small>' : '') +
+      (chips.length ? '<div class="summary-chips full-row">' + chips.join('') + '</div>' : '') +
+    '</article>';
+  }
+
+  function showPermissionState(scope, forbidden) {
+    var permission = byId(scope + '-forbidden');
+    if (permission) permission.hidden = !forbidden;
+    if (scope === 'users') {
+      byId('users-table-wrap').hidden = forbidden;
+      byId('users-pagination').hidden = forbidden;
+      byId('users-empty').hidden = true;
+    } else if (scope === 'usage') {
+      byId('usage-content').hidden = forbidden;
+    }
+    if (forbidden) refreshIcons(permission);
+  }
+
+  async function loadUsers(force) {
+    if (state.loaded.users && !force) return;
+    state.loaded.users = true;
+    var serial = ++state.requestSerial.users;
+    showPermissionState('users', false);
+    showAlert('users-alert', '');
+    byId('users-empty').hidden = true;
+    byId('users-table-wrap').hidden = false;
+    byId('users-pagination').hidden = false;
+    tableLoading('users-body', 8);
+    var query = Object.assign({}, state.users.query, {
+      page: state.users.page,
+      page_size: state.users.pageSize
+    });
+    try {
+      var data = await apiRequest(API.users, { query: query });
+      if (serial !== state.requestSerial.users) return;
+      var items = arrayFrom(data, ['users', 'items', 'results']);
+      var meta = paginationMeta(data, items, state.users.page, state.users.pageSize);
+      state.users.items = items;
+      Object.assign(state.users, meta);
+      renderUsers();
+      updateUsageUserFilter(items);
+      updateTimestamp();
+    } catch (error) {
+      if (serial !== state.requestSerial.users) return;
+      state.loaded.users = false;
+      byId('users-body').innerHTML = '';
+      if (error instanceof APIError && error.status === 403) {
+        showPermissionState('users', true);
+      } else {
+        showAlert('users-alert', error.message || '用户加载失败');
+      }
+    }
+  }
+
+  function userStatus(user) {
+    var enabled = boolValue(pick(user, ['enabled', 'is_enabled'], true), true);
+    var expiresAt = toDate(pick(user, ['expires_at', 'expiry'], null));
+    if (!enabled) return { key: 'disabled', label: '已停用' };
+    if (expiresAt && expiresAt.getTime() <= Date.now()) return { key: 'expired', label: '已到期' };
+    if (boolValue(pick(user, ['must_change_password'], false))) return { key: 'password', label: '待改密' };
+    return { key: 'enabled', label: '已启用' };
+  }
+
+  function userStatusBadge(status) {
+    var classes = {
+      enabled: 'status-success',
+      disabled: 'status-pending',
+      expired: 'status-failed',
+      password: 'status-unknown'
+    };
+    return '<span class="status-badge ' + (classes[status.key] || 'status-pending') + '">' + escapeHTML(status.label) + '</span>';
+  }
+
+  function userAPIKey(user) {
+    var apiKey = pick(user, ['api_key', 'key'], {});
+    if (!apiKey || typeof apiKey !== 'object') apiKey = {};
+    var prefix = pick(apiKey, ['key_prefix', 'prefix'], pick(user, ['api_key_prefix', 'key_prefix'], ''));
+    var revokedAt = pick(apiKey, ['revoked_at'], pick(user, ['api_key_revoked_at'], null));
+    var hasKey = boolValue(pick(user, ['has_api_key'], Boolean(prefix)), Boolean(prefix));
+    return {
+      prefix: prefix,
+      active: hasKey && !revokedAt,
+      lastUsedAt: pick(apiKey, ['last_used_at'], pick(user, ['api_key_last_used_at'], null))
+    };
+  }
+
+  function renderUsers() {
+    var body = byId('users-body');
+    var empty = byId('users-empty');
+    if (!state.users.items.length) {
+      body.innerHTML = '';
+      empty.hidden = false;
+      byId('users-pagination').innerHTML = '';
+      refreshIcons(empty);
+      return;
+    }
+    empty.hidden = true;
+    body.innerHTML = state.users.items.map(function (user) {
+      var id = String(pick(user, ['id', 'user_id'], ''));
+      var username = pick(user, ['username', 'name'], '未命名用户');
+      var role = String(pick(user, ['role'], 'user')).toLowerCase();
+      var status = userStatus(user);
+      var key = userAPIKey(user);
+      var unlimited = boolValue(pick(user, ['rate_limit_disabled', 'unlimited'], false));
+      var rps = numberValue(pick(user, ['rps_limit', 'rps'], 3));
+      var rpm = numberValue(pick(user, ['rpm_limit', 'rpm'], 60));
+      var expires = pick(user, ['expires_at', 'expiry'], null);
+      var enabled = boolValue(pick(user, ['enabled', 'is_enabled'], true), true);
+      return '<tr>' +
+        '<td><div class="user-cell"><span class="avatar">' + escapeHTML(String(username).charAt(0).toUpperCase()) + '</span><span><strong>' + escapeHTML(username) + '</strong><small class="mono">ID ' + escapeHTML(id) + '</small></span></div></td>' +
+        '<td><span class="type-badge role-' + escapeHTML(role) + '">' + (role === 'admin' ? '管理员' : '普通用户') + '</span></td>' +
+        '<td>' + userStatusBadge(status) + '</td>' +
+        '<td>' + (unlimited ? '<span class="type-badge">不限流</span>' : '<div class="limit-cell"><strong>' + rps + ' RPS</strong><small>' + rpm + ' RPM</small></div>') + '</td>' +
+        '<td title="' + escapeHTML(formatDate(expires, true)) + '">' + (expires ? escapeHTML(formatDate(expires, false)) : '<span class="muted">永久</span>') + '</td>' +
+        '<td><div class="key-state"><span class="mono">' + escapeHTML(key.prefix || '未创建') + '</span><small class="' + (key.active ? 'success-text' : 'muted') + '">' + (key.active ? '有效' : key.prefix ? '已吊销' : '无 Key') + '</small></div></td>' +
+        '<td title="' + escapeHTML(formatDate(pick(user, ['last_login_at'], null), true)) + '">' + escapeHTML(relativeTime(pick(user, ['last_login_at'], null))) + '</td>' +
+        '<td><div class="row-actions user-actions">' +
+          '<button class="row-action" type="button" data-action="edit-user" data-id="' + escapeHTML(id) + '" aria-label="编辑 ' + escapeHTML(username) + '" title="编辑">' + icon('pencil') + '</button>' +
+          '<button class="row-action" type="button" data-action="toggle-user" data-id="' + escapeHTML(id) + '" aria-label="' + (enabled ? '停用 ' : '启用 ') + escapeHTML(username) + '" title="' + (enabled ? '停用账号' : '启用账号') + '">' + icon(enabled ? 'user-round-x' : 'user-round-check') + '</button>' +
+          '<button class="row-action" type="button" data-action="reset-user-password" data-id="' + escapeHTML(id) + '" aria-label="重置 ' + escapeHTML(username) + ' 的密码" title="重置密码">' + icon('lock-keyhole') + '</button>' +
+          '<button class="row-action" type="button" data-action="reset-user-key" data-id="' + escapeHTML(id) + '" aria-label="重置 ' + escapeHTML(username) + ' 的 API Key" title="重置 API Key">' + icon('key-round') + '</button>' +
+          (key.active ? '<button class="row-action danger" type="button" data-action="revoke-user-key" data-id="' + escapeHTML(id) + '" aria-label="吊销 ' + escapeHTML(username) + ' 的 API Key" title="吊销 API Key">' + icon('key-square') + '</button>' : '') +
+          '<button class="row-action danger" type="button" data-action="delete-user" data-id="' + escapeHTML(id) + '" aria-label="删除 ' + escapeHTML(username) + '" title="删除用户">' + icon('trash-2') + '</button>' +
+        '</div></td>' +
+      '</tr>';
+    }).join('');
+    renderPagination('users-pagination', state.users.page, state.users.pages, 'users');
+    refreshIcons(body);
+  }
+
+  function updateUserFilters() {
+    var status = byId('user-status-filter').value;
+    state.users.query = {
+      q: byId('user-search').value.trim(),
+      role: byId('user-role-filter').value,
+      status: status,
+      enabled: status === 'enabled' ? 'true' : status === 'disabled' ? 'false' : '',
+      expired: status === 'expired' ? 'true' : ''
+    };
+    state.users.page = 1;
+    state.loaded.users = false;
+    loadUsers(true);
+  }
+
+  function toDateTimeLocal(value) {
+    var date = toDate(value);
+    if (!date) return '';
+    var pad = function (part) { return String(part).padStart(2, '0'); };
+    return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + 'T' + pad(date.getHours()) + ':' + pad(date.getMinutes());
+  }
+
+  function openUserDialog(user) {
+    var form = byId('user-form');
+    form.reset();
+    byId('user-form-error').hidden = true;
+    byId('user-dialog-title').textContent = user ? '编辑用户' : '创建用户';
+    form.elements.id.value = user ? pick(user, ['id', 'user_id'], '') : '';
+    form.elements.username.value = user ? pick(user, ['username', 'name'], '') : '';
+    form.elements.username.disabled = Boolean(user);
+    form.elements.role.value = user ? pick(user, ['role'], 'user') : 'user';
+    form.elements.expires_at.value = user ? toDateTimeLocal(pick(user, ['expires_at', 'expiry'], null)) : '';
+    form.elements.rps_limit.value = user ? numberValue(pick(user, ['rps_limit', 'rps'], 3)) : 3;
+    form.elements.rpm_limit.value = user ? numberValue(pick(user, ['rpm_limit', 'rpm'], 60)) : 60;
+    form.elements.rate_limit_disabled.checked = user ? boolValue(pick(user, ['rate_limit_disabled', 'unlimited'], false)) : false;
+    form.elements.enabled.checked = user ? boolValue(pick(user, ['enabled', 'is_enabled'], true), true) : true;
+    syncUserLimitFields();
+    byId('user-dialog').showModal();
+    if (!user) window.setTimeout(function () { form.elements.username.focus(); }, 0);
+  }
+
+  function syncUserLimitFields() {
+    var form = byId('user-form');
+    var disabled = form.elements.rate_limit_disabled.checked;
+    form.elements.rps_limit.disabled = disabled;
+    form.elements.rpm_limit.disabled = disabled;
+  }
+
+  function userPayloadFromForm(form) {
+    var expiresValue = form.elements.expires_at.value;
+    var payload = {
+      role: form.elements.role.value,
+      enabled: form.elements.enabled.checked,
+      expires_at: expiresValue ? new Date(expiresValue).toISOString() : null,
+      rps_limit: numberValue(form.elements.rps_limit.value, 3),
+      rpm_limit: numberValue(form.elements.rpm_limit.value, 60),
+      rate_limit_disabled: form.elements.rate_limit_disabled.checked
+    };
+    if (!form.elements.id.value) payload.username = form.elements.username.value.trim();
+    return payload;
+  }
+
+  async function saveUser(event) {
+    event.preventDefault();
+    var form = event.currentTarget;
+    var id = form.elements.id.value;
+    var payload = userPayloadFromForm(form);
+    var error = byId('user-form-error');
+    error.hidden = true;
+    if (!id && !payload.username) {
+      error.textContent = '用户名不能为空';
+      error.hidden = false;
+      return;
+    }
+    var button = byId('user-save');
+    setButtonLoading(button, true, '保存中');
+    try {
+      var result = await apiRequest(id ? API.users + '/' + encodeURIComponent(id) : API.users, {
+        method: id ? 'PUT' : 'POST',
+        body: payload
+      });
+      byId('user-dialog').close();
+      toast(id ? '用户已更新' : '用户已创建', 'success');
+      if (!id) showCredentialDialog(result, '用户创建成功');
+      state.loaded.users = false;
+      await loadUsers(true);
+    } catch (saveError) {
+      error.textContent = saveError.message || '保存失败';
+      error.hidden = false;
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  function credentialValues(data) {
+    var credentials = pick(data, ['credentials'], data || {});
+    var user = pick(data, ['user'], {});
+    return {
+      username: pick(user, ['username'], pick(data, ['username'], '')),
+      password: pick(credentials, ['temporary_password', 'temp_password', 'password'], pick(data, ['temporary_password', 'temp_password'], '')),
+      apiKey: pick(credentials, ['api_key', 'key', 'plain_api_key'], pick(data, ['api_key', 'plain_api_key'], ''))
+    };
+  }
+
+  function showCredentialDialog(data, title) {
+    var values = credentialValues(data);
+    var fields = [];
+    if (values.username) fields.push({ label: '用户名', value: values.username, secret: false });
+    if (values.password) fields.push({ label: '临时密码', value: values.password, secret: true });
+    if (values.apiKey) fields.push({ label: 'API Key', value: values.apiKey, secret: true });
+    if (!fields.length) return;
+    byId('credential-title').textContent = title || '保存用户凭证';
+    byId('credential-fields').innerHTML = fields.map(function (field) {
+      return '<div class="credential-field"><span>' + escapeHTML(field.label) + '</span><div><code' + (field.secret ? ' class="credential-secret"' : '') + '>' + escapeHTML(field.value) + '</code><button class="row-action" type="button" data-action="copy-credential" data-value="' + escapeHTML(field.value) + '" aria-label="复制' + escapeHTML(field.label) + '" title="复制">' + icon('copy') + '</button></div></div>';
+    }).join('');
+    byId('credential-saved').checked = false;
+    byId('credential-error').hidden = true;
+    byId('credential-dialog').showModal();
+    refreshIcons(byId('credential-fields'));
+  }
+
+  function attemptCloseCredentials() {
+    if (!byId('credential-saved').checked) {
+      byId('credential-error').textContent = '请确认已保存凭证后再关闭';
+      byId('credential-error').hidden = false;
+      return;
+    }
+    byId('credential-dialog').close();
+  }
+
+  function findUser(id) {
+    return state.users.items.find(function (item) {
+      return String(pick(item, ['id', 'user_id'], '')) === String(id);
+    });
+  }
+
+  async function toggleUser(id) {
+    var user = findUser(id);
+    if (!user) return;
+    var enabled = !boolValue(pick(user, ['enabled', 'is_enabled'], true), true);
+    if (!enabled) {
+      var confirmed = await confirmAction('停用用户', '停用后该用户的 JWT 与 API Key 将立即失效。', '停用');
+      if (!confirmed) return;
+    }
+    try {
+      await apiRequest(API.users + '/' + encodeURIComponent(id) + '/toggle', { method: 'POST', body: { enabled: enabled } });
+      toast(enabled ? '用户已启用' : '用户已停用', 'success');
+      state.loaded.users = false;
+      loadUsers(true);
+    } catch (error) {
+      toast(error.message || '用户状态更新失败', 'error');
+    }
+  }
+
+  async function resetUserPassword(id) {
+    var user = findUser(id);
+    if (!user) return;
+    var confirmed = await confirmAction('重置密码', '将为“' + pick(user, ['username'], '') + '”生成临时密码，并使旧 JWT 失效。', '重置密码');
+    if (!confirmed) return;
+    try {
+      var result = await apiRequest(API.users + '/' + encodeURIComponent(id) + '/reset-password', { method: 'POST' });
+      showCredentialDialog(result, '临时密码已生成');
+      state.loaded.users = false;
+      loadUsers(true);
+    } catch (error) {
+      toast(error.message || '密码重置失败', 'error');
+    }
+  }
+
+  async function resetUserKey(id) {
+    var user = findUser(id);
+    if (!user) return;
+    var confirmed = await confirmAction('重置 API Key', '旧 Key 将立即失效，新 Key 只显示一次。', '重置 Key');
+    if (!confirmed) return;
+    try {
+      var result = await apiRequest(API.users + '/' + encodeURIComponent(id) + '/reset-api-key', { method: 'POST' });
+      showCredentialDialog(result, 'API Key 已重置');
+      state.loaded.users = false;
+      loadUsers(true);
+    } catch (error) {
+      toast(error.message || 'API Key 重置失败', 'error');
+    }
+  }
+
+  async function revokeUserKey(id) {
+    var user = findUser(id);
+    if (!user) return;
+    var confirmed = await confirmAction('吊销 API Key', '吊销后该用户只能通过网页登录搜索，直到重新生成 Key。', '吊销 Key');
+    if (!confirmed) return;
+    try {
+      await apiRequest(API.users + '/' + encodeURIComponent(id) + '/revoke-api-key', { method: 'POST' });
+      toast('API Key 已吊销', 'success');
+      state.loaded.users = false;
+      loadUsers(true);
+    } catch (error) {
+      toast(error.message || 'API Key 吊销失败', 'error');
+    }
+  }
+
+  async function deleteUser(id) {
+    var user = findUser(id);
+    if (!user) return;
+    var confirmed = await confirmAction('删除用户', '将删除“' + pick(user, ['username'], '') + '”。账号凭证会立即失效，调用日志按保留策略继续保存。', '删除');
+    if (!confirmed) return;
+    try {
+      await apiRequest(API.users + '/' + encodeURIComponent(id), { method: 'DELETE' });
+      toast('用户已删除', 'success');
+      state.loaded.users = false;
+      loadUsers(true);
+    } catch (error) {
+      toast(error.message || '用户删除失败', 'error');
+    }
+  }
+
+  function updateUsageUserFilter(users) {
+    var select = byId('usage-user-filter');
+    if (!select) return;
+    var selected = select.value;
+    var known = new Map();
+    state.users.items.concat(users || []).forEach(function (user) {
+      var id = String(pick(user, ['id', 'user_id'], ''));
+      if (id) known.set(id, pick(user, ['username', 'name'], '用户 #' + id));
+    });
+    select.innerHTML = '<option value="">全部用户</option>' + Array.from(known.entries()).map(function (entry) {
+      return '<option value="' + escapeHTML(entry[0]) + '">' + escapeHTML(entry[1]) + '</option>';
+    }).join('');
+    if (known.has(selected)) select.value = selected;
+  }
+
+  async function loadUsage(force) {
+    if (state.loaded.usage && !force) return;
+    state.loaded.usage = true;
+    var serial = ++state.requestSerial.usage;
+    showPermissionState('usage', false);
+    showAlert('usage-alert', '');
+    byId('usage-content').hidden = false;
+    byId('usage-stat-grid').innerHTML = '<article class="stat-card skeleton-card"></article>'.repeat(6);
+    tableLoading('usage-logs-body', 9);
+    var range = state.usage.range;
+    try {
+      var settled = await Promise.all([
+        apiRequest(API.usageOverview, { query: { range: range } }),
+        apiRequest(API.usageTrends, { query: { range: range } })
+      ]);
+      if (serial !== state.requestSerial.usage) return;
+      state.usage.overview = settled[0] || {};
+      state.usage.trends = arrayFrom(settled[1], ['trends', 'items', 'points']);
+      renderUsageOverview();
+      await loadUsageLogs(true);
+      updateTimestamp();
+    } catch (error) {
+      if (serial !== state.requestSerial.usage) return;
+      state.loaded.usage = false;
+      if (error instanceof APIError && error.status === 403) {
+        showPermissionState('usage', true);
+      } else {
+        showAlert('usage-alert', error.message || 'API 监控数据加载失败');
+      }
+    }
+  }
+
+  function percentValue(value) {
+    var numeric = numberValue(value);
+    if (numeric > 0 && numeric <= 1) numeric *= 100;
+    return Math.max(0, Math.min(100, numeric));
+  }
+
+  function formatPercent(value) {
+    return (Math.round(percentValue(value) * 10) / 10) + '%';
+  }
+
+  function renderUsageOverview() {
+    var data = state.usage.overview || {};
+    var requestCount = numberValue(pick(data, ['request_count', 'total_requests', 'calls_total', 'total'], 0));
+    var activeUsers = numberValue(pick(data, ['active_users', 'active_user_count', 'user_count'], 0));
+    var successRate = pick(data, ['success_rate'], 0);
+    var average = numberValue(pick(data, ['average_duration_ms', 'avg_duration_ms', 'average_latency_ms'], 0));
+    var p95 = numberValue(pick(data, ['p95_duration_ms', 'p95_latency_ms'], 0));
+    var limited = numberValue(pick(data, ['rate_limited_count', 'limited_count', 'status_429_count'], 0));
+    var cards = [
+      { label: '总调用量', value: formatNumber(requestCount), icon: 'waypoints', tone: 'blue', foot: state.usage.range === '24h' ? '最近 24 小时' : state.usage.range === '30d' ? '最近 30 天' : '最近 7 天' },
+      { label: '活跃用户', value: formatNumber(activeUsers), icon: 'users', tone: 'violet', foot: '产生过调用的用户' },
+      { label: '成功率', value: formatPercent(successRate), icon: 'circle-check-big', tone: 'green', foot: 'HTTP 2xx 请求' },
+      { label: '平均耗时', value: Math.round(average) + ' ms', icon: 'timer', tone: 'amber', foot: '端到端响应时间' },
+      { label: 'P95 耗时', value: Math.round(p95) + ' ms', icon: 'gauge', tone: 'violet', foot: '95% 请求低于此值' },
+      { label: '限流次数', value: formatNumber(limited), icon: 'shield-alert', tone: limited ? 'amber' : 'green', foot: 'HTTP 429 响应' }
+    ];
+    byId('usage-stat-grid').innerHTML = cards.map(function (card) {
+      return '<article class="stat-card"><div class="stat-head"><span>' + escapeHTML(card.label) + '</span><span class="stat-icon ' + card.tone + '">' + icon(card.icon) + '</span></div><div class="stat-value">' + escapeHTML(card.value) + '</div><div class="stat-foot">' + escapeHTML(card.foot) + '</div></article>';
+    }).join('');
+    renderUsageTrendChart(state.usage.trends);
+    renderUsageStatusChart(pick(data, ['status_counts', 'status_distribution', 'statuses'], {}));
+    var topUsers = arrayFrom(pick(data, ['top_users', 'user_ranking', 'users'], []), ['items', 'users']);
+    renderUsageUsersChart(topUsers);
+    updateUsageUserFilter(topUsers);
+    refreshIcons(byId('usage-content'));
+  }
+
+  function normalizeUsageTrend(data) {
+    if (Array.isArray(data)) {
+      return data.map(function (item) {
+        return {
+          time: pick(item, ['time', 'date', 'bucket', 'label'], ''),
+          requests: numberValue(pick(item, ['request_count', 'requests', 'total', 'count'], 0)),
+          success: numberValue(pick(item, ['success_count', 'successful', 'success'], 0)),
+          limited: numberValue(pick(item, ['rate_limited_count', 'limited_count', 'status_429_count'], 0))
+        };
+      });
+    }
+    return [];
+  }
+
+  function renderUsageTrendChart(data) {
+    var chart = chartFor('usage-trend-chart');
+    if (!chart) return;
+    var points = normalizeUsageTrend(data);
+    chart.setOption({
+      animationDuration: 420,
+      color: ['#1769e0', '#16835b', '#c23838'],
+      tooltip: { trigger: 'axis', backgroundColor: '#17191d', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
+      grid: { left: 8, right: 10, top: 24, bottom: 4, containLabel: true },
+      xAxis: { type: 'category', boundaryGap: false, data: points.map(function (point) { return String(point.time).replace('T', ' ').slice(5, 16); }), axisLine: { lineStyle: { color: '#dfe2e6' } }, axisTick: { show: false }, axisLabel: { color: '#8c939d', fontSize: 9, hideOverlap: true } },
+      yAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: '#eceef0', type: 'dashed' } }, axisLabel: { color: '#8c939d', fontSize: 9 } },
+      series: [
+        { name: '请求', type: 'line', smooth: 0.25, symbol: 'none', lineStyle: { width: 2 }, areaStyle: { color: 'rgba(23,105,224,0.10)' }, data: points.map(function (point) { return point.requests; }) },
+        { name: '成功', type: 'line', smooth: 0.25, symbol: 'none', lineStyle: { width: 1.5 }, data: points.map(function (point) { return point.success; }) },
+        { name: '限流', type: 'bar', barMaxWidth: 8, data: points.map(function (point) { return point.limited; }) }
+      ]
+    }, true);
+  }
+
+  function normalizeHTTPStatuses(data) {
+    if (Array.isArray(data)) {
+      return data.map(function (item) {
+        return { code: String(pick(item, ['status_code', 'status', 'code'], '其他')), count: numberValue(pick(item, ['count', 'request_count', 'total'], 0)) };
+      });
+    }
+    if (data && typeof data === 'object') {
+      return Object.keys(data).map(function (key) { return { code: key, count: numberValue(data[key]) }; });
+    }
+    return [];
+  }
+
+  function httpStatusColor(code) {
+    var value = Number(code);
+    if (value >= 200 && value < 300) return '#16835b';
+    if (value === 429) return '#a26108';
+    if (value >= 400 && value < 500) return '#d28a24';
+    if (value >= 500) return '#c23838';
+    return '#9299a3';
+  }
+
+  function renderUsageStatusChart(data) {
+    var chart = chartFor('usage-status-chart');
+    var statuses = normalizeHTTPStatuses(data);
+    if (chart) {
+      chart.setOption({
+        animationDuration: 420,
+        tooltip: { trigger: 'item', formatter: 'HTTP {b}<br/>{c} ({d}%)', backgroundColor: '#17191d', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
+        series: [{ type: 'pie', radius: ['55%', '76%'], center: ['50%', '48%'], label: { show: false }, data: statuses.map(function (item) { return { name: item.code, value: item.count, itemStyle: { color: httpStatusColor(item.code) } }; }) }]
+      }, true);
+    }
+    byId('usage-status-legend').innerHTML = statuses.slice(0, 6).map(function (item) {
+      return '<span><i style="background:' + httpStatusColor(item.code) + '"></i>HTTP ' + escapeHTML(item.code) + ' ' + formatNumber(item.count) + '</span>';
+    }).join('');
+  }
+
+  function renderUsageUsersChart(users) {
+    var chart = chartFor('usage-users-chart');
+    if (!chart) return;
+    var normalized = users.map(function (user) {
+      return {
+        name: pick(user, ['username', 'name'], '用户 #' + pick(user, ['user_id', 'id'], '')),
+        count: numberValue(pick(user, ['request_count', 'count', 'total', 'value'], 0))
+      };
+    }).sort(function (a, b) { return b.count - a.count; }).slice(0, 10).reverse();
+    chart.setOption({
+      animationDuration: 420,
+      color: ['#1769e0'],
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: '#17191d', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
+      grid: { left: 8, right: 16, top: 12, bottom: 5, containLabel: true },
+      xAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: '#eceef0', type: 'dashed' } }, axisLabel: { color: '#8c939d', fontSize: 9 } },
+      yAxis: { type: 'category', data: normalized.map(function (user) { return String(user.name).slice(0, 18); }), axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: '#59616b', fontSize: 10 } },
+      series: [{ type: 'bar', barMaxWidth: 13, itemStyle: { borderRadius: [0, 3, 3, 0] }, data: normalized.map(function (user) { return user.count; }) }]
+    }, true);
+  }
+
+  async function loadUsageLogs(force) {
+    if (!force && state.usage.logs.length) return;
+    var serial = ++state.requestSerial.usageLogs;
+    byId('usage-logs-empty').hidden = true;
+    tableLoading('usage-logs-body', 9);
+    var query = Object.assign({}, state.usage.query, {
+      range: state.usage.range,
+      page: state.usage.page,
+      page_size: state.usage.pageSize
+    });
+    try {
+      var data = await apiRequest(API.usageLogs, { query: query });
+      if (serial !== state.requestSerial.usageLogs) return;
+      var items = arrayFrom(data, ['logs', 'items', 'results']);
+      var meta = paginationMeta(data, items, state.usage.page, state.usage.pageSize);
+      state.usage.logs = items;
+      state.usage.total = meta.total;
+      state.usage.page = meta.page;
+      state.usage.pageSize = meta.pageSize;
+      state.usage.pages = meta.pages;
+      renderUsageLogs();
+    } catch (error) {
+      if (serial !== state.requestSerial.usageLogs) return;
+      byId('usage-logs-body').innerHTML = '';
+      if (error instanceof APIError && error.status === 403) showPermissionState('usage', true);
+      else showAlert('usage-alert', error.message || '调用日志加载失败');
+    }
+  }
+
+  function renderUsageLogs() {
+    var body = byId('usage-logs-body');
+    var empty = byId('usage-logs-empty');
+    byId('usage-log-total').textContent = formatNumber(state.usage.total) + ' 条记录';
+    if (!state.usage.logs.length) {
+      body.innerHTML = '';
+      empty.hidden = false;
+      byId('usage-logs-pagination').innerHTML = '';
+      refreshIcons(empty);
+      return;
+    }
+    empty.hidden = true;
+    body.innerHTML = state.usage.logs.map(function (log) {
+      var status = numberValue(pick(log, ['status_code', 'status'], 0));
+      var username = pick(log, ['username', 'user_name'], '用户 #' + pick(log, ['user_id'], '—'));
+      var authType = pick(log, ['auth_type'], 'web');
+      var endpoint = pick(log, ['endpoint', 'path'], '/api/search');
+      var method = pick(log, ['method'], 'POST');
+      var keyword = pick(log, ['keyword', 'query'], '');
+      var cache = String(pick(log, ['cache_status', 'cache'], 'unknown')).toLowerCase();
+      return '<tr>' +
+        '<td>' + escapeHTML(formatDate(pick(log, ['created_at', 'timestamp', 'time'], null), true)) + '</td>' +
+        '<td><div class="keyword-name"><strong>' + escapeHTML(username) + '</strong><small>' + (authType === 'api_key' ? 'API Key' : '网页 JWT') + '</small></div></td>' +
+        '<td><div class="request-cell"><span class="mono">' + escapeHTML(method) + '</span><small class="mono">' + escapeHTML(endpoint) + '</small></div></td>' +
+        '<td><span class="log-keyword" title="' + escapeHTML(keyword) + '">' + escapeHTML(keyword || '—') + '</span></td>' +
+        '<td><span class="http-status status-' + (status >= 200 && status < 300 ? 'ok' : status === 429 ? 'limited' : 'error') + '">' + status + '</span></td>' +
+        '<td class="mono">' + formatNumber(pick(log, ['duration_ms'], 0)) + ' ms</td>' +
+        '<td>' + formatNumber(pick(log, ['result_count'], 0)) + '</td>' +
+        '<td><span class="type-badge cache-' + escapeHTML(cache) + '">' + escapeHTML(cache === 'hit' ? '命中' : cache === 'miss' ? '未命中' : cache === 'refresh' ? '刷新' : cache) + '</span></td>' +
+        '<td class="mono">' + escapeHTML(pick(log, ['source_ip', 'ip'], '—')) + '</td>' +
+      '</tr>';
+    }).join('');
+    renderPagination('usage-logs-pagination', state.usage.page, state.usage.pages, 'usageLogs');
+  }
+
+  function updateUsageFilters() {
+    state.usage.query = {
+      q: byId('usage-log-search').value.trim(),
+      user_id: byId('usage-user-filter').value,
+      auth_type: byId('usage-auth-filter').value,
+      status: byId('usage-status-filter').value,
+      cache_status: byId('usage-cache-filter').value
+    };
+    state.usage.page = 1;
+    loadUsageLogs(true);
+  }
+
+  function changeUsageRange() {
+    state.usage.range = byId('usage-range').value;
+    state.usage.page = 1;
+    state.loaded.usage = false;
+    loadUsage(true);
+  }
+
+  async function loadSources(force) {
+    if (state.loaded.sources && !force) return;
+    state.loaded.sources = true;
+    showAlert('sources-alert', '');
+    try {
+      var results = await Promise.all([
+        apiRequest(API.sourceCatalog),
+        apiRequest(API.sourceConfig)
+      ]);
+      state.sources.catalog = arrayFrom(results[0], ['items', 'plugins', 'catalog']);
+      state.sources.config = pick(results[1], ['config'], results[1] || {});
+      state.sources.version = numberValue(pick(results[1], ['version'], 0));
+      state.sources.updatedAt = pick(results[1], ['updated_at'], null);
+      state.sources.snapshot = pick(results[1], ['snapshot', 'runtime'], {});
+      state.sources.dirty = false;
+      renderSources();
+      await loadSourceCredentials();
+    } catch (error) {
+      state.loaded.sources = false;
+      showAlert('sources-alert', error.message || '搜索来源加载失败');
+      renderSources();
+    }
+  }
+
+  async function loadSourceCredentials() {
+    var requestID = ++state.requestSerial.sources;
+    var requestedTab = state.sources.tab;
+    var target = byId('source-credentials');
+    if (target) {
+      target.innerHTML = '<div class="credential-loading">' + icon('loader-circle', 'spin') + '<span>正在加载插件账号</span></div>';
+      refreshIcons(target);
+    }
+    try {
+      var result = await apiRequest(requestedTab === 'admin' ? API.credentials : API.userCredentials, {
+        query: {
+          plugin_key: state.sources.credentialQuery.plugin_key || '',
+          status: state.sources.credentialQuery.status || '',
+          page_size: 100
+        }
+      });
+      if (requestID !== state.requestSerial.sources || requestedTab !== state.sources.tab) return;
+      state.sources.credentials = arrayFrom(result, ['items', 'credentials']);
+      if (requestedTab === 'admin') {
+        state.sources.sharedTotal = state.sources.credentials.filter(function (item) {
+          return item.scope === 'public_shared' && item.status === 'active' && pick(item, ['owner_enabled', 'enabled'], true) !== false && !item.admin_suspended_at;
+        }).length;
+        byId('source-shared-total').textContent = String(state.sources.sharedTotal);
+      }
+      renderSourceCredentials();
+    } catch (error) {
+      if (requestID !== state.requestSerial.sources || requestedTab !== state.sources.tab) return;
+      state.sources.credentials = [];
+      showAlert('sources-alert', error.message || '插件账号加载失败');
+      renderSourceCredentials();
+    }
+  }
+
+  function splitBulkValues(value) {
+    return String(value || '').split(/[\n\r,，;；]+/).map(function (item) { return item.trim(); }).filter(Boolean);
+  }
+
+  function uniqueBulkValues(value, normalizer) {
+    var seen = new Set();
+    var result = [];
+    splitBulkValues(value).forEach(function (item) {
+      var normalized = normalizer ? normalizer(item) : item;
+      var key = String(normalized || '').toLowerCase();
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      result.push(normalized);
+    });
+    return result;
+  }
+
+  function normalizeSourceChannelKey(value) {
+    var result = String(value || '').trim();
+    result = result.replace(/^https?:\/\/(?:www\.)?(?:t\.me|telegram\.me)\//i, '');
+    result = result.replace(/^(?:www\.)?(?:t\.me|telegram\.me)\//i, '');
+    result = result.replace(/^s\//i, '');
+    result = result.replace(/^@+/, '');
+    result = result.split(/[?#]/)[0].replace(/^\/+|\/+$/g, '');
+    if (result.indexOf('/') >= 0) result = result.split('/')[0];
+    return result.toLowerCase();
+  }
+
+  function importSourceChannels() {
+    var input = byId('source-channel-bulk');
+    if (!input) return;
+    var rawItems = splitBulkValues(input.value);
+    if (!rawItems.length) {
+      toast('请先输入 TG 频道', 'info');
+      return;
+    }
+    if (!state.sources.config) state.sources.config = { channels: [], plugins: {} };
+    state.sources.config = collectSourceDraft();
+    var channels = Array.isArray(state.sources.config.channels) ? state.sources.config.channels : [];
+    var existing = new Set(channels.map(function (channel) { return normalizeSourceChannelKey(channel.key); }).filter(Boolean));
+    var added = 0;
+    var skipped = 0;
+    rawItems.forEach(function (item) {
+      var key = normalizeSourceChannelKey(item);
+      if (!key || existing.has(key)) {
+        skipped += 1;
+        return;
+      }
+      existing.add(key);
+      channels.push({ key: key, display_name: key, enabled: true, order: channels.length });
+      added += 1;
+    });
+    state.sources.config.channels = channels;
+    input.value = '';
+    renderSources();
+    toast('已导入 ' + added + ' 个频道，跳过 ' + skipped + ' 个重复或无效项', added ? 'success' : 'info');
+  }
+
+  function pluginConfigFieldHTML(descriptor, settings) {
+    var key = descriptor.key || descriptor.name;
+    var config = settings.config || {};
+    var allowed = Array.isArray(descriptor.allowed_config_keys) ? descriptor.allowed_config_keys : [];
+    var fields = [];
+    if (allowed.indexOf('base_url') >= 0) {
+      fields.push('<label class="plugin-config-field"><span>服务地址</span><input class="source-input" type="url" inputmode="url" data-source-plugin-config="' + escapeHTML(key) + '" data-config-key="base_url" value="' + escapeHTML(config.base_url || '') + '" placeholder="https://example.com"><small>仅支持 HTTPS，变更后相关账号需要重新认证。</small></label>');
+    }
+    if (allowed.indexOf('blocked_pan_types') >= 0) {
+      var blocked = Array.isArray(config.blocked_pan_types) ? config.blocked_pan_types.join('\n') : String(config.blocked_pan_types || '');
+      fields.push('<label class="plugin-config-field"><span>屏蔽网盘类型</span><textarea class="source-input" rows="2" data-source-plugin-config="' + escapeHTML(key) + '" data-config-key="blocked_pan_types" placeholder="baidu, aliyun">' + escapeHTML(blocked) + '</textarea><small>支持逗号或换行分隔，留空表示不过滤。</small></label>');
+    }
+    return fields.length ? '<div class="plugin-config-fields">' + fields.join('') + '</div>' : '';
+  }
+
+  function renderSourcePlugins(config) {
+    config = config || state.sources.config || { plugins: {} };
+    var plugins = config.plugins || {};
+    var queryInput = byId('source-plugin-search');
+    var query = String(queryInput ? queryInput.value : state.sources.pluginSearch || '').trim().toLowerCase();
+    state.sources.pluginSearch = query;
+    var catalog = (state.sources.catalog || []).slice().sort(function (left, right) {
+      var accountDelta = Number(boolValue(right.requires_account, false)) - Number(boolValue(left.requires_account, false));
+      if (accountDelta) return accountDelta;
+      return String(left.display_name || left.key || '').localeCompare(String(right.display_name || right.key || ''), 'zh-CN');
+    });
+    var enabledCount = catalog.filter(function (descriptor) {
+      var key = descriptor.key || descriptor.name;
+      return boolValue((plugins[key] || {}).enabled, false);
+    }).length;
+    if (byId('source-plugin-count')) byId('source-plugin-count').textContent = String(enabledCount);
+    var visible = catalog.filter(function (descriptor) {
+      var key = descriptor.key || descriptor.name;
+      return !query || String(key).toLowerCase().indexOf(query) >= 0 || String(descriptor.display_name || '').toLowerCase().indexOf(query) >= 0;
+    });
+    var summary = '<div class="selection-tools plugin-count-summary"><span>显示 ' + visible.length + ' / ' + catalog.length + ' 个插件</span><strong>已启用 ' + enabledCount + ' 个</strong></div>';
+    var cards = visible.map(function (descriptor) {
+      var key = descriptor.key || descriptor.name;
+      var settings = plugins[key] || {};
+      var requirement = descriptor.requires_account ? (descriptor.login_type === 'qr' ? '需要扫码账号' : '需要账号登录') : '无需账号';
+      var description = descriptor.description || requirement;
+      return '<article class="source-card plugin-source-card"><div><strong>' + escapeHTML(descriptor.display_name || key) + '</strong><small>' + escapeHTML(description) + '</small><span class="summary-chip">' + escapeHTML(requirement) + '</span></div><span class="type-badge">' + escapeHTML(key) + '</span><label class="switch-row"><input type="checkbox" data-source-plugin="' + escapeHTML(key) + '" ' + (boolValue(settings.enabled, false) ? 'checked' : '') + '><span>启用</span></label>' + pluginConfigFieldHTML(descriptor, settings) + '</article>';
+    }).join('');
+    byId('source-plugins').innerHTML = summary + (cards || '<div class="empty-state compact-empty"><p>没有匹配的内置插件。</p></div>');
+    refreshIcons(byId('source-plugins'));
+  }
+
+  function renderSources() {
+    var config = state.sources.config || { channels: [], plugins: {}, async_plugins_enabled: false };
+    byId('source-version').textContent = state.sources.version ? 'v' + state.sources.version : '—';
+    byId('source-updated-at').textContent = formatDate(state.sources.updatedAt, true);
+    byId('source-snapshot-status').textContent = pick(state.sources.snapshot, ['status'], state.sources.version ? '运行中' : '未加载');
+    byId('source-plugin-master').checked = boolValue(pick(config, ['async_plugins_enabled'], false), false);
+    var channels = arrayFrom(config, ['channels']);
+    if (byId('source-channel-count')) byId('source-channel-count').textContent = String(channels.length);
+    byId('source-channels').innerHTML = channels.length ? channels.map(function (channel, index) {
+      return '<article class="source-card"><label class="switch-row"><input type="checkbox" data-source-channel-enabled="' + index + '" ' + (boolValue(channel.enabled, true) ? 'checked' : '') + '><span>启用</span></label><input class="source-input" data-source-channel-key="' + index + '" value="' + escapeHTML(channel.key || '') + '" aria-label="频道标识"><input class="source-input" data-source-channel-name="' + index + '" value="' + escapeHTML(channel.display_name || '') + '" placeholder="显示名称" aria-label="频道显示名称"><button class="row-action danger" type="button" data-action="remove-channel" data-index="' + index + '" aria-label="删除频道">' + icon('trash-2') + '</button></article>';
+    }).join('') : '<div class="empty-state compact-empty"><p>暂无 TG 频道，点击“新增”开始配置。</p></div>';
+    renderSourcePlugins(config);
+    switchSourceConfigTab(state.sources.configTab);
+    var filter = byId('credential-plugin-filter');
+    var selectedFilter = filter.value;
+    filter.innerHTML = '<option value="">全部插件</option>' + state.sources.catalog.filter(function (descriptor) {
+      return boolValue(descriptor.requires_account, false);
+    }).map(function (descriptor) {
+      var key = descriptor.key || descriptor.name;
+      return '<option value="' + escapeHTML(key) + '">' + escapeHTML(descriptor.display_name || key) + '</option>';
+    }).join('');
+    filter.value = selectedFilter;
+    byId('source-shared-total').textContent = String(state.sources.sharedTotal || 0);
+    renderSourceCredentials();
+    refreshIcons(byId('view-sources'));
+  }
+
+  function renderSourceCredentials() {
+    var target = byId('source-credentials');
+    var query = String(state.sources.credentialQuery.user || '').trim().toLowerCase();
+    var items = (state.sources.credentials || []).filter(function (item) {
+      if (!query) return true;
+      var metadata = item.public_metadata || {};
+      return [item.owner_username, item.owner_user_id, item.display_name, item.plugin_key, metadata.account_hint, metadata.masked_identifier]
+        .some(function (value) { return String(value || '').toLowerCase().indexOf(query) >= 0; });
+    });
+    if (byId('source-account-count')) byId('source-account-count').textContent = String((state.sources.credentials || []).length);
+    target.innerHTML = items.length ? items.map(function (item) {
+      var metadata = item.public_metadata || {};
+      var suspended = Boolean(item.admin_suspended_at || item.admin_suspended || item.status === 'admin_suspended');
+      var enabled = pick(item, ['owner_enabled', 'enabled'], true) !== false;
+      var status = suspended ? 'admin_suspended' : (!enabled ? 'disabled' : (item.status || 'unknown'));
+      var owner = state.sources.tab === 'users' ? (item.owner_username || '用户 #' + (item.owner_user_id || '—')) : (item.scope === 'public_shared' ? '公开共享' : '管理员私有');
+      var id = credentialPublicID(item);
+      var searchScope = credentialSearchScopeSummary(item);
+      var actions = state.sources.tab === 'admin'
+        ? '<button class="credential-action" type="button" data-action="relogin-plugin-credential" data-id="' + escapeHTML(id) + '">' + icon('refresh-cw') + '<span>重新登录</span></button>' +
+          ((item.plugin_key === 'qqpd' || item.plugin_key === 'weibo') ? '<button class="credential-action" type="button" data-action="edit-plugin-credential-search-scope" data-id="' + escapeHTML(id) + '">' + icon('list-filter') + '<span>搜索范围</span></button>' : '') +
+          '<button class="credential-action" type="button" data-action="change-plugin-credential-scope" data-id="' + escapeHTML(id) + '">' + icon('users') + '<span>' + (item.scope === 'public_shared' ? '转为私有' : '设为共享') + '</span></button>' +
+          '<button class="credential-action" type="button" data-action="toggle-plugin-credential" data-id="' + escapeHTML(id) + '">' + icon(enabled ? 'pause' : 'play') + '<span>' + (enabled ? '停用' : '启用') + '</span></button>' +
+          '<button class="credential-action danger" type="button" data-action="delete-plugin-credential" data-id="' + escapeHTML(id) + '">' + icon('trash-2') + '<span>删除</span></button>'
+        : '<button class="credential-action" type="button" data-action="suspend-user-credential" data-id="' + escapeHTML(id) + '">' + icon(suspended ? 'play' : 'pause') + '<span>' + (suspended ? '恢复' : '暂停') + '</span></button>' +
+          '<button class="credential-action danger" type="button" data-action="delete-user-credential" data-id="' + escapeHTML(id) + '">' + icon('trash-2') + '<span>删除</span></button>';
+      return '<article class="credential-card"><div class="credential-identity"><strong>' + escapeHTML(item.display_name || metadata.account_hint || item.plugin_key) + '</strong><small>' + escapeHTML(owner + ' · ' + item.plugin_key) + '</small></div>' + statusBadge(status) + '<div class="credential-meta"><span>可见范围 ' + escapeHTML(item.scope === 'public_shared' ? '公开共享' : (item.scope === 'admin_private' ? '管理员私有' : '用户私有')) + '</span>' + (searchScope ? '<span>搜索范围 ' + escapeHTML(searchScope) + '</span>' : '') + '<span>到期 ' + escapeHTML(formatDate(item.expires_at, true)) + '</span><span>最近成功 ' + escapeHTML(formatDate(item.last_success_at, true)) + '</span><span>' + escapeHTML(item.last_error_code || '运行正常') + '</span></div><div class="credential-card-actions">' + actions + '</div></article>';
+    }).join('') : '<div class="empty-state compact-empty"><p>当前视图暂无插件账号。</p></div>';
+    refreshIcons(target);
+  }
+
+  function credentialPublicID(item) {
+    return String(pick(item, ['public_id', 'credential_id', 'id'], ''));
+  }
+
+  function findSourceCredential(id) {
+    return (state.sources.credentials || []).find(function (item) { return credentialPublicID(item) === String(id); });
+  }
+
+  function credentialMetadataValues(pluginKey, metadata) {
+    metadata = metadata || {};
+    var raw = pluginKey === 'qqpd' ? metadata.channels : (pluginKey === 'weibo' ? metadata.user_ids : []);
+    if (Array.isArray(raw)) return raw.map(function (value) { return String(value).trim(); }).filter(Boolean);
+    return splitBulkValues(raw);
+  }
+
+  function credentialSearchScopeSummary(item) {
+    var values = credentialMetadataValues(item.plugin_key, item.public_metadata || {});
+    if (!values.length) return (item.plugin_key === 'qqpd' || item.plugin_key === 'weibo') ? '未配置' : '';
+    var preview = values.slice(0, 2).join('、');
+    return values.length > 2 ? preview + ' 等 ' + values.length + ' 项' : preview;
+  }
+
+  function collectSourceDraft() {
+    var current = state.sources.config || {};
+    var channels = [];
+    document.querySelectorAll('[data-source-channel-key]').forEach(function (input) {
+      var index = input.dataset.sourceChannelKey;
+      channels.push({ key: input.value.trim(), display_name: document.querySelector('[data-source-channel-name="' + index + '"]').value.trim(), enabled: document.querySelector('[data-source-channel-enabled="' + index + '"]').checked, order: channels.length });
+    });
+    var plugins = Object.assign({}, current.plugins || {});
+    document.querySelectorAll('[data-source-plugin]').forEach(function (input, index) {
+      var existing = plugins[input.dataset.sourcePlugin] || {};
+      plugins[input.dataset.sourcePlugin] = Object.assign({}, existing, { enabled: input.checked, order: numberValue(existing.order, index) });
+    });
+    document.querySelectorAll('[data-source-plugin-config]').forEach(function (input) {
+      var pluginKey = input.dataset.sourcePluginConfig;
+      var configKey = input.dataset.configKey;
+      var existing = plugins[pluginKey] || {};
+      var runtimeConfig = Object.assign({}, existing.config || {});
+      if (configKey === 'blocked_pan_types') {
+        runtimeConfig[configKey] = uniqueBulkValues(input.value, function (value) { return String(value).trim().toLowerCase(); });
+      } else {
+        var configValue = String(input.value || '').trim();
+        if (configValue) runtimeConfig[configKey] = configValue;
+        else delete runtimeConfig[configKey];
+      }
+      plugins[pluginKey] = Object.assign({}, existing, { config: runtimeConfig });
+    });
+    return { schema_version: 1, async_plugins_enabled: byId('source-plugin-master').checked, channels: channels, plugins: plugins };
+  }
+
+  async function validateSources() {
+    try {
+      await apiRequest(API.sourceValidate, { method: 'POST', body: { config: collectSourceDraft() } });
+      toast('配置校验通过', 'success');
+    } catch (error) { showAlert('sources-alert', error.message || '配置校验失败'); }
+  }
+
+  async function saveSources() {
+    try {
+      var result = await apiRequest(API.sourceConfig, { method: 'PUT', body: { expected_version: state.sources.version, config: collectSourceDraft() } });
+      state.loaded.sources = false;
+      toast('来源配置已热更新', 'success');
+      await loadSources(true);
+    } catch (error) {
+      showAlert('sources-alert', error.status === 409 ? '配置已被其他管理员更新，请重新加载后再保存。' : (error.message || '来源配置保存失败，旧配置仍在运行。'));
+    }
+  }
+
+  function addSourceChannel() {
+    if (!state.sources.config) state.sources.config = { channels: [], plugins: {} };
+    state.sources.config = collectSourceDraft();
+    if (!Array.isArray(state.sources.config.channels)) state.sources.config.channels = [];
+    state.sources.config.channels.push({ key: '', display_name: '', enabled: true, order: state.sources.config.channels.length });
+    renderSources();
+  }
+
+  function removeSourceChannel(index) {
+    if (state.sources.config) state.sources.config = collectSourceDraft();
+    if (state.sources.config && Array.isArray(state.sources.config.channels)) {
+      state.sources.config.channels.splice(index, 1);
+      renderSources();
+    }
+  }
+
+  function switchCredentialTab(tab) {
+    state.sources.tab = tab === 'users' ? 'users' : 'admin';
+    document.querySelectorAll('[data-credential-tab]').forEach(function (button) {
+      var active = button.dataset.credentialTab === state.sources.tab;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    byId('new-plugin-credential').hidden = state.sources.tab !== 'admin';
+    byId('credential-user-filter-wrap').hidden = state.sources.tab !== 'users';
+    state.sources.credentialQuery.user = '';
+    byId('credential-user-filter').value = '';
+    loadSourceCredentials();
+  }
+
+  function switchSourceConfigTab(tab) {
+    var allowed = ['tg', 'plugins', 'accounts'];
+    state.sources.configTab = allowed.indexOf(tab) >= 0 ? tab : 'tg';
+    document.querySelectorAll('[data-source-config-tab]').forEach(function (button) {
+      var active = button.dataset.sourceConfigTab === state.sources.configTab;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+      button.tabIndex = active ? 0 : -1;
+    });
+    document.querySelectorAll('[data-source-config-panel]').forEach(function (panel) {
+      panel.hidden = panel.dataset.sourceConfigPanel !== state.sources.configTab;
+    });
+  }
+
+  function accountPluginDescriptors() {
+    return (state.sources.catalog || []).filter(function (descriptor) {
+      return boolValue(descriptor.requires_account, false);
+    });
+  }
+
+  function findPluginDescriptor(key) {
+    return accountPluginDescriptors().find(function (descriptor) {
+      return String(descriptor.key || descriptor.name) === String(key);
+    });
+  }
+
+  function pluginCredentialMetadataFieldHTML(pluginKey, metadata) {
+    if (pluginKey !== 'qqpd' && pluginKey !== 'weibo') return '';
+    var values = credentialMetadataValues(pluginKey, metadata || {});
+    var fieldName = pluginKey === 'qqpd' ? 'metadata_channels' : 'metadata_user_ids';
+    var label = pluginKey === 'qqpd' ? 'QQ 频道 ID' : '微博用户 ID';
+    var placeholder = pluginKey === 'qqpd' ? 'pd97631607\nkuake12345' : '1234567890\n9876543210';
+    return '<label class="field plugin-metadata-field"><span>' + label + '</span><textarea class="source-input" name="' + fieldName + '" rows="5" placeholder="' + placeholder + '">' + escapeHTML(values.join('\n')) + '</textarea><small>支持逗号、中文逗号、分号或换行分隔，重复项会自动去除。</small></label>';
+  }
+
+  function collectPluginCredentialMetadata(form, pluginKey) {
+    if (pluginKey === 'qqpd') {
+      var channelField = form.elements.metadata_channels;
+      return { channels: uniqueBulkValues(channelField ? channelField.value : '', normalizeSourceChannelKey) };
+    }
+    if (pluginKey === 'weibo') {
+      var userField = form.elements.metadata_user_ids;
+      return { user_ids: uniqueBulkValues(userField ? userField.value : '') };
+    }
+    return {};
+  }
+
+  function renderPluginCredentialLoginFields() {
+    var form = byId('plugin-credential-form');
+    var pluginKey = form.elements.plugin_key.value;
+    var descriptor = findPluginDescriptor(pluginKey);
+    var loginType = descriptor && descriptor.login_type === 'qr' ? 'qr' : 'password';
+    var target = byId('plugin-credential-login-fields');
+    var metadata = state.sources.credentialEditing ? state.sources.credentialEditing.public_metadata || {} : {};
+    var metadataField = pluginCredentialMetadataFieldHTML(pluginKey, metadata);
+    var accountHelp = descriptor && descriptor.description ? '<div class="inline-alert info">' + escapeHTML(descriptor.description) + '</div>' : '';
+    if (state.sources.credentialEditMode === 'metadata') {
+      target.innerHTML = accountHelp + (metadataField || '<div class="inline-alert info">该插件没有独立搜索范围设置。</div>');
+    } else if (loginType === 'qr') {
+      target.innerHTML = accountHelp + '<div class="qr-login-hint">' + icon('qr-code') + '<div><strong>扫码登录</strong><span>提交后将生成一次性二维码，登录状态会自动更新。</span></div></div>' + metadataField;
+    } else {
+      target.innerHTML = accountHelp + '<label class="field"><span>登录账号</span><input name="username" type="text" autocomplete="username" required></label>' +
+        '<label class="field"><span>登录密码</span><input name="password" type="password" autocomplete="current-password" required></label>' + metadataField;
+    }
+    refreshIcons(target);
+  }
+
+  function openPluginCredentialDialog(credential, mode) {
+    var descriptors = accountPluginDescriptors();
+    if (!descriptors.length) {
+      toast('当前没有可配置的账号型插件', 'error');
+      return;
+    }
+    state.sources.credentialEditing = credential || null;
+    state.sources.credentialEditMode = mode === 'metadata' ? 'metadata' : 'login';
+    var form = byId('plugin-credential-form');
+    form.reset();
+    form.elements.credential_id.value = credential ? credentialPublicID(credential) : '';
+    form.elements.plugin_key.innerHTML = descriptors.map(function (descriptor) {
+      var key = descriptor.key || descriptor.name;
+      return '<option value="' + escapeHTML(key) + '">' + escapeHTML(descriptor.display_name || key) + '</option>';
+    }).join('');
+    if (credential) {
+      form.elements.plugin_key.value = credential.plugin_key;
+      form.elements.plugin_key.disabled = true;
+      form.elements.scope.value = credential.scope || 'admin_private';
+      form.elements.scope.disabled = true;
+      form.elements.display_name.value = credential.display_name || '';
+    } else {
+      form.elements.plugin_key.disabled = false;
+      form.elements.scope.disabled = false;
+    }
+    form.elements.display_name.disabled = state.sources.credentialEditMode === 'metadata';
+    byId('plugin-credential-dialog-title').textContent = state.sources.credentialEditMode === 'metadata' ? '编辑账号搜索范围' : (credential ? '重新登录插件账号' : '新增插件账号');
+    byId('plugin-credential-submit').querySelector('span').textContent = state.sources.credentialEditMode === 'metadata' ? '保存搜索范围' : (credential ? '重新登录' : '登录并保存');
+    byId('plugin-credential-form-error').hidden = true;
+    renderPluginCredentialLoginFields();
+    byId('plugin-credential-dialog').showModal();
+    refreshIcons(byId('plugin-credential-dialog'));
+  }
+
+  function setPluginCredentialFormBusy(busy) {
+    var button = byId('plugin-credential-submit');
+    button.disabled = busy;
+    button.classList.toggle('loading', busy);
+  }
+
+  async function submitPluginCredential(event) {
+    event.preventDefault();
+    var form = event.currentTarget;
+    var descriptor = findPluginDescriptor(form.elements.plugin_key.value);
+    var editing = state.sources.credentialEditing;
+    var payload = {
+      plugin_key: form.elements.plugin_key.value,
+      scope: form.elements.scope.value,
+      display_name: form.elements.display_name.value.trim()
+    };
+    payload.metadata = collectPluginCredentialMetadata(form, payload.plugin_key);
+    var errorNode = byId('plugin-credential-form-error');
+    errorNode.hidden = true;
+    setPluginCredentialFormBusy(true);
+    try {
+      if (state.sources.credentialEditMode === 'metadata') {
+        if (!editing) throw new APIError('未找到需要更新的插件账号', 404, null);
+        await apiRequest(API.credentials + '/' + encodeURIComponent(credentialPublicID(editing)), {
+          method: 'PATCH',
+          body: { metadata: payload.metadata }
+        });
+        byId('plugin-credential-dialog').close();
+        toast('账号搜索范围已更新', 'success');
+        await loadSourceCredentials();
+      } else if (descriptor && descriptor.login_type === 'qr') {
+        await startPluginQRFlow(payload, editing);
+        byId('plugin-credential-dialog').close();
+      } else {
+        payload.username = form.elements.username.value.trim();
+        payload.password = form.elements.password.value;
+        if (!payload.username || !payload.password) throw new APIError('请输入登录账号和密码', 400, null);
+        await apiRequest(editing ? API.credentials + '/' + encodeURIComponent(credentialPublicID(editing)) + '/relogin' : API.credentials, {
+          method: 'POST',
+          body: payload
+        });
+        byId('plugin-credential-dialog').close();
+        toast(editing ? '账号重新登录成功' : '插件账号已添加', 'success');
+        await loadSourceCredentials();
+      }
+    } catch (error) {
+      errorNode.textContent = error.message || '插件账号保存失败';
+      errorNode.hidden = false;
+    } finally {
+      setPluginCredentialFormBusy(false);
+    }
+  }
+
+  function pluginQRImageURL(flow) {
+    var value = String(pick(flow, ['qr_code_url', 'qr_code_data', 'qr_code'], '') || '').trim();
+    if (/^data:image\/(png|jpeg|gif|webp|svg\+xml);/i.test(value) || /^https:\/\//i.test(value)) return value;
+    if (/^[a-zA-Z0-9+/=\r\n]+$/.test(value) && value.length > 100) return 'data:image/png;base64,' + value.replace(/\s/g, '');
+    return '';
+  }
+
+  function normalizePluginLoginFlow(value) {
+    return pick(value, ['flow', 'login_flow'], value || {});
+  }
+
+  async function startPluginQRFlow(payload, editing) {
+    closePluginQRFlow(false);
+    var flow = normalizePluginLoginFlow(await apiRequest(API.credentialLoginFlows, {
+      method: 'POST',
+      body: Object.assign({}, payload, editing ? { credential_id: credentialPublicID(editing) } : {})
+    }));
+    state.sources.loginFlow = { data: flow, payload: payload, editing: editing || null };
+    renderPluginQRFlow();
+    byId('plugin-qr-dialog').showModal();
+    schedulePluginQRFlowPoll();
+  }
+
+  function renderPluginQRFlow() {
+    if (!state.sources.loginFlow) return;
+    var flow = state.sources.loginFlow.data || {};
+    var status = String(flow.status || 'pending');
+    var imageURL = pluginQRImageURL(flow);
+    byId('plugin-qr-image').innerHTML = imageURL ? '<img src="' + escapeHTML(imageURL) + '" alt="插件账号登录二维码">' : '<span>正在生成二维码…</span>';
+    byId('plugin-qr-status').textContent = status === 'scanned' ? '已扫码，请在手机上确认' : (status === 'success' ? '登录成功' : (status === 'expired' ? '二维码已过期' : (status === 'failed' ? '登录失败' : '等待扫码')));
+    byId('plugin-qr-message').textContent = flow.message || '请使用对应客户端扫码，并在手机上确认登录。';
+    byId('plugin-qr-retry').hidden = status !== 'expired' && status !== 'failed';
+    refreshIcons(byId('plugin-qr-dialog'));
+  }
+
+  function schedulePluginQRFlowPoll() {
+    if (!state.sources.loginFlow) return;
+    clearTimeout(state.sources.loginFlowTimer);
+    state.sources.loginFlowTimer = window.setTimeout(pollPluginQRFlow, 1200);
+  }
+
+  async function pollPluginQRFlow() {
+    if (!state.sources.loginFlow || !byId('plugin-qr-dialog').open) return;
+    var current = state.sources.loginFlow;
+    var flowID = String(pick(current.data, ['public_id', 'flow_id', 'id'], ''));
+    if (!flowID) return;
+    try {
+      current.data = normalizePluginLoginFlow(await apiRequest(API.credentialLoginFlows + '/' + encodeURIComponent(flowID)));
+      renderPluginQRFlow();
+      if (current.data.status === 'success') {
+        toast(current.editing ? '账号重新登录成功' : '插件账号已添加', 'success');
+        window.setTimeout(function () { closePluginQRFlow(); }, 600);
+        await loadSourceCredentials();
+        return;
+      }
+      if (current.data.status === 'failed' || current.data.status === 'expired') return;
+    } catch (error) {
+      byId('plugin-qr-status').textContent = '状态更新失败';
+      byId('plugin-qr-message').textContent = error.message || '请稍后重试';
+      byId('plugin-qr-retry').hidden = false;
+      return;
+    }
+    schedulePluginQRFlowPoll();
+  }
+
+  function closePluginQRFlow(clearState) {
+    clearTimeout(state.sources.loginFlowTimer);
+    state.sources.loginFlowTimer = null;
+    if (byId('plugin-qr-dialog').open) byId('plugin-qr-dialog').close();
+    if (clearState !== false) state.sources.loginFlow = null;
+  }
+
+  async function retryPluginQRFlow() {
+    if (!state.sources.loginFlow) return;
+    var current = state.sources.loginFlow;
+    try {
+      await startPluginQRFlow(current.payload, current.editing);
+    } catch (error) {
+      byId('plugin-qr-status').textContent = '二维码生成失败';
+      byId('plugin-qr-message').textContent = error.message || '请稍后重试';
+    }
+  }
+
+  async function changePluginCredentialScope(id) {
+    var credential = findSourceCredential(id);
+    if (!credential) return;
+    var nextScope = credential.scope === 'public_shared' ? 'admin_private' : 'public_shared';
+    var confirmed = await confirmAction('更改账号可见范围', nextScope === 'public_shared' ? '设为共享后，所有用户搜索均可使用此账号。确认继续？' : '转为私有后，普通用户不再使用此账号。确认继续？', '确认更改');
+    if (!confirmed) return;
+    await mutateSourceCredential(API.credentials + '/' + encodeURIComponent(id), { scope: nextScope }, '账号范围已更新');
+  }
+
+  async function togglePluginCredential(id) {
+    var credential = findSourceCredential(id);
+    if (!credential) return;
+    var enabled = pick(credential, ['owner_enabled', 'enabled'], true) !== false;
+    await mutateSourceCredential(API.credentials + '/' + encodeURIComponent(id), { enabled: !enabled }, enabled ? '账号已停用' : '账号已启用');
+  }
+
+  async function suspendUserCredential(id) {
+    var credential = findSourceCredential(id);
+    if (!credential) return;
+    var suspended = Boolean(credential.admin_suspended_at || credential.admin_suspended || credential.status === 'admin_suspended');
+    await mutateSourceCredential(API.userCredentials + '/' + encodeURIComponent(id), { suspended: !suspended }, suspended ? '用户账号已恢复' : '用户账号已暂停');
+  }
+
+  async function mutateSourceCredential(path, body, message) {
+    try {
+      await apiRequest(path, { method: 'PATCH', body: body });
+      toast(message, 'success');
+      await loadSourceCredentials();
+    } catch (error) {
+      toast(error.message || '账号更新失败', 'error');
+    }
+  }
+
+  async function deleteSourceCredential(id, userOwned) {
+    var confirmed = await confirmAction('删除插件账号', userOwned ? '删除后用户需要重新登录才能继续使用此账号。管理员无法恢复该凭证。' : '删除后该账号无法恢复，关联搜索将立即停止使用它。', '删除账号');
+    if (!confirmed) return;
+    try {
+      await apiRequest((userOwned ? API.userCredentials : API.credentials) + '/' + encodeURIComponent(id), { method: 'DELETE' });
+      toast('插件账号已删除', 'success');
+      await loadSourceCredentials();
+    } catch (error) {
+      toast(error.message || '插件账号删除失败', 'error');
+    }
+  }
+
+  function updateCredentialFilters() {
+    state.sources.credentialQuery.plugin_key = byId('credential-plugin-filter').value;
+    state.sources.credentialQuery.status = byId('credential-status-filter').value;
+    state.sources.credentialQuery.user = byId('credential-user-filter').value;
+    if (state.sources.tab === 'users' && state.sources.credentialQuery.user) renderSourceCredentials();
+    else loadSourceCredentials();
+  }
+
+  function startDetailPolling(id) {
+    if (state.detailPollTimer) return;
+    state.detailPollTimer = window.setInterval(function () {
+      if (document.visibilityState === 'visible' && byId('run-detail-dialog').open) openRunDetail(id, true);
+    }, 4000);
+  }
+
+  function stopDetailPolling() {
+    if (state.detailPollTimer) {
+      clearInterval(state.detailPollTimer);
+      state.detailPollTimer = null;
+    }
+    if (!byId('run-detail-dialog').open) state.currentRunDetail = null;
+  }
+
+  function handleActionClick(event) {
+    var viewLink = event.target.closest('[data-view]');
+    if (viewLink) {
+      event.preventDefault();
+      navigate(viewLink.dataset.view);
+      return;
+    }
+    var keywordTab = event.target.closest('[data-keyword-tab]');
+    if (keywordTab) {
+      switchKeywordTab(keywordTab.dataset.keywordTab);
+      return;
+    }
+    var keywordMode = event.target.closest('[data-keyword-mode]');
+    if (keywordMode && !keywordMode.disabled) {
+      setKeywordDialogMode(keywordMode.dataset.keywordMode, false);
+      return;
+    }
+    var credentialTab = event.target.closest('[data-credential-tab]');
+    if (credentialTab) {
+      switchCredentialTab(credentialTab.dataset.credentialTab);
+      return;
+    }
+    var sourceConfigTab = event.target.closest('[data-source-config-tab]');
+    if (sourceConfigTab) {
+      switchSourceConfigTab(sourceConfigTab.dataset.sourceConfigTab);
+      return;
+    }
+    var actionElement = event.target.closest('[data-action]');
+    if (!actionElement) return;
+    var action = actionElement.dataset.action;
+    if (action === 'open-menu') openMenu();
+    else if (action === 'close-menu') closeMenu();
+    else if (action === 'logout') logout();
+    else if (action === 'refresh-view') refreshCurrentView();
+    else if (action === 'close-dialog') actionElement.closest('dialog').close();
+    else if (action === 'reset-resource-filters') {
+      byId('resource-filters').reset();
+      readResourceFilters();
+    } else if (action === 'copy-resource') copyText(actionElement.dataset.url, '链接');
+    else if (action === 'view-resource') openResourceDetail(actionElement.dataset.id);
+    else if (action === 'new-keyword') openKeywordDialog(null, state.keywords.tab === 'api' ? 'api' : 'manual');
+    else if (action === 'edit-keyword') {
+      var keyword = state.keywords.items.find(function (item) {
+        return String(pick(item, ['id', 'keyword_id'], '')) === String(actionElement.dataset.id);
+      });
+      if (keyword) openKeywordDialog(keyword);
+    } else if (action === 'toggle-keyword') toggleKeyword(actionElement.dataset.id, actionElement);
+    else if (action === 'delete-keyword') deleteKeyword(actionElement.dataset.id);
+    else if (action === 'switch-api-editor') switchAPIEditorMode(actionElement.dataset.editorTarget, actionElement.dataset.editorMode);
+    else if (action === 'add-api-kv') addAPIRow(actionElement.dataset.target);
+    else if (action === 'remove-api-kv') actionElement.closest('.api-kv-row').remove();
+    else if (action === 'test-keyword-api') testKeywordAPI();
+    else if (action === 'select-json-path') selectKeywordAPIPath(actionElement.dataset.path);
+    else if (action === 'edit-keyword-api') openKeywordAPISource(actionElement.dataset.id);
+    else if (action === 'sync-keyword-api') syncKeywordAPISource(actionElement.dataset.id);
+    else if (action === 'copy-keyword-api') copyKeywordAPISource(actionElement.dataset.id, actionElement);
+    else if (action === 'delete-keyword-api') deleteKeywordAPISource(actionElement.dataset.id);
+    else if (action === 'run-keyword') createRun([actionElement.dataset.id], false);
+    else if (action === 'launch-selected-run') launchSelectedRun(false);
+    else if (action === 'launch-selected-force-run') launchSelectedRun(true);
+    else if (action === 'open-run-dialog') openRunDialog();
+    else if (action === 'select-all-run-keywords') {
+      var enabledIds = state.runPicker.items.filter(function (item) {
+        return boolValue(pick(item, ['enabled', 'is_enabled'], true), true);
+      }).map(function (item) { return String(pick(item, ['id', 'keyword_id'], '')); });
+      var everySelected = enabledIds.length > 0 && enabledIds.every(function (id) { return state.runPicker.selected.has(id); });
+      state.runPicker.selected = everySelected ? new Set() : new Set(enabledIds);
+      renderRunKeywordPicker();
+    } else if (action === 'view-run') openRunDetail(actionElement.dataset.id);
+    else if (action === 'new-user') openUserDialog(null);
+    else if (action === 'edit-user') {
+      var user = findUser(actionElement.dataset.id);
+      if (user) openUserDialog(user);
+    } else if (action === 'toggle-user') toggleUser(actionElement.dataset.id);
+    else if (action === 'reset-user-password') resetUserPassword(actionElement.dataset.id);
+    else if (action === 'reset-user-key') resetUserKey(actionElement.dataset.id);
+    else if (action === 'revoke-user-key') revokeUserKey(actionElement.dataset.id);
+    else if (action === 'delete-user') deleteUser(actionElement.dataset.id);
+    else if (action === 'copy-credential') copyText(actionElement.dataset.value, '凭证');
+    else if (action === 'close-credentials') attemptCloseCredentials();
+    else if (action === 'cancel-confirm') settleConfirm(false);
+    else if (action === 'validate-sources') validateSources();
+    else if (action === 'save-sources') saveSources();
+    else if (action === 'add-channel') addSourceChannel();
+    else if (action === 'import-source-channels' || action === 'bulk-import-channels' || action === 'bulk-add-channels' || action === 'import-channels') importSourceChannels();
+    else if (action === 'remove-channel') removeSourceChannel(numberValue(actionElement.dataset.index, -1));
+    else if (action === 'new-plugin-credential') openPluginCredentialDialog(null);
+    else if (action === 'relogin-plugin-credential') {
+      var sourceCredential = findSourceCredential(actionElement.dataset.id);
+      if (sourceCredential) openPluginCredentialDialog(sourceCredential);
+    }
+    else if (action === 'edit-plugin-credential-search-scope') {
+      var searchScopeCredential = findSourceCredential(actionElement.dataset.id);
+      if (searchScopeCredential) openPluginCredentialDialog(searchScopeCredential, 'metadata');
+    }
+    else if (action === 'change-plugin-credential-scope') changePluginCredentialScope(actionElement.dataset.id);
+    else if (action === 'toggle-plugin-credential') togglePluginCredential(actionElement.dataset.id);
+    else if (action === 'delete-plugin-credential') deleteSourceCredential(actionElement.dataset.id, false);
+    else if (action === 'suspend-user-credential') suspendUserCredential(actionElement.dataset.id);
+    else if (action === 'delete-user-credential') deleteSourceCredential(actionElement.dataset.id, true);
+    else if (action === 'close-plugin-qr') closePluginQRFlow();
+    else if (action === 'retry-plugin-qr') retryPluginQRFlow();
+  }
+
+  function handleChange(event) {
+    var target = event.target;
+    if (target.matches('[data-source-plugin]')) {
+      state.sources.config = collectSourceDraft();
+      renderSourcePlugins(state.sources.config);
+    }
+    else if (target.matches('#resource-filters select, #resource-filters input[type="date"]')) readResourceFilters();
+    else if (target.id === 'keyword-enabled-filter' || target.id === 'keyword-type-filter') updateKeywordFilters();
+    else if (target.id === 'api-body-type') syncAPIBodyEditor();
+    else if (target.id === 'api-iteration-enabled' || target.id === 'api-iteration-location') updateAPIIterationPreview();
+    else if (target.id === 'run-status-filter' || target.id === 'run-trigger-filter') updateRunFilters();
+    else if (target.id === 'user-role-filter' || target.id === 'user-status-filter') updateUserFilters();
+    else if (target.id === 'usage-range') changeUsageRange();
+    else if (target.id === 'credential-plugin-filter' || target.id === 'credential-status-filter') updateCredentialFilters();
+    else if (target.matches('#plugin-credential-form [name="plugin_key"]')) renderPluginCredentialLoginFields();
+    else if (target.id === 'usage-user-filter' || target.id === 'usage-auth-filter' || target.id === 'usage-status-filter' || target.id === 'usage-cache-filter') updateUsageFilters();
+    else if (target.matches('#user-form [name="rate_limit_disabled"]')) syncUserLimitFields();
+    else if (target.id === 'select-all-keywords') {
+      state.keywords.items.forEach(function (item) {
+        var id = String(pick(item, ['id', 'keyword_id'], ''));
+        if (target.checked) state.keywords.selected.add(id);
+        else state.keywords.selected.delete(id);
+      });
+      renderKeywords();
+    } else if (target.dataset.action === 'select-keyword') {
+      if (target.checked) state.keywords.selected.add(target.dataset.id);
+      else state.keywords.selected.delete(target.dataset.id);
+      updateKeywordBulkBar();
+    } else if (target.dataset.action === 'select-run-keyword') {
+      if (target.checked) state.runPicker.selected.add(target.dataset.id);
+      else state.runPicker.selected.delete(target.dataset.id);
+      byId('run-selected-label').textContent = '已选 ' + state.runPicker.selected.size + ' 项';
+    }
+  }
+
+  function handlePagination(event) {
+    var button = event.target.closest('[data-page-scope]');
+    if (!button || button.disabled) return;
+    var page = numberValue(button.dataset.page, 1);
+    var scope = button.dataset.pageScope;
+    var pageState = scope === 'usageLogs' ? state.usage : state[scope];
+    if (!pageState || page < 1 || page > pageState.pages) return;
+    pageState.page = page;
+    if (scope !== 'usageLogs') state.loaded[scope] = false;
+    if (scope === 'runs') loadRuns({ force: true });
+    else if (scope === 'resources') loadResources(true);
+    else if (scope === 'keywords') loadKeywords(true);
+    else if (scope === 'users') loadUsers(true);
+    else if (scope === 'usageLogs') {
+      state.usage.page = page;
+      loadUsageLogs(true);
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function setupEvents() {
+    byId('login-form').addEventListener('submit', submitLogin);
+    byId('keyword-form').addEventListener('submit', saveKeyword);
+    byId('run-form').addEventListener('submit', submitRun);
+    byId('user-form').addEventListener('submit', saveUser);
+    byId('plugin-credential-form').addEventListener('submit', submitPluginCredential);
+    byId('confirm-submit').addEventListener('click', function () { settleConfirm(true); });
+    document.addEventListener('click', handleActionClick);
+    document.addEventListener('click', handlePagination);
+    document.addEventListener('change', handleChange);
+    byId('resource-filters').addEventListener('submit', function (event) {
+      event.preventDefault();
+      readResourceFilters();
+    });
+    byId('resource-filters').querySelector('[name="q"]').addEventListener('input', debounce(readResourceFilters, 350));
+    byId('keyword-search').addEventListener('input', debounce(updateKeywordFilters, 350));
+    byId('api-response-path').addEventListener('input', debounce(updateKeywordAPIExtractPreview, 120));
+    ['api-iteration-start', 'api-iteration-step', 'api-iteration-count', 'api-iteration-delay'].forEach(function (id) {
+      byId(id).addEventListener('input', updateAPIIterationPreview);
+    });
+    ['query', 'header', 'form'].forEach(function (target) {
+      byId(apiEditorDefinitions[target].json).addEventListener('blur', function () { validateAPIObjectEditor(target); });
+      byId(apiEditorDefinitions[target].json).addEventListener('input', function () { showAPIEditorError(target, ''); });
+    });
+    byId('user-search').addEventListener('input', debounce(updateUserFilters, 350));
+    byId('usage-log-search').addEventListener('input', debounce(updateUsageFilters, 350));
+    byId('credential-user-filter').addEventListener('input', debounce(function (event) {
+      state.sources.credentialQuery.user = event.target.value;
+      renderSourceCredentials();
+    }, 220));
+    var pluginSearch = byId('source-plugin-search');
+    if (pluginSearch) pluginSearch.addEventListener('input', debounce(function (event) {
+      state.sources.config = collectSourceDraft();
+      state.sources.pluginSearch = event.target.value;
+      renderSourcePlugins(state.sources.config);
+    }, 180));
+    var channelBulk = byId('source-channel-bulk');
+    if (channelBulk) channelBulk.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        importSourceChannels();
+      }
+    });
+    byId('plugin-qr-dialog').addEventListener('close', function () {
+      clearTimeout(state.sources.loginFlowTimer);
+      state.sources.loginFlowTimer = null;
+      state.sources.loginFlow = null;
+    });
+    byId('run-keyword-search').addEventListener('input', function (event) {
+      state.runPicker.search = event.target.value.trim();
+      renderRunKeywordPicker();
+    });
+    window.addEventListener('hashchange', function () { navigate(location.hash.slice(1) || 'overview'); });
+    window.addEventListener('resize', debounce(resizeCharts, 120));
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible' && state.view === 'runs') loadRuns({ silent: true, force: true });
+    });
+    document.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') {
+        var row = event.target.closest('tr[data-action="view-run"]');
+        if (row) openRunDetail(row.dataset.id);
+      }
+    });
+  }
+
+  function initialize() {
+    byId('today-label').textContent = new Intl.DateTimeFormat('zh-CN', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      weekday: 'short'
+    }).format(new Date());
+    setupEvents();
+    setupDialogBehavior();
+    refreshIcons();
+    restoreSession();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initialize);
+  } else {
+    initialize();
+  }
+}());

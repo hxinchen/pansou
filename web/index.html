@@ -1,0 +1,1122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#ffffff">
+  <title>PanSou 管理台</title>
+  <link rel="icon" href="data:,">
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="stylesheet" href="./assets/styles.css">
+</head>
+<body>
+  <div id="login-view" class="auth-layout" hidden>
+    <main class="login-panel" aria-labelledby="login-title">
+      <div class="brand-lockup login-brand">
+        <span class="brand-mark" aria-hidden="true">P</span>
+        <span>
+          <strong>PanSou</strong>
+          <small>资源管理台</small>
+        </span>
+      </div>
+      <div class="login-heading">
+        <p class="eyebrow">ADMIN ACCESS</p>
+        <h1 id="login-title">登录管理台</h1>
+      </div>
+      <form id="login-form" class="form-stack" novalidate>
+        <label class="field">
+          <span>用户名</span>
+          <span class="input-wrap">
+            <i data-lucide="user" aria-hidden="true"></i>
+            <input id="login-username" name="username" type="text" autocomplete="username" required autofocus>
+          </span>
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <span class="input-wrap">
+            <i data-lucide="lock-keyhole" aria-hidden="true"></i>
+            <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+          </span>
+        </label>
+        <p id="login-error" class="form-error" role="alert" hidden></p>
+        <button id="login-submit" class="button primary wide" type="submit">
+          <i data-lucide="log-in" aria-hidden="true"></i>
+          <span>登录</span>
+        </button>
+      </form>
+      <footer class="login-footer">PAN SOU / ADMIN CONSOLE</footer>
+    </main>
+    <aside class="auth-art" aria-hidden="true">
+      <div class="art-grid"></div>
+      <div class="art-copy">
+        <span>01 / COLLECT</span>
+        <span>02 / VERIFY</span>
+        <span>03 / ARCHIVE</span>
+      </div>
+    </aside>
+  </div>
+
+  <div id="app-shell" class="app-shell" hidden>
+    <aside id="sidebar" class="sidebar" aria-label="主导航">
+      <div class="sidebar-head">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">P</span>
+          <span>
+            <strong>PanSou</strong>
+            <small>资源管理台</small>
+          </span>
+        </div>
+        <button class="icon-button sidebar-close" type="button" data-action="close-menu" aria-label="关闭导航">
+          <i data-lucide="x" aria-hidden="true"></i>
+        </button>
+      </div>
+
+      <nav class="nav-list">
+        <a class="nav-item active" href="#overview" data-view="overview">
+          <i data-lucide="layout-dashboard" aria-hidden="true"></i>
+          <span>数据概览</span>
+        </a>
+        <a class="nav-item" href="#resources" data-view="resources">
+          <i data-lucide="database" aria-hidden="true"></i>
+          <span>资源库</span>
+        </a>
+        <a class="nav-item" href="#keywords" data-view="keywords">
+          <i data-lucide="tags" aria-hidden="true"></i>
+          <span>关键词</span>
+        </a>
+        <a class="nav-item" href="#runs" data-view="runs">
+          <i data-lucide="activity" aria-hidden="true"></i>
+          <span>采集任务</span>
+        </a>
+        <a class="nav-item" href="#sources" data-view="sources">
+          <i data-lucide="waypoints" aria-hidden="true"></i>
+          <span>搜索来源</span>
+        </a>
+        <a class="nav-item" href="#users" data-view="users">
+          <i data-lucide="users" aria-hidden="true"></i>
+          <span>用户管理</span>
+        </a>
+        <a class="nav-item" href="#usage" data-view="usage">
+          <i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>
+          <span>API 监控</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="service-state">
+          <span id="health-dot" class="status-dot neutral" aria-hidden="true"></span>
+          <span>
+            <strong id="health-label">连接中</strong>
+            <small id="health-detail">API 服务</small>
+          </span>
+        </div>
+        <button class="account-button" type="button" data-action="logout">
+          <span class="avatar" id="account-avatar" aria-hidden="true">A</span>
+          <span class="account-copy">
+            <strong id="account-name">管理员</strong>
+            <small>退出登录</small>
+          </span>
+          <i data-lucide="log-out" aria-hidden="true"></i>
+        </button>
+      </div>
+    </aside>
+
+    <div id="sidebar-backdrop" class="sidebar-backdrop" data-action="close-menu" hidden></div>
+
+    <div class="workspace">
+      <header class="topbar">
+        <button class="icon-button menu-button" type="button" data-action="open-menu" aria-label="打开导航">
+          <i data-lucide="menu" aria-hidden="true"></i>
+        </button>
+        <div class="topbar-title">
+          <span>PanSou</span>
+          <i data-lucide="chevron-right" aria-hidden="true"></i>
+          <strong id="current-view-label">数据概览</strong>
+        </div>
+        <div class="topbar-actions">
+          <span id="last-updated" class="last-updated" aria-live="polite"></span>
+          <button class="icon-button" type="button" data-action="refresh-view" aria-label="刷新当前页面" title="刷新">
+            <i data-lucide="refresh-cw" aria-hidden="true"></i>
+          </button>
+        </div>
+      </header>
+
+      <main id="main-content" class="main-content" tabindex="-1">
+        <section id="view-overview" class="view active" data-page="overview" aria-labelledby="overview-title">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">OVERVIEW</p>
+              <h1 id="overview-title">数据概览</h1>
+            </div>
+            <div class="date-chip">
+              <i data-lucide="calendar-days" aria-hidden="true"></i>
+              <span id="today-label"></span>
+            </div>
+          </div>
+
+          <div id="overview-alert" class="inline-alert error" role="alert" hidden></div>
+          <div id="stat-grid" class="stat-grid" aria-live="polite">
+            <article class="stat-card skeleton-card"></article>
+            <article class="stat-card skeleton-card"></article>
+            <article class="stat-card skeleton-card"></article>
+            <article class="stat-card skeleton-card"></article>
+          </div>
+
+          <div class="overview-grid">
+            <section class="panel trend-panel" aria-labelledby="trend-title">
+              <div class="panel-heading">
+                <div>
+                  <p class="panel-kicker">近 7 日</p>
+                  <h2 id="trend-title">资源新增趋势</h2>
+                </div>
+                <div class="legend-inline">
+                  <span><i class="legend-mark blue"></i>新增资源</span>
+                  <span><i class="legend-mark green"></i>发现次数</span>
+                </div>
+              </div>
+              <div id="trend-chart" class="chart" role="img" aria-label="近七日资源新增趋势图"></div>
+            </section>
+
+            <section class="panel status-panel" aria-labelledby="status-title">
+              <div class="panel-heading">
+                <div>
+                  <p class="panel-kicker">资源质量</p>
+                  <h2 id="status-title">检测状态</h2>
+                </div>
+              </div>
+              <div id="status-chart" class="chart compact" role="img" aria-label="链接检测状态分布图"></div>
+              <div id="status-legend" class="status-legend"></div>
+            </section>
+
+            <section class="panel source-panel" aria-labelledby="source-title">
+              <div class="panel-heading">
+                <div>
+                  <p class="panel-kicker">采集渠道</p>
+                  <h2 id="source-title">来源贡献</h2>
+                </div>
+              </div>
+              <div id="source-chart" class="chart" role="img" aria-label="来源贡献排行图"></div>
+            </section>
+
+            <section class="panel batch-panel" aria-labelledby="batch-title">
+              <div class="panel-heading">
+                <div>
+                  <p class="panel-kicker">实时状态</p>
+                  <h2 id="batch-title">当前批次</h2>
+                </div>
+                <a href="#runs" class="text-link" data-view="runs">查看任务</a>
+              </div>
+              <div id="active-batch" class="active-batch"></div>
+            </section>
+          </div>
+
+          <section class="table-section" aria-labelledby="recent-runs-title">
+            <div class="section-heading">
+              <h2 id="recent-runs-title">最近任务</h2>
+              <a class="text-link" href="#runs" data-view="runs">全部任务 <i data-lucide="arrow-up-right" aria-hidden="true"></i></a>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>批次</th>
+                    <th>触发方式</th>
+                    <th>状态</th>
+                    <th>关键词</th>
+                    <th>新增 / 重复</th>
+                    <th>开始时间</th>
+                    <th>耗时</th>
+                  </tr>
+                </thead>
+                <tbody id="recent-runs-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="view-resources" class="view" data-page="resources" aria-labelledby="resources-title" hidden>
+          <div class="page-heading with-actions">
+            <div>
+              <p class="eyebrow">LIBRARY</p>
+              <h1 id="resources-title">资源库</h1>
+            </div>
+            <span id="resource-total-label" class="total-label">0 条资源</span>
+          </div>
+
+          <form id="resource-filters" class="filter-bar" aria-label="资源筛选">
+            <label class="search-field grow">
+              <i data-lucide="search" aria-hidden="true"></i>
+              <input name="q" type="search" placeholder="搜索标题、内容或链接" aria-label="搜索资源">
+            </label>
+            <label class="select-field">
+              <span class="sr-only">关键词类型</span>
+              <select name="keyword_type">
+                <option value="">全部类型</option>
+                <option value="general">通用</option>
+                <option value="movie">电影</option>
+                <option value="series">剧集</option>
+                <option value="book">图书</option>
+                <option value="software">软件</option>
+                <option value="course">课程</option>
+              </select>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </label>
+            <label class="select-field">
+              <span class="sr-only">网盘类型</span>
+              <select name="disk_type">
+                <option value="">全部网盘</option>
+                <option value="baidu">百度网盘</option>
+                <option value="quark">夸克网盘</option>
+                <option value="aliyun">阿里云盘</option>
+                <option value="uc">UC 网盘</option>
+                <option value="tianyi">天翼云盘</option>
+                <option value="115">115 网盘</option>
+                <option value="xunlei">迅雷网盘</option>
+                <option value="123">123 网盘</option>
+                <option value="pikpak">PikPak</option>
+                <option value="magnet">磁力链接</option>
+                <option value="ed2k">电驴链接</option>
+                <option value="others">其他</option>
+              </select>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </label>
+            <label class="select-field">
+              <span class="sr-only">检测状态</span>
+              <select name="status">
+                <option value="">全部状态</option>
+                <option value="pending">待检测</option>
+                <option value="valid">有效</option>
+                <option value="invalid">失效</option>
+                <option value="unknown">未知</option>
+                <option value="unsupported">不支持</option>
+              </select>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </label>
+            <label class="select-field">
+              <span class="sr-only">来源</span>
+              <select name="source">
+                <option value="">全部来源</option>
+                <option value="tg">Telegram</option>
+                <option value="plugin">插件</option>
+                <option value="external">外部搜索</option>
+              </select>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </label>
+            <label class="date-field">
+              <span>发现于</span>
+              <input name="date_from" type="date" aria-label="发现日期起始">
+              <span>至</span>
+              <input name="date_to" type="date" aria-label="发现日期结束">
+            </label>
+            <button class="button secondary" type="button" data-action="reset-resource-filters">
+              <i data-lucide="rotate-ccw" aria-hidden="true"></i>
+              <span>重置</span>
+            </button>
+          </form>
+
+          <div id="resources-alert" class="inline-alert error" role="alert" hidden></div>
+          <div class="table-wrap resource-table-wrap">
+            <table class="resource-table">
+              <thead>
+                <tr>
+                  <th>资源</th>
+                  <th>网盘</th>
+                  <th>检测状态</th>
+                  <th>来源</th>
+                  <th>发现次数</th>
+                  <th>最近发现</th>
+                  <th><span class="sr-only">操作</span></th>
+                </tr>
+              </thead>
+              <tbody id="resources-body"></tbody>
+            </table>
+          </div>
+          <div id="resources-empty" class="empty-state" hidden>
+            <i data-lucide="database" aria-hidden="true"></i>
+            <h2>没有匹配的资源</h2>
+            <p>调整筛选条件后重试</p>
+          </div>
+          <nav id="resources-pagination" class="pagination" aria-label="资源分页"></nav>
+        </section>
+
+        <section id="view-keywords" class="view" data-page="keywords" aria-labelledby="keywords-title" hidden>
+          <div class="page-heading with-actions">
+            <div>
+              <p class="eyebrow">KEYWORDS</p>
+              <h1 id="keywords-title">关键词</h1>
+            </div>
+            <button class="button primary" type="button" data-action="new-keyword">
+              <i data-lucide="plus" aria-hidden="true"></i>
+              <span>新增关键词</span>
+            </button>
+          </div>
+
+          <div class="keyword-page-tabs" role="tablist" aria-label="关键词管理模块">
+            <button class="active" type="button" role="tab" aria-selected="true" data-keyword-tab="list"><i data-lucide="list" aria-hidden="true"></i><span>关键词列表</span></button>
+            <button type="button" role="tab" aria-selected="false" data-keyword-tab="api"><i data-lucide="webhook" aria-hidden="true"></i><span>API 来源</span></button>
+          </div>
+
+          <div id="keyword-list-panel" data-keyword-panel="list">
+
+          <div class="filter-bar keyword-filter-bar">
+            <label class="search-field grow">
+              <i data-lucide="search" aria-hidden="true"></i>
+              <input id="keyword-search" type="search" placeholder="搜索关键词" aria-label="搜索关键词">
+            </label>
+            <label class="select-field">
+              <span class="sr-only">启用状态</span>
+              <select id="keyword-enabled-filter">
+                <option value="">全部状态</option>
+                <option value="true">已启用</option>
+                <option value="false">已停用</option>
+              </select>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </label>
+            <label class="select-field">
+              <span class="sr-only">关键词类型</span>
+              <select id="keyword-type-filter">
+                <option value="">全部类型</option>
+                <option value="general">通用</option>
+                <option value="movie">电影</option>
+                <option value="series">剧集</option>
+                <option value="book">图书</option>
+                <option value="software">软件</option>
+                <option value="course">课程</option>
+              </select>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </label>
+          </div>
+
+          <div id="keyword-bulkbar" class="bulk-bar" hidden>
+            <span><strong id="keyword-selected-count">0</strong> 项已选</span>
+            <div>
+              <button class="button secondary" type="button" data-action="launch-selected-run">
+                <i data-lucide="play" aria-hidden="true"></i>
+                <span>开始采集</span>
+              </button>
+              <button class="button danger-ghost" type="button" data-action="launch-selected-force-run">
+                <i data-lucide="zap" aria-hidden="true"></i>
+                <span>强制采集</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="keywords-alert" class="inline-alert error" role="alert" hidden></div>
+          <div class="table-wrap">
+            <table class="keyword-table">
+              <thead>
+                <tr>
+                  <th class="check-cell"><input id="select-all-keywords" type="checkbox" aria-label="选择全部关键词"></th>
+                  <th>关键词</th>
+                  <th>类型 / 来源</th>
+                  <th>优先级</th>
+                  <th>冷却期</th>
+                  <th>下次可执行</th>
+                  <th>状态</th>
+                  <th><span class="sr-only">操作</span></th>
+                </tr>
+              </thead>
+              <tbody id="keywords-body"></tbody>
+            </table>
+          </div>
+          <div id="keywords-empty" class="empty-state" hidden>
+            <i data-lucide="tags" aria-hidden="true"></i>
+            <h2>暂无关键词</h2>
+            <p>新增关键词后即可安排采集</p>
+          </div>
+          <nav id="keywords-pagination" class="pagination" aria-label="关键词分页"></nav>
+          </div>
+
+          <div id="keyword-api-panel" data-keyword-panel="api" hidden>
+            <div id="keyword-api-alert" class="inline-alert error" role="alert" hidden></div>
+            <div class="keyword-api-overview">
+              <div><strong id="keyword-api-total">0</strong><span>API 来源</span></div>
+              <div><strong id="keyword-api-enabled">0</strong><span>自动同步中</span></div>
+              <div><strong id="keyword-api-items">0</strong><span>最近提取项</span></div>
+              <p>外部 API 同步后的内容会进入普通关键词列表，并继续使用现有冷却与采集流程。</p>
+            </div>
+            <div class="table-wrap keyword-api-table-wrap">
+              <table class="keyword-api-table">
+                <thead><tr><th>来源</th><th>请求</th><th>同步周期</th><th>最近状态</th><th>提取数量</th><th><span class="sr-only">操作</span></th></tr></thead>
+                <tbody id="keyword-api-body"></tbody>
+              </table>
+            </div>
+            <div id="keyword-api-empty" class="empty-state" hidden>
+              <i data-lucide="webhook" aria-hidden="true"></i><h2>暂无 API 来源</h2><p>新增来源并测试响应后即可自动同步关键词</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-runs" class="view" data-page="runs" aria-labelledby="runs-title" hidden>
+          <div class="page-heading with-actions">
+            <div>
+              <p class="eyebrow">COLLECTION</p>
+              <h1 id="runs-title">采集任务</h1>
+            </div>
+            <button class="button primary" type="button" data-action="open-run-dialog">
+              <i data-lucide="play" aria-hidden="true"></i>
+              <span>启动任务</span>
+            </button>
+          </div>
+
+          <div id="runs-live-region" aria-live="polite"></div>
+          <div class="filter-bar run-filter-bar">
+            <label class="select-field">
+              <span class="sr-only">任务状态</span>
+              <select id="run-status-filter">
+                <option value="">全部状态</option>
+                <option value="pending">等待中</option>
+                <option value="running">运行中</option>
+                <option value="success">成功</option>
+                <option value="success_empty">无结果</option>
+                <option value="failed">失败</option>
+              </select>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </label>
+            <label class="select-field">
+              <span class="sr-only">触发方式</span>
+              <select id="run-trigger-filter">
+                <option value="">全部触发方式</option>
+                <option value="scheduled">自动调度</option>
+                <option value="manual">手动</option>
+                <option value="external">外部搜索</option>
+              </select>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </label>
+          </div>
+
+          <div id="runs-alert" class="inline-alert error" role="alert" hidden></div>
+          <div class="table-wrap">
+            <table class="runs-table">
+              <thead>
+                <tr>
+                  <th>批次</th>
+                  <th>触发方式</th>
+                  <th>状态</th>
+                  <th>进度</th>
+                  <th>新增</th>
+                  <th>重复</th>
+                  <th>开始时间</th>
+                  <th>耗时</th>
+                  <th><span class="sr-only">操作</span></th>
+                </tr>
+              </thead>
+              <tbody id="runs-body"></tbody>
+            </table>
+          </div>
+          <div id="runs-empty" class="empty-state" hidden>
+            <i data-lucide="activity" aria-hidden="true"></i>
+            <h2>暂无采集任务</h2>
+            <p>启动任务后可在此查看进度</p>
+          </div>
+          <nav id="runs-pagination" class="pagination" aria-label="任务分页"></nav>
+        </section>
+
+        <section id="view-users" class="view" data-page="users" aria-labelledby="users-title" hidden>
+          <div class="page-heading with-actions">
+            <div>
+              <p class="eyebrow">ACCESS CONTROL</p>
+              <h1 id="users-title">用户管理</h1>
+            </div>
+            <button class="button primary" type="button" data-action="new-user">
+              <i data-lucide="user-plus" aria-hidden="true"></i>
+              <span>创建用户</span>
+            </button>
+          </div>
+
+          <div class="filter-bar user-filter-bar">
+            <label class="search-field grow">
+              <i data-lucide="search" aria-hidden="true"></i>
+              <input id="user-search" type="search" placeholder="搜索用户名" aria-label="搜索用户">
+            </label>
+            <label class="select-field">
+              <span class="sr-only">用户角色</span>
+              <select id="user-role-filter">
+                <option value="">全部角色</option>
+                <option value="admin">管理员</option>
+                <option value="user">普通用户</option>
+              </select>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </label>
+            <label class="select-field">
+              <span class="sr-only">账号状态</span>
+              <select id="user-status-filter">
+                <option value="">全部状态</option>
+                <option value="enabled">已启用</option>
+                <option value="disabled">已停用</option>
+                <option value="expired">已到期</option>
+              </select>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </label>
+          </div>
+
+          <div id="users-alert" class="inline-alert error" role="alert" hidden></div>
+          <div id="users-forbidden" class="permission-state" hidden>
+            <i data-lucide="shield-alert" aria-hidden="true"></i>
+            <h2>需要管理员权限</h2>
+            <p>当前账号不能访问用户管理，请切换管理员账号。</p>
+            <button class="button secondary" type="button" data-action="logout">退出登录</button>
+          </div>
+          <div id="users-table-wrap" class="table-wrap">
+            <table class="users-table">
+              <thead>
+                <tr>
+                  <th>用户</th>
+                  <th>角色</th>
+                  <th>状态</th>
+                  <th>调用限额</th>
+                  <th>有效期</th>
+                  <th>API Key</th>
+                  <th>最近登录</th>
+                  <th><span class="sr-only">操作</span></th>
+                </tr>
+              </thead>
+              <tbody id="users-body"></tbody>
+            </table>
+          </div>
+          <div id="users-empty" class="empty-state" hidden>
+            <i data-lucide="users" aria-hidden="true"></i>
+            <h2>暂无用户</h2>
+            <p>创建账号后会显示在这里</p>
+          </div>
+          <nav id="users-pagination" class="pagination" aria-label="用户分页"></nav>
+        </section>
+
+        <section id="view-usage" class="view" data-page="usage" aria-labelledby="usage-title" hidden>
+          <div class="page-heading with-actions">
+            <div>
+              <p class="eyebrow">API OBSERVABILITY</p>
+              <h1 id="usage-title">API 监控</h1>
+            </div>
+            <label class="select-field range-select">
+              <span class="sr-only">统计时间范围</span>
+              <select id="usage-range">
+                <option value="24h">最近 24 小时</option>
+                <option value="7d" selected>最近 7 天</option>
+                <option value="30d">最近 30 天</option>
+              </select>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </label>
+          </div>
+
+          <div id="usage-alert" class="inline-alert error" role="alert" hidden></div>
+          <div id="usage-forbidden" class="permission-state" hidden>
+            <i data-lucide="shield-alert" aria-hidden="true"></i>
+            <h2>需要管理员权限</h2>
+            <p>普通用户只能在用户门户查看个人调用数据。</p>
+            <button class="button secondary" type="button" data-action="logout">退出登录</button>
+          </div>
+          <div id="usage-content">
+            <div id="usage-stat-grid" class="stat-grid usage-stat-grid" aria-live="polite">
+              <article class="stat-card skeleton-card"></article>
+              <article class="stat-card skeleton-card"></article>
+              <article class="stat-card skeleton-card"></article>
+              <article class="stat-card skeleton-card"></article>
+              <article class="stat-card skeleton-card"></article>
+              <article class="stat-card skeleton-card"></article>
+            </div>
+
+            <div class="usage-grid">
+              <section class="panel usage-trend-panel" aria-labelledby="usage-trend-title">
+                <div class="panel-heading">
+                  <div>
+                    <p class="panel-kicker">全局请求</p>
+                    <h2 id="usage-trend-title">调用趋势</h2>
+                  </div>
+                  <div class="legend-inline">
+                    <span><i class="legend-mark blue"></i>请求</span>
+                    <span><i class="legend-mark green"></i>成功</span>
+                    <span><i class="legend-mark red"></i>限流</span>
+                  </div>
+                </div>
+                <div id="usage-trend-chart" class="chart" role="img" aria-label="API 调用趋势图"></div>
+              </section>
+              <section class="panel usage-status-panel" aria-labelledby="usage-status-title">
+                <div class="panel-heading">
+                  <div>
+                    <p class="panel-kicker">响应质量</p>
+                    <h2 id="usage-status-title">状态分布</h2>
+                  </div>
+                </div>
+                <div id="usage-status-chart" class="chart compact" role="img" aria-label="API 状态码分布图"></div>
+                <div id="usage-status-legend" class="status-legend"></div>
+              </section>
+              <section class="panel usage-users-panel" aria-labelledby="usage-users-title">
+                <div class="panel-heading">
+                  <div>
+                    <p class="panel-kicker">调用贡献</p>
+                    <h2 id="usage-users-title">活跃用户排行</h2>
+                  </div>
+                </div>
+                <div id="usage-users-chart" class="chart" role="img" aria-label="活跃用户排行图"></div>
+              </section>
+            </div>
+
+            <section class="table-section" aria-labelledby="usage-logs-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="usage-logs-title">调用明细</h2>
+                  <span id="usage-log-total" class="total-label">0 条记录</span>
+                </div>
+              </div>
+              <div class="filter-bar usage-log-filters">
+                <label class="search-field grow">
+                  <i data-lucide="search" aria-hidden="true"></i>
+                  <input id="usage-log-search" type="search" placeholder="搜索关键词、请求 ID 或端点" aria-label="搜索调用日志">
+                </label>
+                <label class="select-field">
+                  <span class="sr-only">用户</span>
+                  <select id="usage-user-filter"><option value="">全部用户</option></select>
+                  <i data-lucide="chevron-down" aria-hidden="true"></i>
+                </label>
+                <label class="select-field">
+                  <span class="sr-only">认证方式</span>
+                  <select id="usage-auth-filter">
+                    <option value="">全部入口</option>
+                    <option value="web">网页 JWT</option>
+                    <option value="api_key">API Key</option>
+                  </select>
+                  <i data-lucide="chevron-down" aria-hidden="true"></i>
+                </label>
+                <label class="select-field">
+                  <span class="sr-only">响应状态</span>
+                  <select id="usage-status-filter">
+                    <option value="">全部响应</option>
+                    <option value="2xx">成功 2xx</option>
+                    <option value="4xx">客户端错误 4xx</option>
+                    <option value="5xx">服务端错误 5xx</option>
+                    <option value="429">限流 429</option>
+                  </select>
+                  <i data-lucide="chevron-down" aria-hidden="true"></i>
+                </label>
+                <label class="select-field">
+                  <span class="sr-only">缓存状态</span>
+                  <select id="usage-cache-filter">
+                    <option value="">全部缓存状态</option>
+                    <option value="hit">缓存命中</option>
+                    <option value="miss">缓存未命中</option>
+                    <option value="refresh">实时刷新</option>
+                  </select>
+                  <i data-lucide="chevron-down" aria-hidden="true"></i>
+                </label>
+              </div>
+              <div class="table-wrap">
+                <table class="usage-log-table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>用户 / 入口</th>
+                      <th>请求</th>
+                      <th>关键词</th>
+                      <th>状态</th>
+                      <th>耗时</th>
+                      <th>结果</th>
+                      <th>缓存</th>
+                      <th>来源 IP</th>
+                    </tr>
+                  </thead>
+                  <tbody id="usage-logs-body"></tbody>
+                </table>
+              </div>
+              <div id="usage-logs-empty" class="empty-state compact-empty" hidden>
+                <i data-lucide="scroll-text" aria-hidden="true"></i>
+                <h2>暂无调用记录</h2>
+                <p>调整筛选条件或时间范围后重试</p>
+              </div>
+              <nav id="usage-logs-pagination" class="pagination" aria-label="调用日志分页"></nav>
+            </section>
+          </div>
+        </section>
+        <section id="view-sources" class="view source-control-view" data-page="sources" aria-labelledby="sources-title" hidden>
+          <div class="page-heading source-page-heading">
+            <div>
+              <p class="eyebrow">SOURCE CONTROL</p>
+              <h1 id="sources-title">搜索来源</h1>
+            </div>
+            <div class="source-status-line" aria-label="来源配置状态">
+              <span>版本 <strong id="source-version">—</strong></span>
+              <span>快照 <strong id="source-snapshot-status">—</strong></span>
+              <span>共享账号 <strong id="source-shared-total">0</strong></span>
+              <time id="source-updated-at">—</time>
+            </div>
+          </div>
+
+          <div id="sources-alert" class="inline-alert error" role="alert" hidden></div>
+
+          <div class="source-module-bar">
+            <div class="source-module-tabs" role="tablist" aria-label="来源模块">
+              <button class="active" type="button" role="tab" aria-selected="true" aria-controls="source-panel-tg" data-source-config-tab="tg"><i data-lucide="send" aria-hidden="true"></i><span>TG 频道</span><em id="source-channel-count">0</em></button>
+              <button type="button" role="tab" aria-selected="false" aria-controls="source-panel-plugins" data-source-config-tab="plugins"><i data-lucide="plug" aria-hidden="true"></i><span>内置插件</span><em id="source-plugin-count">0</em></button>
+              <button type="button" role="tab" aria-selected="false" aria-controls="source-panel-accounts" data-source-config-tab="accounts"><i data-lucide="key-round" aria-hidden="true"></i><span>账号来源</span><em id="source-account-count">0</em></button>
+            </div>
+            <div class="source-module-actions">
+              <button class="button secondary" type="button" data-action="validate-sources"><i data-lucide="shield-check" aria-hidden="true"></i><span>校验</span></button>
+              <button class="button primary" type="button" data-action="save-sources"><i data-lucide="save" aria-hidden="true"></i><span>保存并生效</span></button>
+            </div>
+          </div>
+
+          <section id="source-panel-tg" class="panel source-module-panel" role="tabpanel" data-source-config-panel="tg" aria-labelledby="tg-sources-title">
+            <header class="source-module-heading">
+              <span class="source-group-icon"><i data-lucide="send" aria-hidden="true"></i></span>
+              <h2 id="tg-sources-title">TG 频道</h2>
+            </header>
+            <div class="source-channel-layout">
+              <aside class="source-channel-import">
+                <label class="source-bulk-field" for="source-channel-bulk">
+                  <span>批量添加</span>
+                  <textarea id="source-channel-bulk" rows="8" placeholder="AliyunDriveShare, tgsearchers2&#10;https://t.me/example_channel"></textarea>
+                </label>
+                <button class="button primary wide" type="button" data-action="import-channels"><i data-lucide="list-plus" aria-hidden="true"></i><span>批量加入</span></button>
+                <small class="source-field-note">支持逗号、中文逗号、分号或换行</small>
+              </aside>
+              <div class="source-channel-directory">
+                <div class="source-list-heading">
+                  <strong>频道列表</strong>
+                  <button class="button secondary source-add-one" type="button" data-action="add-channel"><i data-lucide="plus" aria-hidden="true"></i><span>添加一行</span></button>
+                </div>
+                <div id="source-channels" class="source-card-list source-channel-list" aria-live="polite"></div>
+              </div>
+            </div>
+          </section>
+
+          <section id="source-panel-plugins" class="panel source-module-panel" role="tabpanel" data-source-config-panel="plugins" aria-labelledby="plugin-sources-title" hidden>
+            <header class="source-module-heading plugin-module-heading">
+              <span class="source-group-icon"><i data-lucide="plug" aria-hidden="true"></i></span>
+              <h2 id="plugin-sources-title">内置插件</h2>
+              <label class="source-master-switch compact-master-switch">
+                <span>插件总开关</span>
+                <input id="source-plugin-master" type="checkbox" aria-label="启用内置插件">
+              </label>
+            </header>
+            <div class="source-module-body">
+              <div class="source-plugin-toolbar">
+                <label class="search-field source-plugin-search-field">
+                  <i data-lucide="search" aria-hidden="true"></i>
+                  <input id="source-plugin-search" type="search" placeholder="搜索插件名称或标识" aria-label="搜索内置插件">
+                </label>
+              </div>
+              <div id="source-plugins" class="source-card-list source-plugin-list" aria-live="polite"></div>
+            </div>
+          </section>
+
+          <section id="source-panel-accounts" class="panel credential-panel source-module-panel source-account-panel" role="tabpanel" data-source-config-panel="accounts" aria-labelledby="account-sources-title" hidden>
+            <header class="source-module-heading credential-panel-header">
+              <span class="source-group-icon"><i data-lucide="key-round" aria-hidden="true"></i></span>
+              <h2 id="account-sources-title">账号来源</h2>
+              <div class="credential-header-actions">
+                <div class="segmented" role="tablist" aria-label="账号范围">
+                  <button class="active" type="button" role="tab" aria-selected="true" data-credential-tab="admin">管理员账号</button>
+                  <button type="button" role="tab" aria-selected="false" data-credential-tab="users">用户账号监管</button>
+                </div>
+                <button id="new-plugin-credential" class="button primary" type="button" data-action="new-plugin-credential"><i data-lucide="plus" aria-hidden="true"></i><span>新增插件账号</span></button>
+              </div>
+            </header>
+
+            <div class="credential-filter-bar">
+              <label class="select-field"><span class="sr-only">插件</span><select id="credential-plugin-filter"><option value="">全部插件</option></select><i data-lucide="chevron-down" aria-hidden="true"></i></label>
+              <label class="select-field"><span class="sr-only">状态</span><select id="credential-status-filter"><option value="">全部状态</option><option value="active">可用</option><option value="invalid">失效</option><option value="expired">已过期</option></select><i data-lucide="chevron-down" aria-hidden="true"></i></label>
+              <label id="credential-user-filter-wrap" class="search-field grow" hidden><i data-lucide="search" aria-hidden="true"></i><input id="credential-user-filter" type="search" placeholder="按用户或账号名称筛选" aria-label="按用户或账号名称筛选"></label>
+            </div>
+            <div id="source-credentials" class="source-card-list credential-list" aria-live="polite"></div>
+          </section>
+        </section>
+      </main>
+
+      <nav class="mobile-nav" aria-label="移动端主导航">
+        <a class="active" href="#overview" data-view="overview"><i data-lucide="layout-dashboard" aria-hidden="true"></i><span>概览</span></a>
+        <a href="#resources" data-view="resources"><i data-lucide="database" aria-hidden="true"></i><span>资源</span></a>
+        <a href="#keywords" data-view="keywords"><i data-lucide="tags" aria-hidden="true"></i><span>关键词</span></a>
+        <a href="#runs" data-view="runs"><i data-lucide="activity" aria-hidden="true"></i><span>任务</span></a>
+        <a href="#sources" data-view="sources"><i data-lucide="waypoints" aria-hidden="true"></i><span>来源</span></a>
+        <a href="#users" data-view="users"><i data-lucide="users" aria-hidden="true"></i><span>用户</span></a>
+        <a href="#usage" data-view="usage"><i data-lucide="chart-no-axes-combined" aria-hidden="true"></i><span>监控</span></a>
+      </nav>
+    </div>
+  </div>
+
+  <dialog id="resource-dialog" class="dialog side-dialog" aria-labelledby="resource-dialog-title">
+    <div class="dialog-shell">
+      <header class="dialog-header">
+        <div>
+          <p class="eyebrow">RESOURCE DETAIL</p>
+          <h2 id="resource-dialog-title">资源详情</h2>
+        </div>
+        <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
+      </header>
+      <div id="resource-detail" class="dialog-body"></div>
+    </div>
+  </dialog>
+
+  <dialog id="keyword-dialog" class="dialog form-dialog wide-dialog keyword-dialog" aria-labelledby="keyword-dialog-title">
+    <form id="keyword-form" class="dialog-shell">
+      <header class="dialog-header">
+        <div>
+          <p class="eyebrow">KEYWORD</p>
+          <h2 id="keyword-dialog-title">新增关键词</h2>
+        </div>
+        <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
+      </header>
+      <div class="keyword-dialog-mode" role="tablist" aria-label="新增方式">
+        <button class="active" type="button" role="tab" aria-selected="true" data-keyword-mode="manual"><i data-lucide="pencil-line"></i><span>手动关键词</span></button>
+        <button type="button" role="tab" aria-selected="false" data-keyword-mode="api"><i data-lucide="webhook"></i><span>API 同步</span></button>
+      </div>
+      <div class="dialog-body keyword-dialog-body">
+        <input id="keyword-id" name="id" type="hidden">
+        <div id="keyword-manual-fields" class="form-grid" data-keyword-mode-panel="manual">
+          <label class="field full"><span>关键词 <em>*</em></span><input name="keyword" type="text" maxlength="200" placeholder="输入采集关键词"></label>
+          <label class="field"><span>关键词类型</span><input name="keyword_type" type="text" value="general" list="keyword-type-options" maxlength="50"><datalist id="keyword-type-options"><option value="general">通用</option><option value="movie">电影</option><option value="series">剧集</option><option value="book">图书</option><option value="software">软件</option><option value="course">课程</option></datalist></label>
+          <label class="field"><span>来源类型</span><select name="source_type"><option value="manual">手动</option><option value="api">API</option><option value="import">导入</option></select></label>
+          <label class="field"><span>来源标识</span><input name="source_key" type="text" maxlength="100" placeholder="可选"></label>
+          <label class="field"><span>优先级</span><input name="priority" type="number" min="0" max="100" step="1" value="0"></label>
+          <label class="field"><span>冷却期（天）</span><input name="cooldown_days" type="number" min="0" max="365" step="any" placeholder="留空使用全局默认（7 天）"></label>
+          <label class="toggle-field"><span><strong>启用自动采集</strong><small>调度器将按冷却期执行</small></span><input name="enabled" type="checkbox" checked><span class="toggle" aria-hidden="true"></span></label>
+        </div>
+
+        <div id="keyword-api-fields" class="keyword-api-builder" data-keyword-mode-panel="api" hidden>
+          <section class="api-builder-pane request-builder-pane">
+            <div class="api-builder-section"><h3>来源与请求</h3><div class="form-grid">
+              <label class="field full"><span>来源名称 <em>*</em></span><input name="api_name" type="text" maxlength="100" placeholder="例如：影视热词接口"></label>
+              <label class="field"><span>请求方法</span><select name="request_method"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option></select></label>
+              <label class="field grow-field"><span>请求 URL <em>*</em></span><input name="request_url" type="url" placeholder="https://api.example.com/keywords"></label>
+            </div></div>
+            <div class="api-builder-section api-config-section" data-api-config="query">
+              <div class="api-section-heading">
+                <div><h3>Query 参数</h3><p>拼接在 URL 后的查询参数</p></div>
+                <div class="api-editor-actions">
+                  <div class="api-editor-mode" role="tablist" aria-label="Query 编辑方式"><button class="active" type="button" role="tab" aria-selected="true" data-action="switch-api-editor" data-editor-target="query" data-editor-mode="kv">键值</button><button type="button" role="tab" aria-selected="false" data-action="switch-api-editor" data-editor-target="query" data-editor-mode="json">JSON</button></div>
+                  <button class="text-button api-add-row" type="button" data-action="add-api-kv" data-target="api-query-rows"><i data-lucide="plus"></i>添加</button>
+                </div>
+              </div>
+              <div id="api-query-kv" data-api-editor-panel="query-kv"><div id="api-query-rows" class="api-kv-list"></div></div>
+              <div id="api-query-json-panel" class="api-object-editor" data-api-editor-panel="query-json" hidden><textarea id="api-query-json" rows="6" spellcheck="false" placeholder='{"page":"1","size":"20"}'></textarea><p id="api-query-json-error" class="api-editor-error" role="alert" hidden></p></div>
+            </div>
+            <div class="api-builder-section api-config-section" data-api-config="header">
+              <div class="api-section-heading">
+                <div><h3>请求 Header</h3><p>用于认证、Cookie 或内容协商</p></div>
+                <div class="api-editor-actions">
+                  <div class="api-editor-mode" role="tablist" aria-label="Header 编辑方式"><button class="active" type="button" role="tab" aria-selected="true" data-action="switch-api-editor" data-editor-target="header" data-editor-mode="kv">键值</button><button type="button" role="tab" aria-selected="false" data-action="switch-api-editor" data-editor-target="header" data-editor-mode="json">JSON</button></div>
+                  <button class="text-button api-add-row" type="button" data-action="add-api-kv" data-target="api-header-rows"><i data-lucide="plus"></i>添加</button>
+                </div>
+              </div>
+              <div id="api-header-kv" data-api-editor-panel="header-kv"><div id="api-header-rows" class="api-kv-list"></div></div>
+              <div id="api-header-json-panel" class="api-object-editor" data-api-editor-panel="header-json" hidden><textarea id="api-header-json" rows="6" spellcheck="false" placeholder='{"Authorization":"Bearer token"}'></textarea><p id="api-header-json-error" class="api-editor-error" role="alert" hidden></p></div>
+            </div>
+            <div class="api-builder-section"><div class="form-grid"><label class="field"><span>Body 类型</span><select id="api-body-type" name="body_type"><option value="none">无</option><option value="json">JSON</option><option value="form">Form</option><option value="raw">Raw</option></select></label><label class="field"><span>超时（秒）</span><input name="timeout_seconds" type="number" min="1" max="60" value="15"></label></div><div id="api-body-json" class="api-body-editor" hidden><textarea name="json_body" rows="7" spellcheck="false" placeholder='{"category":"movie"}'></textarea></div><div id="api-body-form" class="api-body-editor" hidden><div class="api-section-heading"><div><h3>Form 字段</h3><p>以表单字段发送请求体</p></div><div class="api-editor-actions"><div class="api-editor-mode" role="tablist" aria-label="Form 编辑方式"><button class="active" type="button" role="tab" aria-selected="true" data-action="switch-api-editor" data-editor-target="form" data-editor-mode="kv">键值</button><button type="button" role="tab" aria-selected="false" data-action="switch-api-editor" data-editor-target="form" data-editor-mode="json">JSON</button></div><button class="text-button api-add-row" type="button" data-action="add-api-kv" data-target="api-form-rows"><i data-lucide="plus"></i>添加</button></div></div><div id="api-form-kv" data-api-editor-panel="form-kv"><div id="api-form-rows" class="api-kv-list"></div></div><div id="api-form-json-panel" class="api-object-editor" data-api-editor-panel="form-json" hidden><textarea id="api-form-json" rows="6" spellcheck="false" placeholder='{"category":"movie"}'></textarea><p id="api-form-json-error" class="api-editor-error" role="alert" hidden></p></div></div><div id="api-body-raw" class="api-body-editor" hidden><textarea name="raw_body" rows="7" placeholder="原始请求体"></textarea></div></div>
+            <div class="api-builder-section api-iteration-section">
+              <div class="api-iteration-heading"><div><p class="api-step-label">OPTIONAL · PAGINATION</p><h3>分页迭代</h3><p>按数值序列修改一个请求参数，完整同步时顺序请求多轮。</p></div><label class="toggle-field compact-toggle"><span class="sr-only">启用分页迭代</span><input id="api-iteration-enabled" name="iteration_enabled" type="checkbox"><span class="toggle" aria-hidden="true"></span></label></div>
+              <div id="api-iteration-fields" class="api-iteration-fields" hidden>
+                <div class="form-grid api-iteration-targets"><label class="field"><span>参数位置</span><select id="api-iteration-location" name="iteration_location"><option value="query">Query</option><option value="header">Header</option><option value="body">Body</option></select></label><label class="field"><span>参数路径 <em>*</em></span><input id="api-iteration-path" name="iteration_path" type="text" placeholder="offset 或 pagination.offset"></label></div>
+                <p id="api-iteration-hint" class="api-iteration-hint">将覆盖 Query 中对应键的值。</p>
+                <div class="api-iteration-numbers"><label class="field"><span>起始值</span><input id="api-iteration-start" name="iteration_start" type="number" step="1" value="0"></label><label class="field"><span>步长</span><input id="api-iteration-step" name="iteration_step" type="number" step="1" value="20"></label><label class="field"><span>请求次数</span><input id="api-iteration-count" name="iteration_count" type="number" min="1" max="100" step="1" value="1"></label><label class="field"><span>间隔（秒）</span><input id="api-iteration-delay" name="iteration_delay_seconds" type="number" min="0" max="3600" step="1" value="0"></label></div>
+                <div id="api-iteration-preview" class="api-iteration-preview" aria-live="polite"><div><span>请求序列</span><strong>0</strong></div><div><span>预计最低耗时</span><strong>立即完成</strong></div></div>
+              </div>
+            </div>
+            <div class="api-builder-section"><div class="form-grid"><label class="field full"><span>代理地址</span><input name="proxy_url" type="text" placeholder="socks5h://user:pass@host:1080"></label><label class="field"><span>同步周期（分钟）</span><input name="sync_interval_minutes" type="number" min="1" value="60"></label><label class="toggle-field"><span><strong>启用自动同步</strong><small>每分钟检查到期来源</small></span><input name="api_enabled" type="checkbox"><span class="toggle"></span></label></div></div>
+            <div class="api-builder-section"><h3>新关键词默认值</h3><div class="form-grid"><label class="field"><span>关键词类型</span><input name="default_keyword_type" value="general"></label><label class="field"><span>优先级</span><input name="default_priority" type="number" min="0" max="100" value="0"></label><label class="field"><span>冷却期（天）</span><input name="default_cooldown_days" type="number" min="0" max="365" placeholder="默认 7 天"></label><label class="toggle-field"><span><strong>默认启用关键词</strong><small>新提取关键词立即参与调度</small></span><input name="default_enabled" type="checkbox" checked><span class="toggle"></span></label></div></div>
+          </section>
+
+          <section class="api-builder-pane response-builder-pane">
+            <div class="api-response-toolbar"><div><h3>响应检查器</h3><p>先测试请求，再点击 JSON 节点选择提取路径。</p></div><button id="api-test-button" class="button secondary" type="button" data-action="test-keyword-api"><i data-lucide="flask-conical"></i><span>测试请求</span></button></div>
+            <div id="api-test-meta" class="api-test-meta"><span>尚未测试</span></div>
+            <div id="api-json-tree" class="api-json-tree"><div class="api-inspector-empty"><i data-lucide="braces"></i><span>测试成功后在此查看 JSON</span></div></div>
+            <label class="field api-path-field"><span>响应提取路径 <em>*</em></span><input id="api-response-path" name="response_path" type="text" placeholder="data.items[].name"><small>支持对象字段、数组下标和 [] 通配。</small></label>
+            <div id="api-extract-preview" class="api-extract-preview"><strong>提取预览</strong><p>选择路径后显示匹配值。</p></div>
+          </section>
+        </div>
+        <p id="keyword-form-error" class="form-error" role="alert" hidden></p>
+      </div>
+      <footer class="dialog-footer">
+        <button class="button secondary" type="button" data-action="close-dialog">取消</button>
+        <button id="keyword-save" class="button primary" type="submit"><i data-lucide="save" aria-hidden="true"></i><span>保存</span></button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="run-dialog" class="dialog form-dialog" aria-labelledby="run-dialog-title">
+    <form id="run-form" class="dialog-shell">
+      <header class="dialog-header">
+        <div>
+          <p class="eyebrow">NEW RUN</p>
+          <h2 id="run-dialog-title">启动采集任务</h2>
+        </div>
+        <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
+      </header>
+      <div class="dialog-body">
+        <label class="search-field run-search">
+          <i data-lucide="search" aria-hidden="true"></i>
+          <input id="run-keyword-search" type="search" placeholder="筛选关键词" aria-label="筛选待采集关键词">
+        </label>
+        <div class="selection-tools">
+          <span id="run-selected-label">已选 0 项</span>
+          <button class="text-button" type="button" data-action="select-all-run-keywords">全选可用项</button>
+        </div>
+        <div id="run-keyword-list" class="keyword-picker" role="group" aria-label="选择关键词"></div>
+        <label class="toggle-field force-toggle">
+          <span>
+            <strong>强制执行</strong>
+            <small>绕过关键词冷却期</small>
+          </span>
+          <input name="force" type="checkbox">
+          <span class="toggle" aria-hidden="true"></span>
+        </label>
+        <p id="run-form-error" class="form-error" role="alert" hidden></p>
+      </div>
+      <footer class="dialog-footer">
+        <button class="button secondary" type="button" data-action="close-dialog">取消</button>
+        <button id="run-submit" class="button primary" type="submit"><i data-lucide="play" aria-hidden="true"></i><span>启动任务</span></button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="run-detail-dialog" class="dialog wide-dialog" aria-labelledby="run-detail-title">
+    <div class="dialog-shell">
+      <header class="dialog-header">
+        <div>
+          <p class="eyebrow">RUN DETAIL</p>
+          <h2 id="run-detail-title">任务详情</h2>
+        </div>
+        <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
+      </header>
+      <div id="run-detail" class="dialog-body"></div>
+    </div>
+  </dialog>
+
+  <dialog id="user-dialog" class="dialog form-dialog" aria-labelledby="user-dialog-title">
+    <form id="user-form" class="dialog-shell">
+      <header class="dialog-header">
+        <div>
+          <p class="eyebrow">USER ACCOUNT</p>
+          <h2 id="user-dialog-title">创建用户</h2>
+        </div>
+        <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
+      </header>
+      <div class="dialog-body form-grid">
+        <input name="id" type="hidden">
+        <label class="field full">
+          <span>用户名 <em>*</em></span>
+          <input name="username" type="text" required maxlength="100" autocomplete="off" placeholder="输入登录用户名">
+        </label>
+        <label class="field">
+          <span>角色</span>
+          <select name="role">
+            <option value="user">普通用户</option>
+            <option value="admin">管理员</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>账号有效期</span>
+          <input name="expires_at" type="datetime-local">
+        </label>
+        <label class="field">
+          <span>每秒限额（RPS）</span>
+          <input name="rps_limit" type="number" min="1" max="10000" step="1" value="3">
+        </label>
+        <label class="field">
+          <span>每分钟限额（RPM）</span>
+          <input name="rpm_limit" type="number" min="1" max="1000000" step="1" value="60">
+        </label>
+        <label class="toggle-field">
+          <span>
+            <strong>不限制调用频率</strong>
+            <small>启用后忽略 RPS 与 RPM 限额</small>
+          </span>
+          <input name="rate_limit_disabled" type="checkbox">
+          <span class="toggle" aria-hidden="true"></span>
+        </label>
+        <label class="toggle-field">
+          <span>
+            <strong>启用账号</strong>
+            <small>停用后 JWT 与 API Key 立即失效</small>
+          </span>
+          <input name="enabled" type="checkbox" checked>
+          <span class="toggle" aria-hidden="true"></span>
+        </label>
+        <p id="user-form-error" class="form-error full" role="alert" hidden></p>
+      </div>
+      <footer class="dialog-footer">
+        <button class="button secondary" type="button" data-action="close-dialog">取消</button>
+        <button id="user-save" class="button primary" type="submit"><i data-lucide="save" aria-hidden="true"></i><span>保存</span></button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="credential-dialog" class="dialog credential-dialog" aria-labelledby="credential-title">
+    <div class="dialog-shell">
+      <header class="dialog-header">
+        <div>
+          <p class="eyebrow">ONE-TIME CREDENTIALS</p>
+          <h2 id="credential-title">保存用户凭证</h2>
+        </div>
+        <button class="icon-button" type="button" data-action="close-credentials" aria-label="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
+      </header>
+      <div class="dialog-body">
+        <div class="credential-warning">
+          <i data-lucide="shield-check" aria-hidden="true"></i>
+          <div><strong>这些凭证只显示一次</strong><span>关闭后无法再次查看完整值，请立即复制并安全交付。</span></div>
+        </div>
+        <div id="credential-fields" class="credential-fields"></div>
+        <label class="confirm-check">
+          <input id="credential-saved" type="checkbox">
+          <span>我已妥善保存以上凭证</span>
+        </label>
+        <p id="credential-error" class="form-error" role="alert" hidden></p>
+      </div>
+      <footer class="dialog-footer">
+        <button class="button primary" type="button" data-action="close-credentials">完成</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <dialog id="plugin-credential-dialog" class="dialog" aria-labelledby="plugin-credential-dialog-title">
+    <form id="plugin-credential-form" class="dialog-shell">
+      <header class="dialog-header">
+        <div><p class="eyebrow">PLUGIN ACCOUNT</p><h2 id="plugin-credential-dialog-title">新增插件账号</h2></div>
+        <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x"></i></button>
+      </header>
+      <div class="dialog-body">
+        <input name="credential_id" type="hidden">
+        <div class="form-grid">
+          <label class="field"><span>插件</span><span class="select-field"><select name="plugin_key" required></select><i data-lucide="chevron-down"></i></span></label>
+          <label class="field"><span>使用范围</span><span class="select-field"><select name="scope" required><option value="admin_private">管理员私有</option><option value="public_shared">公开共享</option></select><i data-lucide="chevron-down"></i></span></label>
+          <label class="field full"><span>账号名称</span><input name="display_name" type="text" maxlength="80" placeholder="例如：QQ 频道主账号"></label>
+          <div id="plugin-credential-login-fields" class="full plugin-login-fields"></div>
+          <p class="credential-privacy-note full"><i data-lucide="shield-check"></i><span>密码、Cookie 和 Token 只会提交给后端加密保存，管理台不会再次读取或展示。</span></p>
+          <p id="plugin-credential-form-error" class="form-error full" role="alert" hidden></p>
+        </div>
+      </div>
+      <footer class="dialog-footer"><button class="button secondary" type="button" data-action="close-dialog">取消</button><button id="plugin-credential-submit" class="button primary" type="submit"><i data-lucide="log-in"></i><span>登录并保存</span></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="plugin-qr-dialog" class="dialog" aria-labelledby="plugin-qr-title">
+    <div class="dialog-shell qr-dialog-shell">
+      <header class="dialog-header"><div><p class="eyebrow">SCAN TO LOGIN</p><h2 id="plugin-qr-title">扫码登录</h2></div><button class="icon-button" type="button" data-action="close-plugin-qr" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <div class="dialog-body qr-dialog-body">
+        <div id="plugin-qr-image" class="plugin-qr-image"><span>正在生成二维码…</span></div>
+        <strong id="plugin-qr-status">等待扫码</strong>
+        <p id="plugin-qr-message">请使用对应客户端扫码，并在手机上确认登录。</p>
+        <button id="plugin-qr-retry" class="button secondary" type="button" data-action="retry-plugin-qr" hidden><i data-lucide="refresh-cw"></i><span>重新生成</span></button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="dialog confirm-dialog" aria-labelledby="confirm-title">
+    <div class="dialog-shell">
+      <div class="confirm-icon"><i data-lucide="triangle-alert" aria-hidden="true"></i></div>
+      <h2 id="confirm-title">确认操作</h2>
+      <p id="confirm-message"></p>
+      <footer class="dialog-footer centered">
+        <button class="button secondary" type="button" data-action="cancel-confirm">取消</button>
+        <button id="confirm-submit" class="button danger" type="button">确认</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script src="./assets/app.js"></script>
+</body>
+</html>

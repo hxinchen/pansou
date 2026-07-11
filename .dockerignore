@@ -30,6 +30,11 @@ cache/
 tmp/
 .idea/
 .vscode/
+.codegraph/
+.playwright-cli/
+output/
+secrets/database.env
+backups/
 
 # 其他
 Dockerfile

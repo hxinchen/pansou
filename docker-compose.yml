@@ -5,11 +5,16 @@ services:
     image: ghcr.io/fish2018/pansou:latest
     container_name: pansou
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8888:8888"
+    env_file:
+      - ./secrets/database.env
     environment:
       - PORT=8888
-      - CHANNELS=tgsearchers6,Aliyun_4K_Movies,bdbdndn11,yunpanx,bsbdbfjfjff,yp123pan,sbsbsnsqq,yunpanxunlei,tianyifc,BaiduCloudDisk,txtyzy,peccxinpd,gotopan,PanjClub,kkxlzy,baicaoZY,MCPH01,MCPH02,MCPH03,bdwpzhpd,ysxb48,jdjdn1111,yggpan,MCPH086,zaihuayun,Q66Share,ucwpzy,shareAliyun,alyp_1,dianyingshare,Quark_Movies,XiangxiuNBB,ydypzyfx,ucquark,xx123pan,yingshifenxiang123,zyfb123,tyypzhpd,tianyirigeng,cloudtianyi,hdhhd21,Lsp115,oneonefivewpfx,qixingzhenren,taoxgzy,Channel_Shares_115,tyysypzypd,vip115hot,wp123zy,yunpan139,yunpan189,yunpanuc,yydf_hzl,leoziyuan,Q_dongman,yoyokuakeduanju,TG654TG,WFYSFX02,QukanMovie,yeqingjie_GJG666,movielover8888_film3,Baidu_netdisk,D_wusun,FLMdongtianfudi,KaiPanshare,QQZYDAPP,rjyxfx,PikPak_Share_Channel,btzhi,newproductsourcing,cctv1211,duan_ju,QuarkFree,yunpanNB,kkdj001,xxzlzn,pxyunpanxunlei,jxwpzy,kuakedongman,liangxingzhinan,xiangnikanj,solidsexydoll,guoman4K,zdqxm,kduanju,cilidianying,CBduanju,SharePanFilms,dzsgx,BooksRealm,Oscar_4Kmovies,douerpan,baidu_yppan,Q_jilupian,Netdisk_Movies,yunpanquark,ammmziyuan,ciliziyuanku,cili8888,jzmm_123pan,Q_dianying,domgmingapk,dianying4k,q_dianshiju,tgbokee,ucshare,godupan,gokuapan,gimy115,WFYSFX03,peccxin,Movie888035,xlwpzy,zyywpzy,wydwpzy,gimy100,ucshare,gimy115iso
+      - CHANNELS=tgsearchers6,Aliyun_4K_Movies,bdbdndn11,yunpanx,bsbdbfjfjff,yp123pan,sbsbsnsqq,yunpanxunlei,tianyifc,BaiduCloudDisk,txtyzy,peccxinpd,gotopan,PanjClub,kkxlzy,baicaoZY,MCPH01,MCPH02,MCPH03,bdwpzhpd,ysxb48,jdjdn1111,yggpan,MCPH086,zaihuayun,Q66Share,ucwpzy,shareAliyun,alyp_1,dianyingshare,Quark_Movies,XiangxiuNBB,ydypzyfx,ucquark,xx123pan,yingshifenxiang123,zyfb123,tyypzhpd,tianyirigeng,cloudtianyi,hdhhd21,Lsp115,oneonefivewpfx,qixingzhenren,taoxgzy,Channel_Shares_115,tyysypzypd,vip115hot,wp123zy,yunpan139,yunpan189,yunpanuc,yydf_hzl,leoziyuan,Q_dongman,yoyokuakeduanju,TG654TG,WFYSFX02,QukanMovie,yeqingjie_GJG666,movielover8888_film3,Baidu_netdisk,D_wusun,FLMdongtianfudi,KaiPanshare,QQZYDAPP,rjyxfx,PikPak_Share_Channel,btzhi,newproductsourcing,cctv1211,duan_ju,QuarkFree,yunpanNB,kkdj001,xxzlzn,pxyunpanxunlei,jxwpzy,kuakedongman,liangxingzhinan,xiangnikanj,solidsexydoll,guoman4K,zdqxm,kduanju,cilidianying,CBduanju,SharePanFilms,dzsgx,BooksRealm,Oscar_4Kmovies,douerpan,baidu_yppan,Q_jilupian,Netdisk_Movies,yunpanquark,ammmziyuan,ciliziyuanku,cili8888,jzmm_123pan,Q_dianying,domgmingapk,dianying4k,q_dianshiju,tgbokee,ucshare,godupan,gokuapan,gimy115,WFYSFX03,peccxin,Movie888035,xlwpzy,zyywpzy,wydwpzy,gimy100,gimy115iso,tgsearchers7,aliyunys,clouddriveresources,XunLeiPinDao,ydwpzy,a123fxme,WPpindao,kuyupan,djya5,yingshiziyuanpindao,zh_vip,pan_guangya,zyzhpd123,zhenyingsg,gdsharing,weichengduanju666,yingxiangkj,duanjucabian,kuakenetpan,kelea555,tianyiyunpanpindao,PikPakShareChannel,tgyy678,xuexixiaonengshou1,google_yppan,ayzgzf
       # 必须指定启用的插件，多个插件用逗号分隔
       - ENABLED_PLUGINS=hunhepan,jikepan,panwiki,pansearch,panta,qupansou,hdr4k,pan666,susu,thepiratebay,wanou,xuexizhinan,panyq,zhizhen,labi,muou,ouge,shandian,duoduo,huban,cyg,erxiao,miaoso,fox4k,pianku,clmao,wuji,cldi,xiaozhang,libvio,leijing,xb6v,xys,ddys,hdmoli,yuhuage,u3c3,javdb,clxiong,jutoushe,sdso,xiaoji,xdyh,haisou,bixin,djgou,nyaa,xinjuc,aikanzy,qupanshe,xdpan,discourse,yunsou,qqpd,ahhhhfs,nsgame,gying,quark4k,quarksoo,sousou,ash,weibo,feikuai,kkmao,alupan,ypfxw,mikuclub,daishudj,dyyj,meitizy,jsnoteclub,mizixing,lou1,yiove,zxzj,qingying,kkv,yulinshufa
       - CACHE_ENABLED=true
@@ -21,11 +26,10 @@ services:
       - ASYNC_MAX_BACKGROUND_WORKERS=20
       - ASYNC_MAX_BACKGROUND_TASKS=100
       - ASYNC_CACHE_TTL_HOURS=1
-      # 认证配置（可选）
-      # - AUTH_ENABLED=true
-      # - AUTH_USERS=admin:admin123,user:pass456
-      # - AUTH_TOKEN_EXPIRY=24
-      # - AUTH_JWT_SECRET=your-secret-key-here
+      # 多用户门户和管理台要求启用认证。ADMIN_*、AUTH_JWT_SECRET 与默认限流放在 secrets/database.env。
+      # 账号型插件还要求在同一密钥文件中设置 PLUGIN_CREDENTIAL_MASTER_KEY。
+      - AUTH_ENABLED=true
+      - AUTH_TOKEN_EXPIRY=24
       # 如果需要代理，取消下面的注释并设置代理地址
       # - PROXY=socks5://proxy:7897
     volumes:
@@ -37,6 +41,27 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 10s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: pansou-postgres
+    restart: unless-stopped
+    env_file:
+      - ./secrets/database.env
+    environment:
+      - POSTGRES_USER=pansou
+      - POSTGRES_DB=pansou
+    volumes:
+      - pansou-postgres:/var/lib/postgresql/data
+      - ./backups:/backups
+    networks:
+      - pansou-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pansou -d pansou"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
       start_period: 10s
 
   # 如果需要代理，取消下面的注释
@@ -51,7 +76,9 @@ services:
 volumes:
   pansou-cache:
     name: pansou-cache
+  pansou-postgres:
+    name: pansou-postgres
 
 networks:
   pansou-network:
-    name: pansou-network 
+    name: pansou-network

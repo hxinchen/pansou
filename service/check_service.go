@@ -75,6 +75,13 @@ func NewCheckService() *CheckService {
 	return service
 }
 
+func (s *CheckService) Close() error {
+	if s == nil || s.cacheDB == nil {
+		return nil
+	}
+	return s.cacheDB.Close()
+}
+
 func (s *CheckService) Check(items []model.CheckItem) model.CheckResponse {
 	response, _ := s.CheckWithProxy(items, "")
 	return response
