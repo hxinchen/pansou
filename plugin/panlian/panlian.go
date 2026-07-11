@@ -393,10 +393,11 @@ const htmlTemplate = `<!DOCTYPE html>
 
 type PanlianPlugin struct {
 	*plugin.BaseAsyncPlugin
-	users       sync.Map
-	mu          sync.RWMutex
-	config      PluginConfig
-	initialized bool
+	users              sync.Map
+	mu                 sync.RWMutex
+	config             PluginConfig
+	initialized        bool
+	managedCredentials bool
 }
 
 type PluginConfig struct {
@@ -480,6 +481,7 @@ var (
 )
 
 func init() {
+	plugin.RegisterGlobalPluginFactory(PluginName, func() plugin.AsyncSearchPlugin { return NewPanlianPlugin() })
 	plugin.RegisterGlobalPlugin(NewPanlianPlugin())
 }
 
@@ -502,6 +504,10 @@ func (p *PanlianPlugin) Description() string {
 
 func (p *PanlianPlugin) Initialize() error {
 	if p.initialized {
+		return nil
+	}
+	if p.managedCredentials {
+		p.initialized = true
 		return nil
 	}
 

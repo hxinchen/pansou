@@ -41,8 +41,8 @@ import (
 
 // 插件配置参数
 const (
-	MaxConcurrentUsers   = 10   // 最多使用的用户数
-	MaxConcurrentDetails = 50   // 最大并发详情请求数
+	MaxConcurrentUsers   = 10    // 最多使用的用户数
+	MaxConcurrentDetails = 50    // 最大并发详情请求数
 	DebugLog             = false // 调试日志开关（排查问题时改为true）
 )
 
@@ -485,12 +485,13 @@ const HTMLTemplate = `<!DOCTYPE html>
 // GyingPlugin 插件结构
 type GyingPlugin struct {
 	*plugin.BaseAsyncPlugin
-	users       sync.Map // 内存缓存：hash -> *User
-	scrapers    sync.Map // cloudscraper实例缓存：hash -> *cloudscraper.Scraper
-	mu          sync.RWMutex
-	searchCache sync.Map // 插件级缓存：关键词->model.PluginSearchResult
-	baseURL     string   // 当前配置的站点地址
-	initialized bool     // 初始化状态标记
+	users              sync.Map // 内存缓存：hash -> *User
+	scrapers           sync.Map // cloudscraper实例缓存：hash -> *cloudscraper.Scraper
+	mu                 sync.RWMutex
+	searchCache        sync.Map // 插件级缓存：关键词->model.PluginSearchResult
+	baseURL            string   // 当前配置的站点地址
+	initialized        bool     // 初始化状态标记
+	managedCredentials bool
 }
 
 // User 用户数据结构
@@ -577,11 +578,13 @@ type GyingConfig struct {
 }
 
 func init() {
-	p := &GyingPlugin{
-		BaseAsyncPlugin: plugin.NewBaseAsyncPlugin("gying", 3),
+	newPlugin := func() plugin.AsyncSearchPlugin {
+		return &GyingPlugin{
+			BaseAsyncPlugin: plugin.NewBaseAsyncPlugin("gying", 3),
+		}
 	}
-
-	plugin.RegisterGlobalPlugin(p)
+	plugin.RegisterGlobalPluginFactory("gying", newPlugin)
+	plugin.RegisterGlobalPlugin(newPlugin())
 }
 
 func normalizeBaseURL(raw string) (string, error) {
@@ -736,6 +739,13 @@ func (p *GyingPlugin) updateBaseURL(rawBaseURL string) (string, error) {
 // Initialize 实现 InitializablePlugin 接口，延迟初始化插件
 func (p *GyingPlugin) Initialize() error {
 	if p.initialized {
+		return nil
+	}
+	if p.managedCredentials {
+		if p.getBaseURL() == "" {
+			p.setBaseURL(DefaultGyingBaseURL)
+		}
+		p.initialized = true
 		return nil
 	}
 

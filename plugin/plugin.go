@@ -1,8 +1,10 @@
 package plugin
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,6 +64,22 @@ type InitializablePlugin interface {
 	Initialize() error
 }
 
+type CloseablePlugin interface {
+	Close() error
+}
+
+type RuntimeConfigurablePlugin interface {
+	ApplyRuntimeConfig(map[string]any) error
+}
+
+type ManagedCredentialPlugin interface {
+	SetManagedCredentialMode(bool)
+}
+
+type PluginFactory func() AsyncSearchPlugin
+
+var ErrPluginInitialization = errors.New("plugin initialization failed")
+
 // ============================================================
 // 第二部分：全局变量和注册表
 // ============================================================
@@ -69,6 +87,7 @@ type InitializablePlugin interface {
 // 全局异步插件注册表
 var (
 	globalRegistry     = make(map[string]AsyncSearchPlugin)
+	globalFactories    = make(map[string]PluginFactory)
 	globalRegistryLock sync.RWMutex
 )
 
@@ -139,6 +158,30 @@ func RegisterGlobalPlugin(plugin AsyncSearchPlugin) {
 	}
 
 	globalRegistry[name] = plugin
+	if _, exists := globalFactories[name]; !exists {
+		globalFactories[name] = func() AsyncSearchPlugin { return plugin }
+	}
+}
+
+func RegisterGlobalPluginFactory(name string, factory PluginFactory) {
+	name = strings.TrimSpace(name)
+	if name == "" || factory == nil {
+		return
+	}
+	globalRegistryLock.Lock()
+	defer globalRegistryLock.Unlock()
+	globalFactories[name] = factory
+}
+
+func GetRegisteredPluginNames() []string {
+	globalRegistryLock.RLock()
+	defer globalRegistryLock.RUnlock()
+	names := make([]string, 0, len(globalFactories))
+	for name := range globalFactories {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // GetRegisteredPlugins 获取所有已注册的异步插件
@@ -165,6 +208,7 @@ func GetPluginByName(name string) (AsyncSearchPlugin, bool) {
 
 // PluginManager 异步插件管理器
 type PluginManager struct {
+	mu      sync.RWMutex
 	plugins []AsyncSearchPlugin
 }
 
@@ -177,15 +221,25 @@ func NewPluginManager() *PluginManager {
 
 // RegisterPlugin 注册异步插件
 func (pm *PluginManager) RegisterPlugin(plugin AsyncSearchPlugin) {
+	_ = pm.RegisterPluginChecked(plugin)
+}
+
+func (pm *PluginManager) RegisterPluginChecked(plugin AsyncSearchPlugin) error {
+	if plugin == nil {
+		return errors.New("plugin is nil")
+	}
 	// 如果插件支持延迟初始化，先执行初始化
 	if initPlugin, ok := plugin.(InitializablePlugin); ok {
 		if err := initPlugin.Initialize(); err != nil {
 			fmt.Printf("[PluginManager] 插件 %s 初始化失败: %v，跳过注册\n", plugin.Name(), err)
-			return
+			return fmt.Errorf("%w: %s: %v", ErrPluginInitialization, plugin.Name(), err)
 		}
 	}
 
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
 	pm.plugins = append(pm.plugins, plugin)
+	return nil
 }
 
 // RegisterAllGlobalPlugins 注册所有全局异步插件
@@ -199,8 +253,6 @@ func (pm *PluginManager) RegisterAllGlobalPlugins() {
 // RegisterGlobalPluginsWithFilter 根据过滤器注册全局异步插件
 // enabledPlugins: nil表示未设置（不启用任何插件），空切片表示设置为空（不启用任何插件），具体列表表示启用指定插件
 func (pm *PluginManager) RegisterGlobalPluginsWithFilter(enabledPlugins []string) {
-	allPlugins := GetRegisteredPlugins()
-
 	// nil 表示未设置环境变量，不启用任何插件
 	if enabledPlugins == nil {
 		return
@@ -218,16 +270,73 @@ func (pm *PluginManager) RegisterGlobalPluginsWithFilter(enabledPlugins []string
 	}
 
 	// 只注册在启用列表中的插件
-	for _, plugin := range allPlugins {
-		if enabledMap[plugin.Name()] {
-			pm.RegisterPlugin(plugin)
+	for _, name := range GetRegisteredPluginNames() {
+		if enabledMap[name] {
+			_ = pm.RegisterFactory(name)
 		}
 	}
 }
 
+func (pm *PluginManager) RegisterFactory(name string) error {
+	instance, err := CreateRegisteredPlugin(name)
+	if err != nil {
+		return err
+	}
+	return pm.RegisterPluginChecked(instance)
+}
+
+func CreateRegisteredPlugin(name string) (AsyncSearchPlugin, error) {
+	globalRegistryLock.RLock()
+	factory := globalFactories[name]
+	globalRegistryLock.RUnlock()
+	if factory == nil {
+		return nil, fmt.Errorf("plugin %q is not registered", name)
+	}
+	instance := factory()
+	if instance == nil {
+		return nil, fmt.Errorf("plugin %q factory returned nil", name)
+	}
+	return instance, nil
+}
+
+func NewPluginManagerFromFactories(enabledPlugins []string) (*PluginManager, error) {
+	manager := NewPluginManager()
+	for _, name := range enabledPlugins {
+		if err := manager.RegisterFactory(name); err != nil {
+			_ = manager.Close()
+			return nil, err
+		}
+	}
+	return manager, nil
+}
+
 // GetPlugins 获取所有注册的异步插件
 func (pm *PluginManager) GetPlugins() []AsyncSearchPlugin {
-	return pm.plugins
+	if pm == nil {
+		return nil
+	}
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return append([]AsyncSearchPlugin(nil), pm.plugins...)
+}
+
+func (pm *PluginManager) Close() error {
+	if pm == nil {
+		return nil
+	}
+	pm.mu.Lock()
+	plugins := pm.plugins
+	pm.plugins = nil
+	pm.mu.Unlock()
+	var errs []error
+	for index := len(plugins) - 1; index >= 0; index-- {
+		if closeable, ok := plugins[index].(CloseablePlugin); ok {
+			if err := closeable.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // ============================================================

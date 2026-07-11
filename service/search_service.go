@@ -13,8 +13,11 @@ import (
 	"time"
 
 	"pansou/config"
+	"pansou/credential"
 	"pansou/model"
 	"pansou/plugin"
+	"pansou/sourceconfig"
+	"pansou/storage"
 	"pansou/util"
 	"pansou/util/cache"
 	"pansou/util/pool"
@@ -200,6 +203,26 @@ func calculateCompletenessScore(result model.SearchResult) int {
 // SearchService 搜索服务
 type SearchService struct {
 	pluginManager *plugin.PluginManager
+	snapshots     *sourceconfig.Manager
+	credentials   credentialProvider
+}
+
+type credentialProvider interface {
+	Resolve(context.Context, credential.Identity, string, int) (credential.Layers, error)
+	OpenStored(storage.PluginCredential) ([]byte, error)
+	Success(context.Context, string) error
+	Failure(context.Context, string, string, string, *time.Time) error
+}
+
+// LiveSearchService names the existing Telegram/plugin implementation
+// explicitly. It remains an alias so existing integrations keep compiling.
+type LiveSearchService = SearchService
+
+// SearchProvider is the stable API-facing search contract. Hybrid search and
+// the live-only service both implement it.
+type SearchProvider interface {
+	Search(keyword string, channels []string, concurrency int, forceRefresh bool, resultType string, sourceType string, plugins []string, cloudTypes []string, ext map[string]interface{}) (model.SearchResponse, error)
+	GetPluginManager() *plugin.PluginManager
 }
 
 // NewSearchService 创建搜索服务实例并确保缓存可用
@@ -226,6 +249,20 @@ func NewSearchService(pluginManager *plugin.PluginManager) *SearchService {
 
 	return &SearchService{
 		pluginManager: pluginManager,
+	}
+}
+
+func NewDynamicSearchService(snapshots *sourceconfig.Manager) *SearchService {
+	return &SearchService{snapshots: snapshots}
+}
+
+func (s *SearchService) UsesManagedSources() bool {
+	return s != nil && s.snapshots != nil
+}
+
+func (s *SearchService) SetCredentialService(service *credential.Service) {
+	if s != nil {
+		s.credentials = service
 	}
 }
 
@@ -351,6 +388,35 @@ func injectMainCacheToAsyncPlugins(pluginManager *plugin.PluginManager, mainCach
 
 // Search 执行搜索
 func (s *SearchService) Search(keyword string, channels []string, concurrency int, forceRefresh bool, resultType string, sourceType string, plugins []string, cloudTypes []string, ext map[string]interface{}) (model.SearchResponse, error) {
+	return s.SearchContext(context.Background(), ContextSearchRequest{
+		Keyword: keyword, Channels: channels, Concurrency: concurrency, ForceRefresh: forceRefresh,
+		ResultType: resultType, SourceType: sourceType, Plugins: plugins, CloudTypes: cloudTypes,
+		Ext: ext, Identity: SearchIdentity{Actor: SearchActorLegacy},
+	})
+}
+
+func (s *SearchService) SearchContext(ctx context.Context, request ContextSearchRequest) (model.SearchResponse, error) {
+	if s != nil && s.snapshots != nil {
+		lease, err := s.snapshots.Acquire()
+		if err != nil {
+			return model.SearchResponse{}, err
+		}
+		defer lease.Release()
+		snapshot := lease.Snapshot()
+		if snapshot == nil || snapshot.PluginManager == nil {
+			return model.SearchResponse{}, fmt.Errorf("source snapshot is incomplete")
+		}
+		request.Channels = intersectSources(request.Channels, snapshot.Channels())
+		request.Plugins = intersectSources(request.Plugins, snapshot.PluginNames())
+		static := NewSearchService(snapshot.PluginManager)
+		static.credentials = s.credentials
+		return static.SearchContext(ctx, request)
+	}
+	if err := ctx.Err(); err != nil {
+		return model.SearchResponse{}, err
+	}
+	keyword, channels, concurrency, forceRefresh := request.Keyword, request.Channels, request.Concurrency, request.ForceRefresh
+	resultType, sourceType, plugins, cloudTypes, ext := request.ResultType, request.SourceType, request.Plugins, request.CloudTypes, request.Ext
 	// 确保ext不为nil
 	if ext == nil {
 		ext = make(map[string]interface{})
@@ -452,7 +518,7 @@ func (s *SearchService) Search(keyword string, channels []string, concurrency in
 			defer wg.Done()
 			// 对于插件搜索，我们总是希望获取最新的缓存数据
 			// 因此，即使forceRefresh=false，我们也需要确保获取到最新的缓存
-			pluginResults, pluginErr = s.searchPlugins(keyword, plugins, forceRefresh, concurrency, ext)
+			pluginResults, pluginErr = s.searchPluginsForIdentity(ctx, request.Identity, keyword, plugins, forceRefresh, concurrency, ext)
 		}()
 	}
 
@@ -1282,14 +1348,9 @@ func (s *SearchService) searchTG(keyword string, channels []string, forceRefresh
 
 // searchPlugins 搜索插件
 func (s *SearchService) searchPlugins(keyword string, plugins []string, forceRefresh bool, concurrency int, ext map[string]interface{}) ([]model.SearchResult, error) {
-	// 确保ext不为nil
-	if ext == nil {
-		ext = make(map[string]interface{})
-	}
-
-	// 关键：将forceRefresh同步到插件ext["refresh"]
+	baseExt := cloneSearchExt(ext)
 	if forceRefresh {
-		ext["refresh"] = true
+		baseExt["refresh"] = true
 	}
 
 	// 生成缓存键
@@ -1373,6 +1434,7 @@ func (s *SearchService) searchPlugins(keyword string, plugins []string, forceRef
 	for _, p := range availablePlugins {
 		plugin := p // 创建副本，避免闭包问题
 		tasks = append(tasks, func() interface{} {
+			pluginExt := cloneSearchExt(baseExt)
 			// 设置主缓存键和当前关键词
 			plugin.SetMainCacheKey(cacheKey)
 			plugin.SetCurrentKeyword(keyword)
@@ -1381,7 +1443,7 @@ func (s *SearchService) searchPlugins(keyword string, plugins []string, forceRef
 			results, err := plugin.AsyncSearch(keyword, func(client *http.Client, kw string, extParams map[string]interface{}) ([]model.SearchResult, error) {
 				// 使用插件的Search方法作为搜索函数
 				return plugin.Search(kw, extParams)
-			}, cacheKey, ext)
+			}, cacheKey, pluginExt)
 
 			if err != nil {
 				return nil
@@ -1434,9 +1496,180 @@ func (s *SearchService) searchPlugins(keyword string, plugins []string, forceRef
 	return allResults, nil
 }
 
+// searchPluginsForIdentity keeps the legacy plugin cache for stateless
+// plugins, while account-backed plugins execute synchronously with credentials
+// resolved for the current tenant. This prevents one user's account state or
+// background refresh from leaking into another request.
+func (s *SearchService) searchPluginsForIdentity(ctx context.Context, identity SearchIdentity, keyword string, requested []string, forceRefresh bool, concurrency int, ext map[string]interface{}) ([]model.SearchResult, error) {
+	if s == nil || s.credentials == nil || s.pluginManager == nil {
+		return s.searchPlugins(keyword, requested, forceRefresh, concurrency, ext)
+	}
+
+	selected := selectPlugins(s.pluginManager.GetPlugins(), requested)
+	legacyNames := make([]string, 0, len(selected))
+	managed := make([]struct {
+		plugin   plugin.AsyncSearchPlugin
+		searcher credential.LayerSearcher
+	}, 0)
+	for _, instance := range selected {
+		if searcher, ok := instance.(credential.LayerSearcher); ok {
+			managed = append(managed, struct {
+				plugin   plugin.AsyncSearchPlugin
+				searcher credential.LayerSearcher
+			}{plugin: instance, searcher: searcher})
+			continue
+		}
+		legacyNames = append(legacyNames, instance.Name())
+	}
+
+	var legacyResults []model.SearchResult
+	if len(legacyNames) > 0 {
+		var err error
+		legacyResults, err = s.searchPlugins(keyword, legacyNames, forceRefresh, concurrency, ext)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(managed) == 0 {
+		return legacyResults, nil
+	}
+
+	actor := credential.ActorUser
+	switch identity.Actor {
+	case SearchActorAdmin:
+		actor = credential.ActorAdmin
+	case SearchActorCollector:
+		actor = credential.ActorCollector
+	case SearchActorUser:
+		actor = credential.ActorUser
+	default:
+		// Database mode authenticates external requests. Treat internal or
+		// legacy invocations as collector work so they use admin-private then
+		// shared credentials instead of an arbitrary user's account.
+		actor = credential.ActorCollector
+	}
+	credentialIdentity := credential.Identity{Actor: actor, UserID: identity.UserID}
+	baseExt := cloneSearchExt(ext)
+	if forceRefresh {
+		baseExt["refresh"] = true
+	}
+
+	access := credential.Access{
+		Open: s.credentials.OpenStored,
+		Success: func(callbackCtx context.Context, publicID string) {
+			_ = s.credentials.Success(callbackCtx, publicID)
+		},
+		Failure: func(callbackCtx context.Context, publicID, status, code string, cooldown *time.Time) {
+			_ = s.credentials.Failure(callbackCtx, publicID, status, code, cooldown)
+		},
+	}
+
+	tasks := make([]pool.Task, 0, len(managed))
+	for _, item := range managed {
+		item := item
+		tasks = append(tasks, func() interface{} {
+			layers, err := s.credentials.Resolve(ctx, credentialIdentity, item.plugin.Name(), 20)
+			if err != nil {
+				return nil
+			}
+			pluginExt := cloneSearchExt(baseExt)
+			results, succeeded, _ := item.searcher.SearchCredentialLayer(ctx, keyword, pluginExt, layers.Private, access)
+			if succeeded {
+				return results
+			}
+			results, succeeded, _ = item.searcher.SearchCredentialLayer(ctx, keyword, pluginExt, layers.Shared, access)
+			if !succeeded {
+				return nil
+			}
+			return results
+		})
+	}
+
+	managedResults := pool.ExecuteBatchWithTimeout(tasks, concurrency, config.AppConfig.PluginTimeout)
+	allResults := append([]model.SearchResult(nil), legacyResults...)
+	for _, value := range managedResults {
+		results, ok := value.([]model.SearchResult)
+		if !ok {
+			continue
+		}
+		for _, result := range results {
+			if len(result.Links) > 0 {
+				allResults = append(allResults, result)
+			}
+		}
+	}
+	return allResults, nil
+}
+
+func selectPlugins(all []plugin.AsyncSearchPlugin, requested []string) []plugin.AsyncSearchPlugin {
+	if len(requested) == 0 {
+		return all
+	}
+	wanted := make(map[string]struct{}, len(requested))
+	for _, name := range requested {
+		if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
+			wanted[name] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return all
+	}
+	selected := make([]plugin.AsyncSearchPlugin, 0, len(wanted))
+	for _, instance := range all {
+		if _, ok := wanted[strings.ToLower(instance.Name())]; ok {
+			selected = append(selected, instance)
+		}
+	}
+	return selected
+}
+
+func cloneSearchExt(ext map[string]interface{}) map[string]interface{} {
+	copyExt := make(map[string]interface{}, len(ext)+1)
+	for key, value := range ext {
+		copyExt[key] = value
+	}
+	return copyExt
+}
+
 // GetPluginManager 获取插件管理器
 func (s *SearchService) GetPluginManager() *plugin.PluginManager {
+	if s != nil && s.snapshots != nil {
+		lease, err := s.snapshots.Acquire()
+		if err != nil {
+			return nil
+		}
+		defer lease.Release()
+		return lease.Snapshot().PluginManager
+	}
 	return s.pluginManager
+}
+
+func intersectSources(requested, enabled []string) []string {
+	if len(enabled) == 0 {
+		return []string{}
+	}
+	if len(requested) == 0 {
+		return append([]string(nil), enabled...)
+	}
+	allowed := make(map[string]string, len(enabled))
+	for _, value := range enabled {
+		allowed[strings.ToLower(strings.TrimSpace(value))] = value
+	}
+	result := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	for _, value := range requested {
+		key := strings.ToLower(strings.TrimSpace(value))
+		canonical, ok := allowed[key]
+		if !ok {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, canonical)
+	}
+	return result
 }
 
 // =============================================================================
