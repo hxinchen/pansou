@@ -9,26 +9,52 @@ import (
 
 // Claims JWT载荷结构
 type Claims struct {
-	Username string `json:"username"`
+	UserID      int64  `json:"user_id,omitempty"`
+	Username    string `json:"username"`
+	Role        string `json:"role,omitempty"`
+	AuthVersion int64  `json:"auth_version,omitempty"`
 	jwt.RegisteredClaims
+}
+
+// TokenIdentity is the authenticated identity embedded in a database-backed
+// user token. The legacy GenerateToken helper remains available below.
+type TokenIdentity struct {
+	UserID      int64
+	Username    string
+	Role        string
+	AuthVersion int64
 }
 
 // GenerateToken 生成JWT token
 func GenerateToken(username string, secret string, expiry time.Duration) (string, error) {
-	if username == "" {
+	return GenerateUserToken(TokenIdentity{Username: username}, secret, expiry)
+}
+
+// GenerateUserToken generates a JWT containing the stable user identity and
+// authorization version used by the database-backed account system.
+func GenerateUserToken(identity TokenIdentity, secret string, expiry time.Duration) (string, error) {
+	if identity.Username == "" {
 		return "", errors.New("username cannot be empty")
 	}
 	if secret == "" {
 		return "", errors.New("secret cannot be empty")
 	}
+	if expiry <= 0 {
+		return "", errors.New("expiry must be positive")
+	}
 
-	expirationTime := time.Now().Add(expiry)
+	now := time.Now()
+	expirationTime := now.Add(expiry)
 	claims := &Claims{
-		Username: username,
+		UserID:      identity.UserID,
+		Username:    identity.Username,
+		Role:        identity.Role,
+		AuthVersion: identity.AuthVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			IssuedAt:  jwt.NewNumericDate(now),
 			Issuer:    "pansou",
+			Subject:   identity.Username,
 		},
 	}
 
