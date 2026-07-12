@@ -2,7 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -16,29 +18,33 @@ import (
 )
 
 type keywordAPISourceRequest struct {
-	Name                   string            `json:"name"`
-	Enabled                bool              `json:"enabled"`
-	RequestMethod          string            `json:"request_method"`
-	RequestURL             string            `json:"request_url"`
-	RequestHeaders         flexibleStringMap `json:"request_headers"`
-	QueryParams            flexibleStringMap `json:"query_params"`
-	BodyType               string            `json:"body_type"`
-	RequestBody            any               `json:"request_body"`
-	ProxyURL               string            `json:"proxy_url"`
-	TimeoutSeconds         int               `json:"timeout_seconds"`
-	ResponsePath           string            `json:"response_path"`
-	SyncIntervalSeconds    int64             `json:"sync_interval_seconds"`
-	DefaultKeywordType     string            `json:"default_keyword_type"`
-	DefaultPriority        int               `json:"default_priority"`
-	DefaultCooldownSeconds *int64            `json:"default_cooldown_seconds"`
-	DefaultEnabled         *bool             `json:"default_enabled"`
-	IterationEnabled       bool              `json:"iteration_enabled"`
-	IterationLocation      string            `json:"iteration_location"`
-	IterationPath          string            `json:"iteration_path"`
-	IterationStart         int64             `json:"iteration_start"`
-	IterationStep          int64             `json:"iteration_step"`
-	IterationCount         int               `json:"iteration_count"`
-	IterationDelaySeconds  int               `json:"iteration_delay_seconds"`
+	Name                           string            `json:"name"`
+	Enabled                        bool              `json:"enabled"`
+	RequestMethod                  string            `json:"request_method"`
+	RequestURL                     string            `json:"request_url"`
+	RequestHeaders                 flexibleStringMap `json:"request_headers"`
+	QueryParams                    flexibleStringMap `json:"query_params"`
+	BodyType                       string            `json:"body_type"`
+	RequestBody                    any               `json:"request_body"`
+	ProxyURL                       string            `json:"proxy_url"`
+	TimeoutSeconds                 int               `json:"timeout_seconds"`
+	ResponsePath                   string            `json:"response_path"`
+	SyncIntervalSeconds            int64             `json:"sync_interval_seconds"`
+	DefaultKeywordType             string            `json:"default_keyword_type"`
+	DefaultPriority                int               `json:"default_priority"`
+	DefaultCooldownSeconds         *int64            `json:"default_cooldown_seconds"`
+	DefaultEnabled                 *bool             `json:"default_enabled"`
+	IterationEnabled               bool              `json:"iteration_enabled"`
+	IterationLocation              string            `json:"iteration_location"`
+	IterationPath                  string            `json:"iteration_path"`
+	IterationStart                 int64             `json:"iteration_start"`
+	IterationStep                  int64             `json:"iteration_step"`
+	IterationCount                 int               `json:"iteration_count"`
+	IterationDelaySeconds          int               `json:"iteration_delay_seconds"`
+	IterationUnlimited             bool              `json:"iteration_unlimited"`
+	IterationNoKeywordStopCount    int               `json:"iteration_no_keyword_stop_count"`
+	IterationRandomDelayMinSeconds int               `json:"iteration_random_delay_min_seconds"`
+	IterationRandomDelayMaxSeconds int               `json:"iteration_random_delay_max_seconds"`
 }
 
 // flexibleStringMap lets the JSON editor use natural scalar values such as
@@ -91,20 +97,29 @@ func stringMap(value flexibleStringMap) map[string]string {
 }
 
 type keywordAPISourceListItem struct {
-	ID                  int64      `json:"id"`
-	Name                string     `json:"name"`
-	Enabled             bool       `json:"enabled"`
-	RequestMethod       string     `json:"request_method"`
-	RequestURL          string     `json:"request_url"`
-	SyncIntervalSeconds int64      `json:"sync_interval_seconds"`
-	NextSyncAt          *time.Time `json:"next_sync_at,omitempty"`
-	LastSyncedAt        *time.Time `json:"last_synced_at,omitempty"`
-	LastStatus          string     `json:"last_status"`
-	LastError           string     `json:"last_error,omitempty"`
-	LastItemCount       int        `json:"last_item_count"`
-	LastRequestCount    int        `json:"last_request_count"`
-	LastSuccessCount    int        `json:"last_success_count"`
-	LastFailureCount    int        `json:"last_failure_count"`
+	ID                        int64                      `json:"id"`
+	Name                      string                     `json:"name"`
+	Enabled                   bool                       `json:"enabled"`
+	RequestMethod             string                     `json:"request_method"`
+	RequestURL                string                     `json:"request_url"`
+	SyncIntervalSeconds       int64                      `json:"sync_interval_seconds"`
+	NextSyncAt                *time.Time                 `json:"next_sync_at,omitempty"`
+	LastSyncedAt              *time.Time                 `json:"last_synced_at,omitempty"`
+	LastStatus                string                     `json:"last_status"`
+	LastError                 string                     `json:"last_error,omitempty"`
+	LastItemCount             int                        `json:"last_item_count"`
+	LastRequestCount          int                        `json:"last_request_count"`
+	LastSuccessCount          int                        `json:"last_success_count"`
+	LastFailureCount          int                        `json:"last_failure_count"`
+	SyncConfigRevision        int64                      `json:"sync_config_revision"`
+	LastAppliedConfigRevision int64                      `json:"last_applied_config_revision"`
+	ResultStale               bool                       `json:"result_stale"`
+	ActiveRun                 *storage.KeywordAPISyncRun `json:"active_run"`
+	LatestRun                 *storage.KeywordAPISyncRun `json:"latest_run"`
+}
+
+type keywordAPISyncRequest struct {
+	Trigger string `json:"trigger"`
 }
 
 func (h *AdminHandler) registerKeywordAPISourceRoutes(group *gin.RouterGroup) {
@@ -116,6 +131,8 @@ func (h *AdminHandler) registerKeywordAPISourceRoutes(group *gin.RouterGroup) {
 	group.POST("/keyword-api-sources/test", h.testKeywordAPISource)
 	group.POST("/keyword-api-sources/:id/sync", h.syncKeywordAPISource)
 	group.POST("/keyword-api-sources/:id/copy", h.copyKeywordAPISource)
+	group.GET("/keyword-api-sync-runs", h.listKeywordAPISyncRuns)
+	group.GET("/keyword-api-sync-runs/:id", h.getKeywordAPISyncRun)
 }
 
 func (h *AdminHandler) listKeywordAPISources(c *gin.Context) {
@@ -141,16 +158,22 @@ func (h *AdminHandler) listKeywordAPISources(c *gin.Context) {
 	}
 	items := make([]keywordAPISourceListItem, 0, len(page.Items))
 	for _, source := range page.Items {
-		items = append(items, keywordAPISourceListItem{
-			ID: source.ID, Name: source.Name, Enabled: source.Enabled, RequestMethod: source.RequestMethod,
-			RequestURL: redactKeywordSourceListURL(source.RequestURL), SyncIntervalSeconds: source.SyncIntervalSeconds,
-			NextSyncAt: source.NextSyncAt, LastSyncedAt: source.LastSyncedAt, LastStatus: source.LastStatus,
-			LastError: source.LastError, LastItemCount: source.LastItemCount,
-			LastRequestCount: source.LastRequestCount, LastSuccessCount: source.LastSuccessCount,
-			LastFailureCount: source.LastFailureCount,
-		})
+		items = append(items, keywordAPISourceListItemFrom(source))
 	}
 	c.JSON(http.StatusOK, model.NewSuccessResponse(gin.H{"items": items, "total": page.Total, "page": page.Page, "page_size": page.PageSize}))
+}
+
+func keywordAPISourceListItemFrom(source storage.KeywordAPISource) keywordAPISourceListItem {
+	return keywordAPISourceListItem{
+		ID: source.ID, Name: source.Name, Enabled: source.Enabled, RequestMethod: source.RequestMethod,
+		RequestURL: redactKeywordSourceListURL(source.RequestURL), SyncIntervalSeconds: source.SyncIntervalSeconds,
+		NextSyncAt: source.NextSyncAt, LastSyncedAt: source.LastSyncedAt, LastStatus: source.LastStatus,
+		LastError: source.LastError, LastItemCount: source.LastItemCount,
+		LastRequestCount: source.LastRequestCount, LastSuccessCount: source.LastSuccessCount,
+		LastFailureCount: source.LastFailureCount, SyncConfigRevision: source.SyncConfigRevision,
+		LastAppliedConfigRevision: source.LastAppliedConfigRevision, ResultStale: source.ResultStale,
+		ActiveRun: source.ActiveRun, LatestRun: source.LatestRun,
+	}
 }
 
 func (h *AdminHandler) getKeywordAPISource(c *gin.Context) {
@@ -187,6 +210,9 @@ func (h *AdminHandler) createKeywordAPISource(c *gin.Context) {
 		IterationEnabled:       request.IterationEnabled, IterationLocation: request.IterationLocation,
 		IterationPath: request.IterationPath, IterationStart: request.IterationStart, IterationStep: request.IterationStep,
 		IterationCount: request.IterationCount, IterationDelaySeconds: request.IterationDelaySeconds,
+		IterationUnlimited: request.IterationUnlimited, IterationNoKeywordStopCount: request.IterationNoKeywordStopCount,
+		IterationRandomDelayMinSeconds: request.IterationRandomDelayMinSeconds,
+		IterationRandomDelayMaxSeconds: request.IterationRandomDelayMaxSeconds,
 	})
 	if err != nil {
 		respondAdminError(c, err)
@@ -222,6 +248,9 @@ func (h *AdminHandler) updateKeywordAPISource(c *gin.Context) {
 		IterationEnabled:       &request.IterationEnabled, IterationLocation: &request.IterationLocation,
 		IterationPath: &request.IterationPath, IterationStart: &request.IterationStart, IterationStep: &request.IterationStep,
 		IterationCount: &request.IterationCount, IterationDelaySeconds: &request.IterationDelaySeconds,
+		IterationUnlimited: &request.IterationUnlimited, IterationNoKeywordStopCount: &request.IterationNoKeywordStopCount,
+		IterationRandomDelayMinSeconds: &request.IterationRandomDelayMinSeconds,
+		IterationRandomDelayMaxSeconds: &request.IterationRandomDelayMaxSeconds,
 	})
 	if err != nil {
 		respondAdminError(c, err)
@@ -321,12 +350,117 @@ func (h *AdminHandler) syncKeywordAPISource(c *gin.Context) {
 	if !ok {
 		return
 	}
-	source, err := h.keywordSources.TriggerNow(c.Request.Context(), id)
+	trigger, ok := bindKeywordAPISyncTrigger(c)
+	if !ok {
+		return
+	}
+	run, alreadyActive, err := h.keywordSources.TriggerNow(c.Request.Context(), id, trigger)
 	if err != nil {
 		respondAdminError(c, err)
 		return
 	}
-	c.JSON(http.StatusAccepted, model.NewSuccessResponse(gin.H{"id": source.ID, "status": source.LastStatus, "accepted": true}))
+	c.JSON(http.StatusAccepted, model.NewSuccessResponse(keywordAPISyncAcceptedResponse(id, run, alreadyActive)))
+}
+
+func keywordAPISyncAcceptedResponse(sourceID int64, run storage.KeywordAPISyncRun, alreadyActive bool) gin.H {
+	return gin.H{
+		"id": sourceID, "status": storage.KeywordAPISourceStatusRunning, "accepted": true,
+		"run_status": run.Status,
+		"run_id":     run.ID, "run": run, "already_active": alreadyActive,
+	}
+}
+
+func (h *AdminHandler) listKeywordAPISyncRuns(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	filter, err := keywordAPISyncRunFilter(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.NewErrorResponse(http.StatusBadRequest, err.Error()))
+		return
+	}
+	page, err := h.store.ListKeywordAPISyncRuns(c.Request.Context(), filter)
+	if err != nil {
+		respondAdminError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, model.NewSuccessResponse(page))
+}
+
+func (h *AdminHandler) getKeywordAPISyncRun(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	run, err := h.store.GetKeywordAPISyncRun(c.Request.Context(), id)
+	if err != nil {
+		respondAdminError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, model.NewSuccessResponse(run))
+}
+
+func bindKeywordAPISyncTrigger(c *gin.Context) (string, bool) {
+	request := keywordAPISyncRequest{Trigger: "manual"}
+	if err := c.ShouldBindJSON(&request); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, model.NewErrorResponse(http.StatusBadRequest, "请求 JSON 无效"))
+		return "", false
+	}
+	request.Trigger = strings.ToLower(strings.TrimSpace(request.Trigger))
+	if request.Trigger == "" {
+		request.Trigger = "manual"
+	}
+	if request.Trigger != "manual" && request.Trigger != "save" {
+		c.JSON(http.StatusBadRequest, model.NewErrorResponse(http.StatusBadRequest, "trigger 仅支持 manual 或 save"))
+		return "", false
+	}
+	return request.Trigger, true
+}
+
+func keywordAPISyncRunFilter(c *gin.Context) (storage.KeywordAPISyncRunFilter, error) {
+	filter := storage.KeywordAPISyncRunFilter{
+		Statuses: queryList(c, "status", "statuses"), Triggers: queryList(c, "trigger", "triggers"),
+		Page: queryInt(c, "page", 1), PageSize: queryInt(c, "page_size", 20),
+	}
+	if filter.Page < 1 {
+		filter.Page = 1
+	}
+	if filter.PageSize < 1 {
+		filter.PageSize = 20
+	} else if filter.PageSize > 200 {
+		filter.PageSize = 200
+	}
+	if raw := strings.TrimSpace(c.Query("source_id")); raw != "" {
+		sourceID, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || sourceID <= 0 {
+			return filter, fmt.Errorf("source_id 必须是正整数")
+		}
+		filter.SourceID = &sourceID
+	}
+	fromValue := c.Query("from")
+	if fromValue == "" {
+		fromValue = c.Query("date_from")
+	}
+	from, err := queryTimeBoundary(fromValue, false)
+	if err != nil {
+		return filter, fmt.Errorf("from 必须是 RFC3339 时间或日期")
+	}
+	toValue := c.Query("to")
+	if toValue == "" {
+		toValue = c.Query("date_to")
+	}
+	to, err := queryTimeBoundary(toValue, true)
+	if err != nil {
+		return filter, fmt.Errorf("to 必须是 RFC3339 时间或日期")
+	}
+	if from != nil && to != nil && !from.Before(*to) {
+		return filter, fmt.Errorf("from 必须早于 to")
+	}
+	filter.From, filter.To = from, to
+	return filter, nil
 }
 
 func bindKeywordAPISource(c *gin.Context) (keywordAPISourceRequest, string, bool) {
@@ -402,6 +536,9 @@ func keywordAPISourceIterationConfig(request keywordAPISourceRequest) keywordsou
 		Enabled: request.IterationEnabled, Location: keywordsource.IterationLocation(request.IterationLocation),
 		Path: request.IterationPath, Start: request.IterationStart, Step: request.IterationStep,
 		Count: request.IterationCount, DelaySeconds: request.IterationDelaySeconds,
+		Unlimited: request.IterationUnlimited, NoKeywordStopCount: request.IterationNoKeywordStopCount,
+		RandomDelayMinSeconds: request.IterationRandomDelayMinSeconds,
+		RandomDelayMaxSeconds: request.IterationRandomDelayMaxSeconds,
 	}
 }
 
@@ -443,8 +580,14 @@ func keywordAPISourceDetail(source storage.KeywordAPISource) gin.H {
 		"iteration_enabled": source.IterationEnabled, "iteration_location": source.IterationLocation,
 		"iteration_path": source.IterationPath, "iteration_start": source.IterationStart, "iteration_step": source.IterationStep,
 		"iteration_count": source.IterationCount, "iteration_delay_seconds": source.IterationDelaySeconds,
-		"last_request_count": source.LastRequestCount, "last_success_count": source.LastSuccessCount,
-		"last_failure_count": source.LastFailureCount,
+		"iteration_unlimited":                source.IterationUnlimited,
+		"iteration_no_keyword_stop_count":    source.IterationNoKeywordStopCount,
+		"iteration_random_delay_min_seconds": source.IterationRandomDelayMinSeconds,
+		"iteration_random_delay_max_seconds": source.IterationRandomDelayMaxSeconds,
+		"last_request_count":                 source.LastRequestCount, "last_success_count": source.LastSuccessCount,
+		"last_failure_count":   source.LastFailureCount,
+		"sync_config_revision": source.SyncConfigRevision, "last_applied_config_revision": source.LastAppliedConfigRevision,
+		"result_stale": source.ResultStale, "active_run": source.ActiveRun, "latest_run": source.LatestRun,
 	}
 }
 

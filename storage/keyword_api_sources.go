@@ -20,8 +20,12 @@ const keywordAPISourceColumns = `
 	sync_interval_seconds, default_keyword_type, default_keyword_enabled,
 	default_priority, default_cooldown_seconds, iteration_enabled, iteration_location,
 	iteration_path, iteration_start, iteration_step, iteration_count, iteration_delay_seconds,
+	iteration_unlimited, iteration_no_keyword_stop_count,
+	iteration_random_delay_min_seconds, iteration_random_delay_max_seconds,
 	next_sync_at, last_synced_at, last_status, last_error, last_item_count,
-	last_request_count, last_success_count, last_failure_count, created_at, updated_at`
+	last_request_count, last_success_count, last_failure_count,
+	sync_config_revision, last_applied_config_revision, result_stale,
+	created_at, updated_at`
 
 func scanKeywordAPISource(row rowScanner) (KeywordAPISource, error) {
 	var source KeywordAPISource
@@ -35,9 +39,12 @@ func scanKeywordAPISource(row rowScanner) (KeywordAPISource, error) {
 		&source.DefaultKeywordType, &source.DefaultKeywordEnabled, &source.DefaultPriority,
 		&cooldown, &source.IterationEnabled, &source.IterationLocation, &source.IterationPath,
 		&source.IterationStart, &source.IterationStep, &source.IterationCount,
-		&source.IterationDelaySeconds, &nextSync, &lastSynced, &source.LastStatus,
+		&source.IterationDelaySeconds, &source.IterationUnlimited, &source.IterationNoKeywordStopCount,
+		&source.IterationRandomDelayMinSeconds, &source.IterationRandomDelayMaxSeconds,
+		&nextSync, &lastSynced, &source.LastStatus,
 		&source.LastError, &source.LastItemCount, &source.LastRequestCount,
-		&source.LastSuccessCount, &source.LastFailureCount, &source.CreatedAt, &source.UpdatedAt,
+		&source.LastSuccessCount, &source.LastFailureCount, &source.SyncConfigRevision,
+		&source.LastAppliedConfigRevision, &source.ResultStale, &source.CreatedAt, &source.UpdatedAt,
 	)
 	if err != nil {
 		return KeywordAPISource{}, err
@@ -67,8 +74,10 @@ func (s *Store) CreateKeywordAPISource(ctx context.Context, input CreateKeywordA
 		sync_interval_seconds, default_keyword_type, default_keyword_enabled,
 		default_priority, default_cooldown_seconds, iteration_enabled, iteration_location,
 		iteration_path, iteration_start, iteration_step, iteration_count, iteration_delay_seconds,
+		iteration_unlimited, iteration_no_keyword_stop_count,
+		iteration_random_delay_min_seconds, iteration_random_delay_max_seconds,
 		next_sync_at
-	) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+	) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
 	RETURNING `+keywordAPISourceColumns,
 		source.Name, source.Enabled, source.RequestMethod, source.RequestURL,
 		encodeStringMap(source.RequestHeaders), encodeStringMap(source.QueryParams),
@@ -77,7 +86,9 @@ func (s *Store) CreateKeywordAPISource(ctx context.Context, input CreateKeywordA
 		source.DefaultKeywordEnabled, source.DefaultPriority, source.DefaultCooldownSeconds,
 		source.IterationEnabled, source.IterationLocation, source.IterationPath,
 		source.IterationStart, source.IterationStep, source.IterationCount,
-		source.IterationDelaySeconds, source.NextSyncAt,
+		source.IterationDelaySeconds, source.IterationUnlimited, source.IterationNoKeywordStopCount,
+		source.IterationRandomDelayMinSeconds, source.IterationRandomDelayMaxSeconds,
+		source.NextSyncAt,
 	))
 	if err != nil {
 		return KeywordAPISource{}, mapWriteError("create keyword API source", err)
@@ -95,6 +106,9 @@ func (s *Store) GetKeywordAPISource(ctx context.Context, id int64) (KeywordAPISo
 	}
 	if err != nil {
 		return KeywordAPISource{}, fmt.Errorf("get keyword API source: %w", err)
+	}
+	if err := s.loadKeywordAPISourceRunSummaries(ctx, []*KeywordAPISource{&source}); err != nil {
+		return KeywordAPISource{}, err
 	}
 	return source, nil
 }
@@ -143,6 +157,13 @@ func (s *Store) ListKeywordAPISources(ctx context.Context, filter KeywordAPISour
 	if err := rows.Err(); err != nil {
 		return KeywordAPISourcePage{}, fmt.Errorf("iterate keyword API sources: %w", err)
 	}
+	pointers := make([]*KeywordAPISource, len(items))
+	for index := range items {
+		pointers[index] = &items[index]
+	}
+	if err := s.loadKeywordAPISourceRunSummaries(ctx, pointers); err != nil {
+		return KeywordAPISourcePage{}, err
+	}
 	return KeywordAPISourcePage{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
 }
 
@@ -166,6 +187,10 @@ func (s *Store) UpdateKeywordAPISource(ctx context.Context, id int64, input Upda
 	if err := validateKeywordAPISource(updated); err != nil {
 		return KeywordAPISource{}, err
 	}
+	if keywordAPISourceConfigChanged(current, updated) {
+		updated.SyncConfigRevision = current.SyncConfigRevision + 1
+		updated.ResultStale = current.ResultStale || current.LastSyncedAt != nil || current.LastAppliedConfigRevision > 0
+	}
 	updated, err = scanKeywordAPISource(tx.QueryRow(ctx, `UPDATE keyword_api_sources SET
 		name=$2, enabled=$3, request_method=$4, request_url=$5, request_headers=$6::jsonb,
 		query_params=$7::jsonb, body_type=$8, request_body=$9, proxy_url=$10,
@@ -173,7 +198,10 @@ func (s *Store) UpdateKeywordAPISource(ctx context.Context, id int64, input Upda
 		default_keyword_type=$14, default_keyword_enabled=$15, default_priority=$16,
 		default_cooldown_seconds=$17, iteration_enabled=$18, iteration_location=$19,
 		iteration_path=$20, iteration_start=$21, iteration_step=$22, iteration_count=$23,
-		iteration_delay_seconds=$24, next_sync_at=$25, updated_at=now()
+		iteration_delay_seconds=$24, iteration_unlimited=$25,
+		iteration_no_keyword_stop_count=$26, iteration_random_delay_min_seconds=$27,
+		iteration_random_delay_max_seconds=$28, next_sync_at=$29,
+		sync_config_revision=$30, result_stale=$31, updated_at=now()
 	WHERE id=$1 RETURNING `+keywordAPISourceColumns,
 		id, updated.Name, updated.Enabled, updated.RequestMethod, updated.RequestURL,
 		encodeStringMap(updated.RequestHeaders), encodeStringMap(updated.QueryParams),
@@ -182,7 +210,9 @@ func (s *Store) UpdateKeywordAPISource(ctx context.Context, id int64, input Upda
 		updated.DefaultKeywordEnabled, updated.DefaultPriority, updated.DefaultCooldownSeconds,
 		updated.IterationEnabled, updated.IterationLocation, updated.IterationPath,
 		updated.IterationStart, updated.IterationStep, updated.IterationCount,
-		updated.IterationDelaySeconds, updated.NextSyncAt,
+		updated.IterationDelaySeconds, updated.IterationUnlimited, updated.IterationNoKeywordStopCount,
+		updated.IterationRandomDelayMinSeconds, updated.IterationRandomDelayMaxSeconds,
+		updated.NextSyncAt, updated.SyncConfigRevision, updated.ResultStale,
 	))
 	if err != nil {
 		return KeywordAPISource{}, mapWriteError("update keyword API source", err)
@@ -203,6 +233,8 @@ func (s *Store) CopyKeywordAPISource(ctx context.Context, id int64) (KeywordAPIS
 		sync_interval_seconds, default_keyword_type, default_keyword_enabled,
 		default_priority, default_cooldown_seconds, iteration_enabled, iteration_location,
 		iteration_path, iteration_start, iteration_step, iteration_count, iteration_delay_seconds,
+		iteration_unlimited, iteration_no_keyword_stop_count,
+		iteration_random_delay_min_seconds, iteration_random_delay_max_seconds,
 		next_sync_at, last_synced_at, last_status, last_error, last_item_count,
 		last_request_count, last_success_count, last_failure_count
 	) SELECT name || ' 副本', FALSE, request_method, request_url, request_headers, query_params,
@@ -210,6 +242,8 @@ func (s *Store) CopyKeywordAPISource(ctx context.Context, id int64) (KeywordAPIS
 		sync_interval_seconds, default_keyword_type, default_keyword_enabled,
 		default_priority, default_cooldown_seconds, iteration_enabled, iteration_location,
 		iteration_path, iteration_start, iteration_step, iteration_count, iteration_delay_seconds,
+		iteration_unlimited, iteration_no_keyword_stop_count,
+		iteration_random_delay_min_seconds, iteration_random_delay_max_seconds,
 		NULL, NULL, 'pending', '', 0, 0, 0, 0
 	FROM keyword_api_sources WHERE id=$1
 	RETURNING `+keywordAPISourceColumns, id))
@@ -226,14 +260,69 @@ func (s *Store) DeleteKeywordAPISource(ctx context.Context, id int64) error {
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("storage is disabled")
 	}
-	command, err := s.pool.Exec(ctx, "DELETE FROM keyword_api_sources WHERE id=$1", id)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("begin delete keyword API source: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	var lockedID int64
+	if err := tx.QueryRow(ctx, "SELECT id FROM keyword_api_sources WHERE id=$1 FOR UPDATE", id).Scan(&lockedID); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return fmt.Errorf("lock keyword API source for delete: %w", err)
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM keyword_api_sync_runs
+		WHERE source_id=$1 AND status IN ('queued','running')
+	)`, id).Scan(&active); err != nil {
+		return fmt.Errorf("check active keyword API source sync: %w", err)
+	}
+	if active {
+		return fmt.Errorf("%w: keyword API source sync is active", ErrConflict)
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM keyword_api_sources WHERE id=$1", id); err != nil {
 		return fmt.Errorf("delete keyword API source: %w", err)
 	}
-	if command.RowsAffected() == 0 {
-		return ErrNotFound
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit delete keyword API source: %w", err)
 	}
 	return nil
+}
+
+func keywordAPISourceConfigChanged(before, after KeywordAPISource) bool {
+	if before.RequestMethod != after.RequestMethod || before.RequestURL != after.RequestURL ||
+		before.BodyType != after.BodyType || before.RequestBody != after.RequestBody || before.ProxyURL != after.ProxyURL ||
+		before.TimeoutSeconds != after.TimeoutSeconds || before.ResponsePath != after.ResponsePath ||
+		before.DefaultKeywordType != after.DefaultKeywordType || before.DefaultKeywordEnabled != after.DefaultKeywordEnabled ||
+		before.DefaultPriority != after.DefaultPriority || before.IterationEnabled != after.IterationEnabled ||
+		before.IterationLocation != after.IterationLocation || before.IterationPath != after.IterationPath ||
+		before.IterationStart != after.IterationStart || before.IterationStep != after.IterationStep ||
+		before.IterationCount != after.IterationCount || before.IterationDelaySeconds != after.IterationDelaySeconds ||
+		before.IterationUnlimited != after.IterationUnlimited || before.IterationNoKeywordStopCount != after.IterationNoKeywordStopCount ||
+		before.IterationRandomDelayMinSeconds != after.IterationRandomDelayMinSeconds ||
+		before.IterationRandomDelayMaxSeconds != after.IterationRandomDelayMaxSeconds {
+		return true
+	}
+	if !stringMapEqual(before.RequestHeaders, after.RequestHeaders) || !stringMapEqual(before.QueryParams, after.QueryParams) {
+		return true
+	}
+	if (before.DefaultCooldownSeconds == nil) != (after.DefaultCooldownSeconds == nil) {
+		return true
+	}
+	return before.DefaultCooldownSeconds != nil && *before.DefaultCooldownSeconds != *after.DefaultCooldownSeconds
+}
+
+func stringMapEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) ClaimDueKeywordAPISource(ctx context.Context, at time.Time) (*KeywordAPISource, error) {
@@ -356,6 +445,7 @@ func (s *Store) CompleteKeywordAPISourceSync(ctx context.Context, input KeywordA
 	source, err = scanKeywordAPISource(tx.QueryRow(ctx, `UPDATE keyword_api_sources SET
 		last_status=$2, last_error=$3, last_item_count=$4, last_synced_at=$5,
 		last_request_count=$6, last_success_count=$7, last_failure_count=$8,
+		last_applied_config_revision=sync_config_revision, result_stale=FALSE,
 		next_sync_at=$5::timestamptz + sync_interval_seconds * interval '1 second', updated_at=now()
 	WHERE id=$1 RETURNING `+keywordAPISourceColumns, source.ID, status, errorMessage, len(values), input.SyncedAt,
 		requestCount, successCount, failureCount))
@@ -524,8 +614,12 @@ func normalizeKeywordAPISourceCreate(input CreateKeywordAPISourceInput, now time
 		IterationEnabled: input.IterationEnabled, IterationLocation: iterationLocation,
 		IterationPath: strings.TrimSpace(input.IterationPath), IterationStart: input.IterationStart,
 		IterationStep: iterationStep, IterationCount: iterationCount,
-		IterationDelaySeconds: input.IterationDelaySeconds,
-		NextSyncAt:            nextSync, LastStatus: KeywordAPISourceStatusPending,
+		IterationDelaySeconds:          input.IterationDelaySeconds,
+		IterationUnlimited:             input.IterationUnlimited,
+		IterationNoKeywordStopCount:    input.IterationNoKeywordStopCount,
+		IterationRandomDelayMinSeconds: input.IterationRandomDelayMinSeconds,
+		IterationRandomDelayMaxSeconds: input.IterationRandomDelayMaxSeconds,
+		NextSyncAt:                     nextSync, LastStatus: KeywordAPISourceStatusPending,
 	}
 	return source, validateKeywordAPISource(source)
 }
@@ -601,6 +695,18 @@ func applyKeywordAPISourceUpdate(source KeywordAPISource, input UpdateKeywordAPI
 	if input.IterationDelaySeconds != nil {
 		source.IterationDelaySeconds = *input.IterationDelaySeconds
 	}
+	if input.IterationUnlimited != nil {
+		source.IterationUnlimited = *input.IterationUnlimited
+	}
+	if input.IterationNoKeywordStopCount != nil {
+		source.IterationNoKeywordStopCount = *input.IterationNoKeywordStopCount
+	}
+	if input.IterationRandomDelayMinSeconds != nil {
+		source.IterationRandomDelayMinSeconds = *input.IterationRandomDelayMinSeconds
+	}
+	if input.IterationRandomDelayMaxSeconds != nil {
+		source.IterationRandomDelayMaxSeconds = *input.IterationRandomDelayMaxSeconds
+	}
 	if input.NextSyncAt != nil {
 		source.NextSyncAt = *input.NextSyncAt
 	}
@@ -636,12 +742,25 @@ func validateKeywordAPISource(source KeywordAPISource) error {
 	if source.IterationDelaySeconds < 0 || source.IterationDelaySeconds > 3600 {
 		return fmt.Errorf("%w: iteration delay", ErrInvalid)
 	}
+	if source.IterationNoKeywordStopCount < 0 || source.IterationNoKeywordStopCount > 100 {
+		return fmt.Errorf("%w: iteration no-keyword stop count", ErrInvalid)
+	}
+	if source.IterationRandomDelayMinSeconds < -3600 || source.IterationRandomDelayMinSeconds > 3600 ||
+		source.IterationRandomDelayMaxSeconds < -3600 || source.IterationRandomDelayMaxSeconds > 3600 {
+		return fmt.Errorf("%w: iteration random delay", ErrInvalid)
+	}
+	if source.IterationRandomDelayMinSeconds > source.IterationRandomDelayMaxSeconds {
+		return fmt.Errorf("%w: iteration random delay range", ErrInvalid)
+	}
 	if source.IterationEnabled {
 		if source.IterationPath == "" {
 			return fmt.Errorf("%w: iteration path", ErrInvalid)
 		}
 		if source.IterationLocation == "body" && source.BodyType != "json" && source.BodyType != "form" {
 			return fmt.Errorf("%w: body iteration requires JSON or form body", ErrInvalid)
+		}
+		if source.IterationUnlimited && source.IterationNoKeywordStopCount < 1 {
+			return fmt.Errorf("%w: unlimited iteration requires no-keyword stop count", ErrInvalid)
 		}
 	}
 	if source.TimeoutSeconds < 1 || source.TimeoutSeconds > 60 {

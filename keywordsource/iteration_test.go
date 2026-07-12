@@ -26,6 +26,27 @@ func TestIterationValues(t *testing.T) {
 	if _, err := IterationValues(IterationConfig{Enabled: true, Start: math.MaxInt64, Step: 1, Count: 2}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("overflow error = %v", err)
 	}
+	if _, err := IterationValues(IterationConfig{Enabled: true, Unlimited: true, Count: 1}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("unlimited materialization error = %v", err)
+	}
+}
+
+func TestIterationValueSupportsUnlimitedIndexes(t *testing.T) {
+	t.Parallel()
+	iteration := IterationConfig{Enabled: true, Unlimited: true, Start: 5, Step: 3}
+	value, err := IterationValue(iteration, 1_000)
+	if err != nil || value != 3_005 {
+		t.Fatalf("IterationValue = %d, %v", value, err)
+	}
+	if _, err := IterationValue(iteration, -1); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("negative index error = %v", err)
+	}
+	if _, err := IterationValue(IterationConfig{Enabled: true, Count: 2}, 2); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("finite out-of-range error = %v", err)
+	}
+	if _, err := IterationValue(IterationConfig{Enabled: true, Unlimited: true, Start: math.MaxInt64, Step: 1}, 1); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("unlimited overflow error = %v", err)
+	}
 }
 
 func TestValidateIterationConfig(t *testing.T) {
@@ -35,6 +56,8 @@ func TestValidateIterationConfig(t *testing.T) {
 		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1},
 		{Enabled: true, Location: IterationHeader, Path: "X-Page", Count: 100, DelaySeconds: 3600},
 		{Enabled: true, Location: IterationBody, Path: "pagination.offset", Count: 2},
+		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, Unlimited: true, NoKeywordStopCount: 1, RandomDelayMinSeconds: -3600, RandomDelayMaxSeconds: 3600},
+		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, NoKeywordStopCount: 100, RandomDelayMinSeconds: -2, RandomDelayMaxSeconds: -1},
 	}
 	for _, iteration := range valid {
 		if err := ValidateIterationConfig(base, iteration); err != nil {
@@ -48,6 +71,12 @@ func TestValidateIterationConfig(t *testing.T) {
 		{Enabled: true, Location: IterationQuery, Path: "page", Count: 0},
 		{Enabled: true, Location: IterationQuery, Path: "page", Count: 101},
 		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, DelaySeconds: 3601},
+		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, NoKeywordStopCount: -1},
+		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, NoKeywordStopCount: 101},
+		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, Unlimited: true},
+		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, RandomDelayMinSeconds: -3601},
+		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, RandomDelayMaxSeconds: 3601},
+		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, RandomDelayMinSeconds: 2, RandomDelayMaxSeconds: 1},
 		{Enabled: true, Location: IterationBody, Path: "missing.offset", Count: 1},
 		{Enabled: true, Location: IterationBody, Path: "pagination[0]", Count: 1},
 	}
@@ -121,6 +150,36 @@ func TestDeriveRequestRejectsOutOfRangeIndex(t *testing.T) {
 	for _, index := range []int{-1, 2} {
 		if _, _, err := DeriveRequest(base, iteration, index); !errors.Is(err, ErrInvalidConfig) {
 			t.Fatalf("index %d error = %v", index, err)
+		}
+	}
+}
+
+func TestDeriveRequestAllowsUnlimitedIndex(t *testing.T) {
+	t.Parallel()
+	base := RequestConfig{Query: map[string]string{"page": "old"}}
+	iteration := IterationConfig{
+		Enabled: true, Unlimited: true, NoKeywordStopCount: 2,
+		Location: IterationQuery, Path: "page", Start: 1, Step: 2, Count: 1,
+	}
+	derived, value, err := DeriveRequest(base, iteration, 150)
+	if err != nil || value != 301 || derived.Query["page"] != "301" || base.Query["page"] != "old" {
+		t.Fatalf("derived = %#v value=%d err=%v base=%#v", derived, value, err, base)
+	}
+}
+
+func TestIterationConfigJSONFields(t *testing.T) {
+	t.Parallel()
+	payload, err := json.Marshal(IterationConfig{
+		Unlimited: true, NoKeywordStopCount: 3,
+		RandomDelayMinSeconds: -2, RandomDelayMaxSeconds: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := string(payload)
+	for _, field := range []string{`"unlimited":true`, `"no_keyword_stop_count":3`, `"random_delay_min_seconds":-2`, `"random_delay_max_seconds":4`} {
+		if !strings.Contains(encoded, field) {
+			t.Fatalf("JSON %s does not contain %s", encoded, field)
 		}
 	}
 }

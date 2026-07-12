@@ -25,7 +25,9 @@ func TestNormalizeKeywordAPISourceCreateDefaultsAndValidation(t *testing.T) {
 		source.TimeoutSeconds != 15 || source.SyncIntervalSeconds != 3600 ||
 		source.DefaultKeywordType != DefaultKeywordType || !source.DefaultKeywordEnabled || source.NextSyncAt != nil ||
 		source.IterationEnabled || source.IterationLocation != "query" || source.IterationPath != "" ||
-		source.IterationStart != 0 || source.IterationStep != 20 || source.IterationCount != 1 || source.IterationDelaySeconds != 0 {
+		source.IterationStart != 0 || source.IterationStep != 20 || source.IterationCount != 1 || source.IterationDelaySeconds != 0 ||
+		source.IterationUnlimited || source.IterationNoKeywordStopCount != 0 ||
+		source.IterationRandomDelayMinSeconds != 0 || source.IterationRandomDelayMaxSeconds != 0 {
 		t.Fatalf("defaults = %+v", source)
 	}
 	_, err = normalizeKeywordAPISourceCreate(CreateKeywordAPISourceInput{Name: "Enabled", Enabled: true}, now)
@@ -50,6 +52,12 @@ func TestNormalizeKeywordAPISourceIterationValidation(t *testing.T) {
 		{name: "bad location", input: CreateKeywordAPISourceInput{Name: "Source", IterationEnabled: true, IterationLocation: "cookie", IterationPath: "page"}},
 		{name: "too many requests", input: CreateKeywordAPISourceInput{Name: "Source", IterationCount: 101}},
 		{name: "delay too long", input: CreateKeywordAPISourceInput{Name: "Source", IterationDelaySeconds: 3601}},
+		{name: "negative no-keyword stop", input: CreateKeywordAPISourceInput{Name: "Source", IterationNoKeywordStopCount: -1}},
+		{name: "too many no-keyword rounds", input: CreateKeywordAPISourceInput{Name: "Source", IterationNoKeywordStopCount: 101}},
+		{name: "unlimited without stop", input: CreateKeywordAPISourceInput{Name: "Source", IterationEnabled: true, IterationLocation: "query", IterationPath: "page", IterationUnlimited: true}},
+		{name: "random minimum too low", input: CreateKeywordAPISourceInput{Name: "Source", IterationRandomDelayMinSeconds: -3601}},
+		{name: "random maximum too high", input: CreateKeywordAPISourceInput{Name: "Source", IterationRandomDelayMaxSeconds: 3601}},
+		{name: "random range reversed", input: CreateKeywordAPISourceInput{Name: "Source", IterationRandomDelayMinSeconds: 2, IterationRandomDelayMaxSeconds: -1}},
 		{name: "raw body", input: CreateKeywordAPISourceInput{Name: "Source", BodyType: "raw", IterationEnabled: true, IterationLocation: "body", IterationPath: "page"}},
 	}
 	for _, test := range tests {
@@ -62,9 +70,13 @@ func TestNormalizeKeywordAPISourceIterationValidation(t *testing.T) {
 	source, err := normalizeKeywordAPISourceCreate(CreateKeywordAPISourceInput{
 		Name: "Source", BodyType: "json", RequestBody: `{}`, IterationEnabled: true,
 		IterationLocation: "body", IterationPath: "pagination.offset", IterationStep: -20,
-		IterationCount: 10, IterationDelaySeconds: 2,
+		IterationCount: 10, IterationDelaySeconds: 2, IterationUnlimited: true,
+		IterationNoKeywordStopCount: 3, IterationRandomDelayMinSeconds: -2,
+		IterationRandomDelayMaxSeconds: 5,
 	}, now)
-	if err != nil || source.IterationStep != -20 || source.IterationCount != 10 {
+	if err != nil || source.IterationStep != -20 || source.IterationCount != 10 ||
+		!source.IterationUnlimited || source.IterationNoKeywordStopCount != 3 ||
+		source.IterationRandomDelayMinSeconds != -2 || source.IterationRandomDelayMaxSeconds != 5 {
 		t.Fatalf("valid iteration = %+v, %v", source, err)
 	}
 }

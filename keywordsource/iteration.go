@@ -15,10 +15,14 @@ import (
 )
 
 const (
-	MinIterationCount        = 1
-	MaxIterationCount        = 100
-	MinIterationDelaySeconds = 0
-	MaxIterationDelaySeconds = 3600
+	MinIterationCount              = 1
+	MaxIterationCount              = 100
+	MinIterationDelaySeconds       = 0
+	MaxIterationDelaySeconds       = 3600
+	MinIterationNoKeywordStopCount = 0
+	MaxIterationNoKeywordStopCount = 100
+	MinIterationRandomDelaySeconds = -3600
+	MaxIterationRandomDelaySeconds = 3600
 )
 
 type IterationLocation string
@@ -32,13 +36,17 @@ const (
 // IterationConfig describes a persistence-neutral numeric request sequence.
 // The value for an index is Start + Step*index.
 type IterationConfig struct {
-	Enabled      bool              `json:"enabled"`
-	Location     IterationLocation `json:"location"`
-	Path         string            `json:"path"`
-	Start        int64             `json:"start"`
-	Step         int64             `json:"step"`
-	Count        int               `json:"count"`
-	DelaySeconds int               `json:"delay_seconds"`
+	Enabled               bool              `json:"enabled"`
+	Location              IterationLocation `json:"location"`
+	Path                  string            `json:"path"`
+	Start                 int64             `json:"start"`
+	Step                  int64             `json:"step"`
+	Count                 int               `json:"count"`
+	DelaySeconds          int               `json:"delay_seconds"`
+	Unlimited             bool              `json:"unlimited"`
+	NoKeywordStopCount    int               `json:"no_keyword_stop_count"`
+	RandomDelayMinSeconds int               `json:"random_delay_min_seconds"`
+	RandomDelayMaxSeconds int               `json:"random_delay_max_seconds"`
 }
 
 func canonicalIterationLocation(location IterationLocation) IterationLocation {
@@ -59,6 +67,19 @@ func ValidateIterationConfig(base RequestConfig, iteration IterationConfig) erro
 	}
 	if iteration.DelaySeconds < MinIterationDelaySeconds || iteration.DelaySeconds > MaxIterationDelaySeconds {
 		return fmt.Errorf("%w: iteration delay must be between 0 and 3600 seconds", ErrInvalidConfig)
+	}
+	if iteration.NoKeywordStopCount < MinIterationNoKeywordStopCount || iteration.NoKeywordStopCount > MaxIterationNoKeywordStopCount {
+		return fmt.Errorf("%w: iteration no-keyword stop count must be between 0 and 100", ErrInvalidConfig)
+	}
+	if iteration.Unlimited && iteration.NoKeywordStopCount < 1 {
+		return fmt.Errorf("%w: unlimited iteration requires a no-keyword stop count between 1 and 100", ErrInvalidConfig)
+	}
+	if iteration.RandomDelayMinSeconds < MinIterationRandomDelaySeconds || iteration.RandomDelayMinSeconds > MaxIterationRandomDelaySeconds ||
+		iteration.RandomDelayMaxSeconds < MinIterationRandomDelaySeconds || iteration.RandomDelayMaxSeconds > MaxIterationRandomDelaySeconds {
+		return fmt.Errorf("%w: iteration random delay bounds must be between -3600 and 3600 seconds", ErrInvalidConfig)
+	}
+	if iteration.RandomDelayMinSeconds > iteration.RandomDelayMaxSeconds {
+		return fmt.Errorf("%w: iteration random delay minimum must not exceed maximum", ErrInvalidConfig)
 	}
 	path := strings.TrimSpace(iteration.Path)
 	if path == "" {
@@ -94,6 +115,10 @@ func ValidateIterationConfig(base RequestConfig, iteration IterationConfig) erro
 		return fmt.Errorf("%w: unsupported iteration location", ErrInvalidConfig)
 	}
 
+	if iteration.Unlimited {
+		_, err := IterationValue(iteration, 0)
+		return err
+	}
 	_, err := IterationValues(iteration)
 	return err
 }
@@ -104,12 +129,14 @@ func IterationValues(iteration IterationConfig) ([]int64, error) {
 	count := iteration.Count
 	if !iteration.Enabled {
 		count = 1
+	} else if iteration.Unlimited {
+		return nil, fmt.Errorf("%w: unlimited iteration cannot be materialized", ErrInvalidConfig)
 	} else if count < MinIterationCount || count > MaxIterationCount {
 		return nil, fmt.Errorf("%w: iteration count must be between 1 and 100", ErrInvalidConfig)
 	}
 	values := make([]int64, count)
 	for index := 0; index < count; index++ {
-		value, err := iterationValue(iteration.Start, iteration.Step, index)
+		value, err := IterationValue(iteration, index)
 		if err != nil {
 			return nil, err
 		}
@@ -118,20 +145,30 @@ func IterationValues(iteration IterationConfig) ([]int64, error) {
 	return values, nil
 }
 
+// IterationValue returns the numeric value for one zero-based request index.
+// Unlimited iteration accepts every non-negative index; finite and disabled
+// configurations retain their configured request bounds.
+func IterationValue(iteration IterationConfig, index int) (int64, error) {
+	if index < 0 {
+		return 0, fmt.Errorf("%w: iteration index is negative", ErrInvalidConfig)
+	}
+	if !iteration.Enabled {
+		if index != 0 {
+			return 0, fmt.Errorf("%w: iteration index %d is out of range", ErrInvalidConfig, index)
+		}
+	} else if !iteration.Unlimited && (index >= iteration.Count || iteration.Count < MinIterationCount || iteration.Count > MaxIterationCount) {
+		return 0, fmt.Errorf("%w: iteration index %d is out of range", ErrInvalidConfig, index)
+	}
+	return iterationValue(iteration.Start, iteration.Step, index)
+}
+
 // DeriveRequest clones base and injects the value for index. When iteration is
 // disabled only index zero is valid and the cloned request is not modified.
 func DeriveRequest(base RequestConfig, iteration IterationConfig, index int) (RequestConfig, int64, error) {
 	if err := ValidateIterationConfig(base, iteration); err != nil {
 		return RequestConfig{}, 0, err
 	}
-	limit := iteration.Count
-	if !iteration.Enabled {
-		limit = 1
-	}
-	if index < 0 || index >= limit {
-		return RequestConfig{}, 0, fmt.Errorf("%w: iteration index %d is out of range", ErrInvalidConfig, index)
-	}
-	value, err := iterationValue(iteration.Start, iteration.Step, index)
+	value, err := IterationValue(iteration, index)
 	if err != nil {
 		return RequestConfig{}, 0, err
 	}

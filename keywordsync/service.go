@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,9 @@ type Config struct {
 	OnError      func(error)
 }
 
+type delaySampler func(minSeconds, maxSeconds int) int
+type delayWaiter func(context.Context, time.Duration) error
+
 // Service serializes scheduled and manual API-source synchronization. The
 // store claim is the cross-goroutine guard; the mutex keeps this process from
 // issuing multiple outbound keyword-source requests at once.
@@ -28,6 +32,10 @@ type Service struct {
 	store        keywordSourceStore
 	pollInterval time.Duration
 	onError      func(error)
+	sampleDelay  delaySampler
+	waitDelay    delayWaiter
+	wake         chan struct{}
+	owner        string
 
 	mu     sync.Mutex
 	runMu  sync.Mutex
@@ -60,7 +68,11 @@ func newService(store keywordSourceStore, config Config) *Service {
 	if onError == nil {
 		onError = func(err error) { log.Printf("API keyword source: %v", err) }
 	}
-	return &Service{store: store, pollInterval: interval, onError: onError}
+	return &Service{
+		store: store, pollInterval: interval, onError: onError,
+		sampleDelay: sampleIterationDelay, waitDelay: waitIterationDelay,
+		wake: make(chan struct{}, 1), owner: newWorkerID(),
+	}
 }
 
 func (s *Service) Start(parent context.Context) error {
@@ -103,33 +115,41 @@ func (s *Service) Close(ctx context.Context) error {
 	}
 }
 
-// TriggerNow claims a source synchronously and performs the potentially long
-// iterative run in the service background context. This keeps the admin HTTP
-// request below the server write timeout even when iterations include delays.
-func (s *Service) TriggerNow(ctx context.Context, id int64) (storage.KeywordAPISource, error) {
+// TriggerNow persists a queued run and wakes the background worker. The
+// variadic trigger keeps older callers source-compatible while allowing the
+// admin UI to distinguish a normal manual sync from "save and sync".
+func (s *Service) TriggerNow(ctx context.Context, id int64, triggers ...string) (storage.KeywordAPISyncRun, bool, error) {
 	if s == nil || s.store == nil {
-		return storage.KeywordAPISource{}, errors.New("keyword API source service is unavailable")
+		return storage.KeywordAPISyncRun{}, false, errors.New("keyword API source service is unavailable")
 	}
 	s.mu.Lock()
 	runCtx := s.ctx
 	s.mu.Unlock()
 	if runCtx == nil {
-		return storage.KeywordAPISource{}, errors.New("keyword API source service is not running")
+		return storage.KeywordAPISyncRun{}, false, errors.New("keyword API source service is not running")
 	}
-	source, err := s.store.ClaimKeywordAPISourceForSync(ctx, id, time.Now())
+	tracked, ok := s.store.(trackedKeywordSourceStore)
+	if !ok {
+		return storage.KeywordAPISyncRun{}, false, errors.New("keyword API source history storage is unavailable")
+	}
+	trigger := storage.KeywordAPISyncTriggerManual
+	if len(triggers) > 0 && triggers[0] == storage.KeywordAPISyncTriggerSave {
+		trigger = storage.KeywordAPISyncTriggerSave
+	}
+	run, alreadyActive, err := tracked.EnqueueKeywordAPISourceSync(ctx, id, trigger, time.Now())
 	if err != nil {
-		return storage.KeywordAPISource{}, err
+		return storage.KeywordAPISyncRun{}, false, err
 	}
-	go func() {
-		if _, syncErr := s.syncClaimed(runCtx, source); syncErr != nil {
-			s.onError(fmt.Errorf("sync source %d: %w", source.ID, syncErr))
-		}
-	}()
-	return source, nil
+	s.wakeWorker()
+	return run, alreadyActive, nil
 }
 
 func (s *Service) loop(ctx context.Context, done chan struct{}) {
 	defer close(done)
+	if tracked, ok := s.store.(trackedKeywordSourceStore); ok {
+		s.trackedLoop(ctx, tracked)
+		return
+	}
 	ticker := time.NewTicker(s.pollInterval)
 	defer ticker.Stop()
 	s.runDue(ctx)
@@ -175,16 +195,17 @@ func (s *Service) SyncNow(ctx context.Context, id int64) (storage.KeywordAPISour
 func (s *Service) syncClaimed(ctx context.Context, source storage.KeywordAPISource) (storage.KeywordAPISourceSyncResult, error) {
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	baseConfig, err := RequestConfig(source)
+	iteration := IterationConfig(source)
 	if err == nil {
 		_, err = keywordsource.ParsePath(source.ResponsePath)
 	}
 	if err == nil {
-		err = keywordsource.ValidateIterationConfig(baseConfig, IterationConfig(source))
-	}
-	if err == nil {
-		_, err = keywordsource.IterationValues(IterationConfig(source))
+		err = keywordsource.ValidateIterationConfig(baseConfig, iteration)
 	}
 	if err != nil {
 		redacted := keywordsource.RedactError(err, baseConfig)
@@ -195,51 +216,88 @@ func (s *Service) syncClaimed(ctx context.Context, source storage.KeywordAPISour
 		return storage.KeywordAPISourceSyncResult{}, redacted
 	}
 
-	iteration := IterationConfig(source)
-	sequence, _ := keywordsource.IterationValues(iteration)
 	values := make([]string, 0)
 	seenValues := make(map[string]struct{})
 	errorsByIteration := make([]string, 0)
 	requestCount, successCount, failureCount := 0, 0, 0
+	noKeywordStreak := 0
+	sampleDelay := s.sampleDelay
+	if sampleDelay == nil {
+		sampleDelay = sampleIterationDelay
+	}
+	waitDelay := s.waitDelay
+	if waitDelay == nil {
+		waitDelay = waitIterationDelay
+	}
+
 iterationLoop:
-	for index := range sequence {
-		if index > 0 && iteration.Enabled && iteration.DelaySeconds > 0 {
-			timer := time.NewTimer(time.Duration(iteration.DelaySeconds) * time.Second)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				errorsByIteration = append(errorsByIteration, "iteration cancelled: "+ctx.Err().Error())
+	for index := 0; iterationAllowsIndex(iteration, index); index++ {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			errorsByIteration = append(errorsByIteration, "iteration cancelled: "+ctxErr.Error())
+			requestCount++
+			failureCount++
+			break
+		}
+		if index > 0 {
+			randomSeconds := sampleDelay(iteration.RandomDelayMinSeconds, iteration.RandomDelayMaxSeconds)
+			delay := combinedIterationDelay(iteration.DelaySeconds, randomSeconds)
+			if waitErr := waitDelay(ctx, delay); waitErr != nil {
+				requestCount++
 				failureCount++
-				break iterationLoop
-			case <-timer.C:
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					errorsByIteration = append(errorsByIteration, "iteration cancelled: "+ctxErr.Error())
+				} else {
+					errorsByIteration = append(errorsByIteration, "iteration delay failed: "+waitErr.Error())
+				}
+				break
 			}
 		}
 		config, iterationValue, deriveErr := keywordsource.DeriveRequest(baseConfig, iteration, index)
 		requestCount++
 		if deriveErr != nil {
 			failureCount++
+			noKeywordStreak++
 			errorsByIteration = append(errorsByIteration, iterationError(index, iterationValue, deriveErr, baseConfig))
+			if iterationReachedNoKeywordLimit(iteration, noKeywordStreak) {
+				break
+			}
 			continue
 		}
 		response, executeErr := keywordsource.Execute(ctx, config)
 		if executeErr != nil {
 			failureCount++
+			noKeywordStreak++
 			errorsByIteration = append(errorsByIteration, iterationError(index, iterationValue, executeErr, config))
+			if ctx.Err() != nil || iterationReachedNoKeywordLimit(iteration, noKeywordStreak) {
+				break
+			}
 			continue
 		}
 		extraction, extractErr := keywordsource.ExtractKeywords(response.JSON, source.ResponsePath)
 		if extractErr != nil {
 			failureCount++
+			noKeywordStreak++
 			errorsByIteration = append(errorsByIteration, iterationError(index, iterationValue, extractErr, config))
+			if iterationReachedNoKeywordLimit(iteration, noKeywordStreak) {
+				break
+			}
 			continue
 		}
 		successCount++
+		if len(extraction.Values) == 0 {
+			noKeywordStreak++
+		} else {
+			noKeywordStreak = 0
+		}
 		for _, value := range extraction.Values {
 			if _, exists := seenValues[value.Normalized]; exists {
 				continue
 			}
 			seenValues[value.Normalized] = struct{}{}
 			values = append(values, value.Value)
+		}
+		if iterationReachedNoKeywordLimit(iteration, noKeywordStreak) {
+			break iterationLoop
 		}
 	}
 	errorSummary := strings.Join(errorsByIteration, "; ")
@@ -257,7 +315,7 @@ iterationLoop:
 	if failureCount > 0 {
 		status = storage.KeywordAPISourceStatusPartial
 	}
-	result, err := s.store.CompleteKeywordAPISourceSync(ctx, storage.KeywordAPISourceSyncInput{
+	result, err := s.store.CompleteKeywordAPISourceSync(context.WithoutCancel(ctx), storage.KeywordAPISourceSyncInput{
 		SourceID: source.ID, Values: values, SyncedAt: time.Now(), Status: status, ErrorMessage: errorSummary,
 		RequestCount: requestCount, SuccessCount: successCount, FailureCount: failureCount,
 	})
@@ -273,6 +331,54 @@ func IterationConfig(source storage.KeywordAPISource) keywordsource.IterationCon
 		Enabled: source.IterationEnabled, Location: keywordsource.IterationLocation(source.IterationLocation),
 		Path: source.IterationPath, Start: source.IterationStart, Step: source.IterationStep,
 		Count: source.IterationCount, DelaySeconds: source.IterationDelaySeconds,
+		Unlimited: source.IterationUnlimited, NoKeywordStopCount: source.IterationNoKeywordStopCount,
+		RandomDelayMinSeconds: source.IterationRandomDelayMinSeconds,
+		RandomDelayMaxSeconds: source.IterationRandomDelayMaxSeconds,
+	}
+}
+
+func iterationAllowsIndex(iteration keywordsource.IterationConfig, index int) bool {
+	if !iteration.Enabled {
+		return index == 0
+	}
+	return iteration.Unlimited || index < iteration.Count
+}
+
+func iterationReachedNoKeywordLimit(iteration keywordsource.IterationConfig, streak int) bool {
+	return iteration.NoKeywordStopCount > 0 && streak >= iteration.NoKeywordStopCount
+}
+
+func sampleIterationDelay(minSeconds, maxSeconds int) int {
+	if minSeconds >= maxSeconds {
+		return minSeconds
+	}
+	return minSeconds + rand.Intn(maxSeconds-minSeconds+1)
+}
+
+func combinedIterationDelay(fixedSeconds, randomSeconds int) time.Duration {
+	totalSeconds := fixedSeconds + randomSeconds
+	if totalSeconds < 0 {
+		totalSeconds = 0
+	}
+	return time.Duration(totalSeconds) * time.Second
+}
+
+func waitIterationDelay(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
