@@ -195,13 +195,19 @@ else
 fi
 
 BACKUP_MARKER='# pansou-postgres-backup'
+LEGACY_BACKUP_MARKER='# pansou-postgres-host-backup'
 if [ "`$HOST_POSTGRES" = true ] && [ -x "`$REMOTE_ROOT/scripts/backup-postgres-host.sh" ]; then
   BACKUP_JOB="17 3 * * * \"`$REMOTE_ROOT/scripts/backup-postgres-host.sh\" >> \"`$REMOTE_ROOT/backups/backup.log\" 2>&1 `$BACKUP_MARKER"
 else
   BACKUP_JOB="17 3 * * * BACKUP_DIR=\"`$REMOTE_ROOT/backups\" /bin/sh \"`$REMOTE_ROOT/scripts/backup-postgres.sh\" >> \"`$REMOTE_ROOT/backups/backup.log\" 2>&1 `$BACKUP_MARKER"
 fi
 if command -v crontab >/dev/null 2>&1; then
-  { crontab -l 2>/dev/null | grep -vF "`$BACKUP_MARKER" || true; printf '%s\n' "`$BACKUP_JOB"; } | crontab -
+  {
+    crontab -l 2>/dev/null |
+      grep -vF "`$BACKUP_MARKER" |
+      grep -vF "`$LEGACY_BACKUP_MARKER" || true
+    printf '%s\n' "`$BACKUP_JOB"
+  } | crontab -
 elif [ "`$(id -u)" -eq 0 ] && [ -d /etc/cron.d ]; then
   printf '17 3 * * * root BACKUP_DIR="%s/backups" /bin/sh "%s/scripts/backup-postgres.sh" >> "%s/backups/backup.log" 2>&1\n' \
     "`$REMOTE_ROOT" "`$REMOTE_ROOT" "`$REMOTE_ROOT" > /etc/cron.d/pansou-postgres-backup
