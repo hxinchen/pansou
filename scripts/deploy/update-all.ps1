@@ -4,7 +4,7 @@ param(
     [string]$User = "root",
     [string]$KeyPath = (Join-Path $HOME ".ssh\yanhuo"),
     [string]$RemoteRoot = "/opt/pansou-web",
-    [string]$EnabledPlugins = "labi,zhizhen,shandian,duoduo,muou",
+    [string]$EnabledPlugins = "labi,zhizhen,shandian,duoduo,muou,qqpd,gying,weibo",
     [string]$FrontendRoot = "",
     [string]$BasePath = "/pansou/",
     [string]$PublicBaseUrl = "http://103.236.97.248:22348",

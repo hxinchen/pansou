@@ -16,12 +16,13 @@
 
 - 后端：本地交叉编译 Go 二进制，上传到服务器后构建本地 Docker 镜像 `local/pansou-api:latest`。
 - 后端容器：`pansou-api`，监听容器内 `8888`，映射到服务器本机 `127.0.0.1:8889`。
-- PostgreSQL：`pansou-postgres`，数据保存在 `pansou-postgres` 命名卷；凭据文件为 `/opt/pansou-web/database-secrets.env`（权限 `600`）。
+- PostgreSQL：优先复用服务器 systemd 管理的 PostgreSQL（当前为 15）；若不存在则使用 `pansou-postgres` 容器。凭据文件为 `/opt/pansou-web/database-secrets.env`（权限 `600`）。
 - 备份：`/opt/pansou-web/scripts/backup-postgres.sh` 每日 `03:17` 执行，备份写入 `/opt/pansou-web/backups/` 并保留最近 7 份。
 - 代理：服务器上运行 `mihomo`，只监听 Docker 内网 `192.168.0.1:7890`，后端容器通过 `PROXY=socks5h://192.168.0.1:7890` 访问 Telegram 等站点。
 - 已启用插件：`labi,zhizhen,shandian,duoduo,muou,qqpd,gying,weibo`。
 - 前端：本地构建 `pansou-web`，以 `/pansou/` 为 base path，上传静态文件到服务器。`/pansou/report.html` 是静态监控页，会轮询 `/api/health`。
 - Caddy：托管 `/pansou/` 前端页面，并将 `/api/*` 反代到 `127.0.0.1:8889`。
+- 管理台：Caddy 将 `/pansou-admin/*` 重写到后端内置 `/admin/*`，避免与服务器上其他系统的 `/admin` 冲突。
 
 服务器关键路径：
 

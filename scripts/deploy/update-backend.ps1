@@ -167,28 +167,39 @@ fi
 if ! docker volume inspect pansou-postgres >/dev/null 2>&1; then
   docker volume create pansou-postgres >/dev/null
 fi
-if ! docker ps --format '{{.Names}}' | grep -qx 'pansou-postgres'; then
-  docker rm -f pansou-postgres >/dev/null 2>&1 || true
-  docker run -d \
-    --name pansou-postgres \
-    --restart unless-stopped \
-    --network pansou-network \
-    --env-file "`$DATABASE_SECRETS_FILE" \
-    -e POSTGRES_USER=pansou \
-    -e POSTGRES_DB=pansou \
-    -v pansou-postgres:/var/lib/postgresql/data \
-    -v "`$REMOTE_ROOT/backups:/backups" \
-    postgres:16-alpine
+HOST_POSTGRES=false
+if command -v pg_isready >/dev/null 2>&1 && systemctl is-active --quiet postgresql 2>/dev/null && \
+   pg_isready -h 127.0.0.1 -U pansou -d pansou >/dev/null 2>&1; then
+  HOST_POSTGRES=true
+  echo 'Using system PostgreSQL.'
+else
+  if ! docker ps --format '{{.Names}}' | grep -qx 'pansou-postgres'; then
+    docker rm -f pansou-postgres >/dev/null 2>&1 || true
+    docker run -d \
+      --name pansou-postgres \
+      --restart unless-stopped \
+      --network pansou-network \
+      --env-file "`$DATABASE_SECRETS_FILE" \
+      -e POSTGRES_USER=pansou \
+      -e POSTGRES_DB=pansou \
+      -v pansou-postgres:/var/lib/postgresql/data \
+      -v "`$REMOTE_ROOT/backups:/backups" \
+      postgres:16-alpine
+  fi
+
+  for i in `$(seq 1 30); do
+    if docker exec pansou-postgres pg_isready -U pansou -d pansou >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  docker exec pansou-postgres pg_isready -U pansou -d pansou >/dev/null
 fi
 
-for i in `$(seq 1 30); do
-  if docker exec pansou-postgres pg_isready -U pansou -d pansou >/dev/null 2>&1; then break; fi
-  sleep 1
-done
-docker exec pansou-postgres pg_isready -U pansou -d pansou >/dev/null
-
 BACKUP_MARKER='# pansou-postgres-backup'
-BACKUP_JOB="17 3 * * * BACKUP_DIR=\"`$REMOTE_ROOT/backups\" /bin/sh \"`$REMOTE_ROOT/scripts/backup-postgres.sh\" >> \"`$REMOTE_ROOT/backups/backup.log\" 2>&1 `$BACKUP_MARKER"
+if [ "`$HOST_POSTGRES" = true ] && [ -x "`$REMOTE_ROOT/scripts/backup-postgres-host.sh" ]; then
+  BACKUP_JOB="17 3 * * * \"`$REMOTE_ROOT/scripts/backup-postgres-host.sh\" >> \"`$REMOTE_ROOT/backups/backup.log\" 2>&1 `$BACKUP_MARKER"
+else
+  BACKUP_JOB="17 3 * * * BACKUP_DIR=\"`$REMOTE_ROOT/backups\" /bin/sh \"`$REMOTE_ROOT/scripts/backup-postgres.sh\" >> \"`$REMOTE_ROOT/backups/backup.log\" 2>&1 `$BACKUP_MARKER"
+fi
 if command -v crontab >/dev/null 2>&1; then
   { crontab -l 2>/dev/null | grep -vF "`$BACKUP_MARKER" || true; printf '%s\n' "`$BACKUP_JOB"; } | crontab -
 elif [ "`$(id -u)" -eq 0 ] && [ -d /etc/cron.d ]; then
