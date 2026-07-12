@@ -8,6 +8,7 @@
     keywords: '/api/admin/keywords',
     keywordAPISources: '/api/admin/keyword-api-sources',
     keywordAPISourceTest: '/api/admin/keyword-api-sources/test',
+    keywordAPISyncRuns: '/api/admin/keyword-api-sync-runs',
     runs: '/api/admin/runs',
     users: '/api/admin/users',
     usageOverview: '/api/admin/usage/overview',
@@ -26,6 +27,7 @@
   var ROLE_KEY = 'pansou.admin.role';
   var PAGE_SIZE = 20;
   var ACTIVE_STATUSES = ['pending', 'running'];
+  var ACTIVE_KEYWORD_SYNC_STATUSES = ['queued', 'running'];
   var viewLabels = {
     overview: '数据概览',
     resources: '资源库',
@@ -46,7 +48,8 @@
     overview: null,
     resources: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
     keywords: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, selected: new Set(), query: {}, tab: 'list' },
-    keywordSources: { items: [], loaded: false, editing: null, testResponse: null, selectedPath: '', testedSignature: '', originalSignature: '', requestSerial: 0, editorModes: { query: 'kv', header: 'kv', form: 'kv' } },
+    keywordSources: { items: [], loaded: false, editing: null, testResponse: null, selectedPath: '', testedSignature: '', originalSignature: '', requestSerial: 0, pollTimer: null, editorModes: { query: 'kv', header: 'kv', form: 'kv' } },
+    keywordSyncRuns: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, loaded: false, requestSerial: 0, detailID: null, detailPollTimer: null },
     runs: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
     users: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
     usage: { overview: null, trends: [], logs: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, range: '7d', query: {} },
@@ -61,6 +64,7 @@
 
   var statusLabels = {
     pending: '待处理',
+    queued: '排队中',
     running: '运行中',
     valid: '有效',
     invalid: '失效',
@@ -69,6 +73,10 @@
     success: '成功',
     success_empty: '无结果',
     failed: '失败',
+    partial: '部分成功',
+    interrupted: '已中断',
+    cancelled: '已取消',
+    legacy: '升级前记录',
     active: '可用',
     expired: '已过期',
     disabled: '已停用',
@@ -105,6 +113,8 @@
     scheduled: '自动调度',
     schedule: '自动调度',
     manual: '手动',
+    save: '保存并同步',
+    legacy: '升级前记录',
     external: '外部搜索'
   };
 
@@ -170,6 +180,13 @@
 
   function formatNumber(value) {
     return new Intl.NumberFormat('zh-CN').format(numberValue(value, 0));
+  }
+
+  function formatBytes(value) {
+    var bytes = Math.max(0, numberValue(value, 0));
+    if (bytes < 1024) return formatNumber(bytes) + ' B';
+    if (bytes < 1024 * 1024) return (Math.round(bytes / 102.4) / 10) + ' KB';
+    return (Math.round(bytes / 1024 / 102.4) / 10) + ' MB';
   }
 
   function toDate(value) {
@@ -549,6 +566,7 @@
     byId('current-view-label').textContent = viewLabels[view];
     closeMenu();
     stopDetailPolling();
+    if (view !== 'keywords') stopKeywordSourcePolling();
     loadView(view, force);
     byId('main-content').focus({ preventScroll: true });
     window.setTimeout(resizeCharts, 50);
@@ -557,7 +575,11 @@
   function loadView(view, force) {
     if (view === 'overview') return loadOverview(force);
     if (view === 'resources') return loadResources(force);
-    if (view === 'keywords') return state.keywords.tab === 'api' ? loadKeywordSources(force) : loadKeywords(force);
+    if (view === 'keywords') {
+      if (state.keywords.tab === 'api') return loadKeywordSources(force);
+      if (state.keywords.tab === 'history') return loadKeywordSyncRuns({ force: force });
+      return loadKeywords(force);
+    }
     if (view === 'runs') return loadRuns({ force: force });
     if (view === 'users') return loadUsers(force);
     if (view === 'usage') return loadUsage(force);
@@ -695,6 +717,10 @@
       });
       dialog.addEventListener('close', function () {
         if (dialog.id === 'run-detail-dialog') stopDetailPolling();
+        if (dialog.id === 'keyword-sync-detail-dialog') {
+          stopKeywordSyncDetailPolling();
+          state.keywordSyncRuns.detailID = null;
+        }
       });
     });
   }
@@ -1287,6 +1313,7 @@
       panel.hidden = panel.dataset.keywordModePanel !== mode;
     });
     byId('keyword-save').querySelector('span').textContent = mode === 'api' ? '保存 API 来源' : '保存';
+    byId('keyword-save-and-sync').hidden = mode !== 'api';
     byId('keyword-dialog-title').textContent = mode === 'api'
       ? (state.keywordSources.editing ? '编辑 API 关键词来源' : '新增 API 关键词来源')
       : (form.elements.id.value ? '编辑关键词' : '新增关键词');
@@ -1440,7 +1467,7 @@
   }
 
   function switchKeywordTab(tab) {
-    state.keywords.tab = tab === 'api' ? 'api' : 'list';
+    state.keywords.tab = tab === 'api' || tab === 'history' ? tab : 'list';
     document.querySelectorAll('[data-keyword-tab]').forEach(function (button) {
       var active = button.dataset.keywordTab === state.keywords.tab;
       button.classList.toggle('active', active);
@@ -1450,30 +1477,48 @@
       panel.hidden = panel.dataset.keywordPanel !== state.keywords.tab;
     });
     var createLabel = document.querySelector('[data-action="new-keyword"] span');
+    var createButton = document.querySelector('[data-action="new-keyword"]');
     if (createLabel) createLabel.textContent = state.keywords.tab === 'api' ? '新增 API 来源' : '新增关键词';
+    if (createButton) createButton.hidden = state.keywords.tab === 'history';
+    stopKeywordSourcePolling();
     if (state.keywords.tab === 'api') loadKeywordSources(false);
+    else if (state.keywords.tab === 'history') {
+      loadKeywordSources(false, { silent: true });
+      loadKeywordSyncRuns({ force: false });
+    }
     else loadKeywords(false);
   }
 
-  async function loadKeywordSources(force) {
-    if (state.keywordSources.loaded && !force) return;
+  async function loadKeywordSources(force, options) {
+    options = options || {};
+    if (state.keywordSources.loaded && !force) {
+      configureKeywordSourcePolling();
+      return;
+    }
     state.keywordSources.loaded = true;
     var serial = ++state.keywordSources.requestSerial;
-    showAlert('keyword-api-alert', '');
-    tableLoading('keyword-api-body', 6);
-    byId('keyword-api-empty').hidden = true;
+    if (!options.silent) {
+      showAlert('keyword-api-alert', '');
+      tableLoading('keyword-api-body', 6);
+      byId('keyword-api-empty').hidden = true;
+    }
     try {
       var data = await apiRequest(API.keywordAPISources, { query: { page: 1, page_size: 200 } });
       if (serial !== state.keywordSources.requestSerial) return;
       state.keywordSources.items = arrayFrom(data, ['items', 'sources', 'results']);
       renderKeywordSources();
+      populateKeywordSyncSourceFilter();
       updateTimestamp();
+      configureKeywordSourcePolling();
     } catch (error) {
       if (serial !== state.keywordSources.requestSerial) return;
       state.keywordSources.loaded = false;
-      state.keywordSources.items = [];
-      byId('keyword-api-body').innerHTML = '';
-      showAlert('keyword-api-alert', error.message || 'API 关键词来源加载失败');
+      if (!options.silent) {
+        state.keywordSources.items = [];
+        byId('keyword-api-body').innerHTML = '';
+        showAlert('keyword-api-alert', error.message || 'API 关键词来源加载失败');
+        stopKeywordSourcePolling();
+      } else configureKeywordSourcePolling();
     }
   }
 
@@ -1481,10 +1526,68 @@
     return String(pick(source, ['id', 'source_id'], ''));
   }
 
-  function keywordSourceStatus(source) {
-    var status = String(pick(source, ['last_status', 'status'], 'pending'));
-    var labels = { pending: '尚未同步', success: '同步成功', partial: '部分成功', failed: '同步失败', running: '同步中' };
+  function keywordSyncRunStatus(run) {
+    return String(pick(run, ['status', 'state'], 'unknown')).toLowerCase();
+  }
+
+  function keywordSyncRunID(run) {
+    return String(pick(run, ['id', 'run_id'], ''));
+  }
+
+  function keywordSyncRunProgress(run) {
+    var totalValue = pick(run, ['total_iterations', 'total_rounds'], null);
+    var status = keywordSyncRunStatus(run);
+    var legacy = String(pick(run, ['trigger'], '')).toLowerCase() === 'legacy' || status === 'legacy';
+    var unlimited = !legacy && (boolValue(pick(run, ['unlimited', 'iteration_unlimited'], false), false) || totalValue === null || totalValue === undefined || Number(totalValue) === 0);
+    var completed = numberValue(pick(run, ['completed_iterations', 'completed_rounds', 'processed_iterations'], 0));
+    var total = unlimited ? null : Math.max(0, numberValue(totalValue, 0));
+    var percent = legacy ? 100 : (total ? Math.min(100, Math.max(0, Math.round(completed / total * 100))) : (['success', 'partial', 'failed', 'interrupted', 'cancelled'].indexOf(status) >= 0 ? 100 : 0));
+    return { total: total, completed: completed, percent: percent, unlimited: unlimited, legacy: legacy };
+  }
+
+  function keywordSyncRunResult(run) {
+    var raw = numberValue(pick(run, ['raw_extracted_count', 'raw_item_count', 'seen'], 0));
+    var unique = numberValue(pick(run, ['unique_count', 'unique_item_count', 'item_count'], 0));
+    var added = numberValue(pick(run, ['new_count', 'new_keyword_count', 'inserted_keywords'], 0));
+    var existing = numberValue(pick(run, ['existing_count', 'existing_keyword_count', 'existing_keywords'], 0));
+    return { raw: raw, unique: unique, added: added, existing: existing };
+  }
+
+  function keywordSourceLatestRun(source) {
+    return pick(source, ['active_run', 'latest_run'], null) || null;
+  }
+
+  function keywordSourceIsStale(source) {
+    if (boolValue(source.result_stale, false)) return true;
+    var current = numberValue(pick(source, ['sync_config_revision'], 0));
+    var applied = numberValue(pick(source, ['last_applied_config_revision'], 0));
+    return current > 0 && applied > 0 && current > applied;
+  }
+
+  function keywordSourceStatus(source, run) {
+    run = run || keywordSourceLatestRun(source);
+    var status = run ? keywordSyncRunStatus(run) : String(pick(source, ['last_status', 'status'], 'pending')).toLowerCase();
+    var labels = { pending: '尚未同步', queued: '排队中', running: '同步中', success: '同步成功', partial: '部分成功', failed: '同步失败', interrupted: '已中断', cancelled: '已取消', legacy: '升级前记录' };
     return '<span class="status-badge status-' + escapeHTML(status) + '">' + escapeHTML(labels[status] || status) + '</span>';
+  }
+
+  function keywordSourceProgressMarkup(run) {
+    if (!run) return '';
+    var progress = keywordSyncRunProgress(run);
+    var active = ACTIVE_KEYWORD_SYNC_STATUSES.indexOf(keywordSyncRunStatus(run)) >= 0;
+    var label = progress.legacy ? '历史汇总' : (progress.unlimited ? '第 ' + progress.completed + ' 轮 / 无上限' : progress.completed + '/' + progress.total + ' 轮');
+    return '<div class="mini-progress keyword-source-progress"><div class="mini-progress-label"><span>' + escapeHTML(label) + '</span><span>' + (progress.unlimited ? (active ? '进行中' : '已结束') : progress.percent + '%') + '</span></div><div class="progress-track' + (progress.unlimited && active ? ' is-unlimited' : '') + '"><div class="progress-bar" style="width:' + progress.percent + '%"></div></div></div>';
+  }
+
+  function keywordSourceResultMarkup(source, run) {
+    var result = run ? keywordSyncRunResult(run) : {
+      raw: numberValue(pick(source, ['last_item_count'], 0)),
+      unique: numberValue(pick(source, ['last_item_count'], 0)),
+      added: numberValue(pick(source, ['last_new_count', 'new_count'], 0)),
+      existing: numberValue(pick(source, ['last_existing_count', 'existing_count'], 0))
+    };
+    var detail = result.unique + ' 去重后 · +' + result.added + ' 新增 · ' + result.existing + ' 已存在';
+    return '<strong>' + formatNumber(result.unique) + '</strong><small class="table-subline">' + escapeHTML(detail) + '</small>';
   }
 
   function renderKeywordSources() {
@@ -1492,7 +1595,10 @@
     var empty = byId('keyword-api-empty');
     var items = state.keywordSources.items || [];
     var enabledCount = items.filter(function (item) { return boolValue(item.enabled, false); }).length;
-    var extractedCount = items.reduce(function (total, item) { return total + numberValue(pick(item, ['last_item_count', 'item_count'], 0)); }, 0);
+    var extractedCount = items.reduce(function (total, item) {
+      var run = keywordSourceLatestRun(item);
+      return total + (run ? keywordSyncRunResult(run).unique : numberValue(pick(item, ['last_item_count', 'item_count'], 0)));
+    }, 0);
     byId('keyword-api-total').textContent = String(items.length);
     byId('keyword-api-enabled').textContent = String(enabledCount);
     byId('keyword-api-items').textContent = formatNumber(extractedCount);
@@ -1509,18 +1615,187 @@
       var url = pick(source, ['request_url', 'url'], '');
       var interval = Math.max(1, Math.round(numberValue(pick(source, ['sync_interval_seconds'], 3600)) / 60));
       var enabled = boolValue(source.enabled, false);
-      var requestCount = numberValue(pick(source, ['last_request_count'], 0));
-      var successCount = numberValue(pick(source, ['last_success_count'], 0));
-      var failureCount = numberValue(pick(source, ['last_failure_count'], 0));
+      var activeRun = pick(source, ['active_run'], null);
+      var latestRun = pick(source, ['latest_run'], null);
+      var latest = activeRun || latestRun;
+      var stale = keywordSourceIsStale(source);
+      var requestCount = numberValue(pick(latest || source, ['request_count', 'last_request_count'], 0));
+      var successCount = numberValue(pick(latest || source, ['success_count', 'last_success_count'], 0));
+      var failureCount = numberValue(pick(latest || source, ['failure_count', 'last_failure_count'], 0));
       var roundSummary = requestCount > 0 ? ('请求 ' + requestCount + ' 轮 · 成功 ' + successCount + (failureCount ? ' · 失败 ' + failureCount : '')) : '';
-      return '<tr><td><div class="keyword-api-name"><strong>' + escapeHTML(source.name || '未命名来源') + '</strong><small>' + (enabled ? '自动同步已启用' : '草稿 / 已停用') + '</small></div></td>' +
+      var active = activeRun && ACTIVE_KEYWORD_SYNC_STATUSES.indexOf(keywordSyncRunStatus(activeRun)) >= 0;
+      var syncButtonLabel = active ? '同步正在进行' : (stale ? '按新配置同步' : '立即同步');
+      return '<tr><td><div class="keyword-api-name"><strong>' + escapeHTML(source.name || '未命名来源') + '</strong><small>' + (enabled ? '自动同步已启用' : '草稿 / 已停用') + (stale ? ' · <span class="stale-label">旧配置结果 / 待同步</span>' : '') + '</small></div></td>' +
         '<td><div class="api-request-summary"><span class="http-status status-ok">' + escapeHTML(method) + '</span><code title="' + escapeHTML(url) + '">' + escapeHTML(url) + '</code></div></td>' +
         '<td>每 ' + interval + ' 分钟<small class="table-subline">下次 ' + escapeHTML(relativeTime(pick(source, ['next_sync_at'], null))) + '</small></td>' +
-        '<td>' + keywordSourceStatus(source) + '<small class="table-subline">' + escapeHTML(roundSummary || pick(source, ['last_error'], '') || relativeTime(pick(source, ['last_synced_at'], null))) + '</small></td>' +
-        '<td><strong>' + formatNumber(pick(source, ['last_item_count'], 0)) + '</strong></td>' +
-        '<td><div class="row-actions"><button class="row-action" type="button" data-action="sync-keyword-api" data-id="' + escapeHTML(id) + '" title="立即同步" aria-label="立即同步 ' + escapeHTML(source.name || '') + '">' + icon('refresh-cw') + '</button><button class="row-action" type="button" data-action="copy-keyword-api" data-id="' + escapeHTML(id) + '" title="复制来源" aria-label="复制 ' + escapeHTML(source.name || '') + '">' + icon('copy') + '</button><button class="row-action" type="button" data-action="edit-keyword-api" data-id="' + escapeHTML(id) + '" title="编辑" aria-label="编辑 ' + escapeHTML(source.name || '') + '">' + icon('pencil') + '</button><button class="row-action danger" type="button" data-action="delete-keyword-api" data-id="' + escapeHTML(id) + '" title="删除" aria-label="删除 ' + escapeHTML(source.name || '') + '">' + icon('trash-2') + '</button></div></td></tr>';
+        '<td>' + keywordSourceStatus(source, latest) + (active ? keywordSourceProgressMarkup(activeRun) : '<small class="table-subline">' + escapeHTML(roundSummary || pick(latest || source, ['error', 'last_error'], '') || relativeTime(pick(latest || source, ['finished_at', 'last_synced_at'], null))) + '</small>') + '</td>' +
+        '<td>' + keywordSourceResultMarkup(source, latest) + '</td>' +
+        '<td><div class="row-actions"><button class="row-action" type="button" data-action="sync-keyword-api" data-id="' + escapeHTML(id) + '" title="' + escapeHTML(syncButtonLabel) + '" aria-label="' + escapeHTML(syncButtonLabel + ' ' + (source.name || '')) + '"' + (active ? ' disabled' : '') + '>' + icon(active ? 'loader-circle' : 'refresh-cw', active ? 'spin' : '') + '</button><button class="row-action" type="button" data-action="view-keyword-sync-history" data-id="' + escapeHTML(id) + '" title="查看同步记录" aria-label="查看 ' + escapeHTML(source.name || '') + ' 的同步记录">' + icon('history') + '</button><button class="row-action" type="button" data-action="copy-keyword-api" data-id="' + escapeHTML(id) + '" title="复制来源" aria-label="复制 ' + escapeHTML(source.name || '') + '">' + icon('copy') + '</button><button class="row-action" type="button" data-action="edit-keyword-api" data-id="' + escapeHTML(id) + '" title="编辑" aria-label="编辑 ' + escapeHTML(source.name || '') + '">' + icon('pencil') + '</button><button class="row-action danger" type="button" data-action="delete-keyword-api" data-id="' + escapeHTML(id) + '" title="删除" aria-label="删除 ' + escapeHTML(source.name || '') + '">' + icon('trash-2') + '</button></div></td></tr>';
     }).join('');
     refreshIcons(body);
+  }
+
+  function populateKeywordSyncSourceFilter() {
+    var select = byId('keyword-sync-source-filter');
+    if (!select) return;
+    var current = select.value;
+    var sources = {};
+    (state.keywordSources.items || []).forEach(function (source) {
+      var id = keywordSourceID(source);
+      if (id) sources[id] = source.name || ('来源 #' + id);
+    });
+    (state.keywordSyncRuns.items || []).forEach(function (run) {
+      var id = pick(run, ['source_id'], null);
+      if (id !== null && id !== undefined && String(id)) sources[String(id)] = pick(run, ['source_name'], sources[String(id)] || ('来源 #' + id));
+    });
+    select.innerHTML = '<option value="">全部来源</option>' + Object.keys(sources).sort(function (left, right) {
+      return String(sources[left]).localeCompare(String(sources[right]), 'zh-CN');
+    }).map(function (id) {
+      return '<option value="' + escapeHTML(id) + '">' + escapeHTML(sources[id]) + '</option>';
+    }).join('');
+    if (Object.prototype.hasOwnProperty.call(sources, current)) select.value = current;
+  }
+
+  async function loadKeywordSyncRuns(options) {
+    options = options || {};
+    if (state.keywordSyncRuns.loaded && !options.force && !options.silent) {
+      configureKeywordSourcePolling();
+      return;
+    }
+    state.keywordSyncRuns.loaded = true;
+    var serial = ++state.keywordSyncRuns.requestSerial;
+    if (!options.silent) {
+      showAlert('keyword-sync-history-alert', '');
+      byId('keyword-sync-history-empty').hidden = true;
+      byId('keyword-sync-history-pagination').innerHTML = '';
+      tableLoading('keyword-sync-history-body', 7);
+    }
+    var query = Object.assign({}, state.keywordSyncRuns.query, {
+      page: state.keywordSyncRuns.page,
+      page_size: state.keywordSyncRuns.pageSize
+    });
+    try {
+      var data = await apiRequest(API.keywordAPISyncRuns, { query: query });
+      if (serial !== state.keywordSyncRuns.requestSerial) return;
+      var items = arrayFrom(data, ['items', 'runs', 'results']);
+      var meta = paginationMeta(data, items, state.keywordSyncRuns.page, state.keywordSyncRuns.pageSize);
+      state.keywordSyncRuns.items = items;
+      Object.assign(state.keywordSyncRuns, meta);
+      renderKeywordSyncRuns();
+      populateKeywordSyncSourceFilter();
+      updateTimestamp();
+      configureKeywordSourcePolling();
+    } catch (error) {
+      if (serial !== state.keywordSyncRuns.requestSerial) return;
+      state.keywordSyncRuns.loaded = false;
+      if (!options.silent) {
+        state.keywordSyncRuns.items = [];
+        byId('keyword-sync-history-body').innerHTML = '';
+        showAlert('keyword-sync-history-alert', error.message || '同步记录加载失败');
+        stopKeywordSourcePolling();
+      } else configureKeywordSourcePolling();
+    }
+  }
+
+  function renderKeywordSyncRuns() {
+    var body = byId('keyword-sync-history-body');
+    var empty = byId('keyword-sync-history-empty');
+    var items = state.keywordSyncRuns.items || [];
+    if (!items.length) {
+      body.innerHTML = '';
+      empty.hidden = false;
+      byId('keyword-sync-history-pagination').innerHTML = '';
+      refreshIcons(empty);
+      return;
+    }
+    empty.hidden = true;
+    body.innerHTML = items.map(function (run) {
+      var id = keywordSyncRunID(run);
+      var sourceName = pick(run, ['source_name'], '已删除来源');
+      var sourceID = pick(run, ['source_id'], null);
+      var sourceExists = pick(run, ['source_exists'], true) !== false;
+      var status = keywordSyncRunStatus(run);
+      var active = ACTIVE_KEYWORD_SYNC_STATUSES.indexOf(status) >= 0;
+      var progress = keywordSyncRunProgress(run);
+      var progressLabel = progress.legacy ? '历史汇总' : (progress.unlimited ? '第 ' + progress.completed + ' 轮 / 无上限' : progress.completed + '/' + progress.total + ' 轮');
+      var success = numberValue(pick(run, ['success_iterations', 'success_count'], 0));
+      var failed = numberValue(pick(run, ['failed_iterations', 'failure_count'], 0));
+      var result = keywordSyncRunResult(run);
+      var trigger = String(pick(run, ['trigger'], 'manual')).toLowerCase();
+      var started = pick(run, ['started_at', 'queued_at', 'created_at'], null);
+      return '<tr>' +
+        '<td><div class="keyword-api-name"><strong>' + escapeHTML(sourceName || '已删除来源') + '</strong><small class="mono">RUN #' + escapeHTML(id) + (!sourceExists ? ' · 来源已删除' : '') + '</small></div></td>' +
+        '<td>' + statusBadge(status) + (pick(run, ['error'], '') ? '<small class="table-subline danger-text" title="' + escapeHTML(pick(run, ['error'], '')) + '">' + escapeHTML(pick(run, ['error'], '')) + '</small>' : '') + '</td>' +
+        '<td><div class="mini-progress keyword-sync-progress"><div class="mini-progress-label"><span>' + escapeHTML(progressLabel) + '</span><span>' + (progress.unlimited ? (active ? '进行中' : '已结束') : progress.percent + '%') + '</span></div><div class="progress-track' + (progress.unlimited && active ? ' is-unlimited' : '') + '"><div class="progress-bar" style="width:' + progress.percent + '%"></div></div></div><small class="table-subline">成功 ' + success + (failed ? ' · 失败 ' + failed : '') + '</small></td>' +
+        '<td><strong>' + formatNumber(result.unique) + ' 去重后</strong><small class="table-subline">原始 ' + formatNumber(result.raw) + ' · +' + formatNumber(result.added) + ' 新增 · ' + formatNumber(result.existing) + ' 已存在</small></td>' +
+        '<td>' + escapeHTML(triggerLabels[trigger] || trigger) + '<small class="table-subline">配置 v' + formatNumber(pick(run, ['config_revision'], 0)) + '</small></td>' +
+        '<td title="' + escapeHTML(formatDate(started, true)) + '">' + escapeHTML(formatDate(started, true)) + '<small class="table-subline">' + escapeHTML(durationFrom(run)) + '</small></td>' +
+        '<td><div class="row-actions"><button class="row-action" type="button" data-action="view-keyword-sync-run" data-id="' + escapeHTML(id) + '" aria-label="查看同步运行 ' + escapeHTML(id) + '" title="查看详情">' + icon('panel-right-open') + '</button></div></td>' +
+      '</tr>';
+    }).join('');
+    renderPagination('keyword-sync-history-pagination', state.keywordSyncRuns.page, state.keywordSyncRuns.pages, 'keywordSyncRuns');
+    refreshIcons(body);
+  }
+
+  function updateKeywordSyncFilters() {
+    state.keywordSyncRuns.query = {
+      source_id: byId('keyword-sync-source-filter').value,
+      status: byId('keyword-sync-status-filter').value,
+      trigger: byId('keyword-sync-trigger-filter').value,
+      from: dateBoundary(byId('keyword-sync-from-filter').value, false),
+      to: dateBoundary(byId('keyword-sync-to-filter').value, true)
+    };
+    state.keywordSyncRuns.page = 1;
+    state.keywordSyncRuns.loaded = false;
+    loadKeywordSyncRuns({ force: true });
+  }
+
+  function resetKeywordSyncFilters() {
+    byId('keyword-sync-filters').reset();
+    updateKeywordSyncFilters();
+  }
+
+  function viewKeywordSyncHistory(sourceID) {
+    switchKeywordTab('history');
+    populateKeywordSyncSourceFilter();
+    byId('keyword-sync-source-filter').value = String(sourceID || '');
+    updateKeywordSyncFilters();
+  }
+
+  function keywordSourcesHaveActiveRun() {
+    return (state.keywordSources.items || []).some(function (source) {
+      var run = pick(source, ['active_run'], null);
+      return run && ACTIVE_KEYWORD_SYNC_STATUSES.indexOf(keywordSyncRunStatus(run)) >= 0;
+    });
+  }
+
+  function keywordSyncHistoryHasActiveRun() {
+    return (state.keywordSyncRuns.items || []).some(function (run) {
+      return ACTIVE_KEYWORD_SYNC_STATUSES.indexOf(keywordSyncRunStatus(run)) >= 0;
+    });
+  }
+
+  function configureKeywordSourcePolling() {
+    var active = state.keywords.tab === 'api'
+      ? keywordSourcesHaveActiveRun()
+      : state.keywords.tab === 'history' && keywordSyncHistoryHasActiveRun();
+    var visiblePanel = document.visibilityState === 'visible' && state.view === 'keywords' && (state.keywords.tab === 'api' || state.keywords.tab === 'history');
+    if (!active || !visiblePanel) {
+      stopKeywordSourcePolling();
+      return;
+    }
+    if (state.keywordSources.pollTimer) return;
+    state.keywordSources.pollTimer = window.setInterval(function () {
+      if (document.visibilityState !== 'visible' || state.view !== 'keywords') return;
+      if (state.keywords.tab === 'api') loadKeywordSources(true, { silent: true });
+      else if (state.keywords.tab === 'history') loadKeywordSyncRuns({ force: true, silent: true });
+    }, 5000);
+  }
+
+  function stopKeywordSourcePolling() {
+    if (!state.keywordSources.pollTimer) return;
+    clearInterval(state.keywordSources.pollTimer);
+    state.keywordSources.pollTimer = null;
   }
 
   function normalizeKVValues(values) {
@@ -1663,10 +1938,32 @@
     renderAPIEditorMode(target);
   }
 
+  function formatAPIIterationDuration(seconds) {
+    seconds = Math.max(0, Math.trunc(numberValue(seconds, 0)));
+    if (seconds === 0) return '0 秒';
+    var hours = Math.floor(seconds / 3600);
+    var minutes = Math.floor((seconds % 3600) / 60);
+    var remainingSeconds = seconds % 60;
+    var parts = [];
+    if (hours) parts.push(hours + ' 小时');
+    if (minutes) parts.push(minutes + ' 分');
+    if (remainingSeconds || !parts.length) parts.push(remainingSeconds + ' 秒');
+    return parts.join(' ');
+  }
+
+  function formatAPIIterationDurationRange(minimum, maximum) {
+    var minText = formatAPIIterationDuration(minimum);
+    var maxText = formatAPIIterationDuration(maximum);
+    return minimum === maximum ? minText : minText + ' – ' + maxText;
+  }
+
   function updateAPIIterationPreview() {
     var enabled = byId('api-iteration-enabled').checked;
+    var unlimited = byId('api-iteration-unlimited').checked;
     var fields = byId('api-iteration-fields');
+    var countInput = byId('api-iteration-count');
     fields.hidden = !enabled;
+    countInput.disabled = unlimited;
     var location = byId('api-iteration-location').value;
     var bodyType = byId('api-body-type').value;
     var hint = byId('api-iteration-hint');
@@ -1679,15 +1976,27 @@
     var start = Math.trunc(numberValue(byId('api-iteration-start').value, 0));
     var step = Math.trunc(numberValue(byId('api-iteration-step').value, 20));
     var count = Math.max(1, Math.min(100, Math.trunc(numberValue(byId('api-iteration-count').value, 1))));
-    var delay = Math.max(0, Math.min(3600, Math.trunc(numberValue(byId('api-iteration-delay').value, 0))));
-    var previewCount = Math.min(count, 6);
+    var fixedDelay = Math.max(0, Math.min(3600, Math.trunc(numberValue(byId('api-iteration-delay').value, 0))));
+    var randomDelayMin = Math.max(-3600, Math.min(3600, Math.trunc(numberValue(byId('api-iteration-random-delay-min').value, 0))));
+    var randomDelayMax = Math.max(-3600, Math.min(3600, Math.trunc(numberValue(byId('api-iteration-random-delay-max').value, 0))));
+    var noKeywordStopCount = Math.trunc(numberValue(byId('api-iteration-no-keyword-stop-count').value, 0));
+    var delayMinimum = Math.max(0, fixedDelay + randomDelayMin);
+    var delayMaximum = Math.max(0, fixedDelay + randomDelayMax);
+    var previewCount = unlimited ? 6 : Math.min(count, 6);
     var values = [];
     for (var index = 0; index < previewCount; index += 1) values.push(start + step * index);
     var sequence = values.join(' → ');
+    if (unlimited) {
+      sequence += ' → …';
+      var stopText = noKeywordStopCount >= 1 && noKeywordStopCount <= 100 ? '连续 ' + noKeywordStopCount + ' 轮无关键词' : '需设置 1–100 轮';
+      var perRoundDelay = randomDelayMin > randomDelayMax ? '随机范围无效' : formatAPIIterationDurationRange(delayMinimum, delayMaximum);
+      byId('api-iteration-preview').innerHTML = '<div><span>无限序列 · 持续迭代</span><strong>' + escapeHTML(sequence) + '</strong></div><div><span>停止条件</span><strong>' + escapeHTML(stopText) + '</strong><small>单轮等待 ' + escapeHTML(perRoundDelay) + ' · 不含网络请求时间</small></div>';
+      return;
+    }
     if (count > 6) sequence += ' → … → ' + (start + step * (count - 1));
-    var seconds = Math.max(0, (count - 1) * delay);
-    var duration = seconds === 0 ? '立即完成' : (seconds < 60 ? seconds + ' 秒' : (seconds % 60 === 0 ? (seconds / 60) + ' 分钟' : Math.floor(seconds / 60) + ' 分 ' + (seconds % 60) + ' 秒'));
-    byId('api-iteration-preview').innerHTML = '<div><span>请求序列 · 共 ' + count + ' 轮</span><strong>' + escapeHTML(sequence) + '</strong></div><div><span>预计最低耗时</span><strong>' + escapeHTML(duration) + '</strong><small>不含网络请求时间</small></div>';
+    var totalDelay = randomDelayMin > randomDelayMax ? '随机范围无效' : formatAPIIterationDurationRange((count - 1) * delayMinimum, (count - 1) * delayMaximum);
+    var earlyStop = noKeywordStopCount >= 1 && noKeywordStopCount <= 100 ? ' · 连续 ' + noKeywordStopCount + ' 轮无关键词时提前停止' : '';
+    byId('api-iteration-preview').innerHTML = '<div><span>有限序列 · 共 ' + count + ' 轮</span><strong>' + escapeHTML(sequence) + '</strong></div><div><span>理论总等待</span><strong>' + escapeHTML(totalDelay) + '</strong><small>不含网络请求时间' + escapeHTML(earlyStop) + '</small></div>';
   }
 
   function syncAPIBodyEditor() {
@@ -1717,6 +2026,10 @@
     form.elements.iteration_step.value = 20;
     form.elements.iteration_count.value = 1;
     form.elements.iteration_delay_seconds.value = 0;
+    form.elements.iteration_unlimited.checked = false;
+    form.elements.iteration_no_keyword_stop_count.value = 0;
+    form.elements.iteration_random_delay_min_seconds.value = 0;
+    form.elements.iteration_random_delay_max_seconds.value = 0;
     byId('api-response-path').value = '';
     byId('api-test-meta').innerHTML = '<span>尚未测试</span>';
     byId('api-json-tree').innerHTML = '<div class="api-inspector-empty">' + icon('braces') + '<span>测试成功后在此查看 JSON</span></div>';
@@ -1757,8 +2070,12 @@
       iteration_path: form.elements.iteration_path.value.trim(),
       iteration_start: Math.trunc(numberValue(form.elements.iteration_start.value, 0)),
       iteration_step: Math.trunc(numberValue(form.elements.iteration_step.value, 20)),
-      iteration_count: Math.max(1, Math.min(100, Math.trunc(numberValue(form.elements.iteration_count.value, 1)))),
-      iteration_delay_seconds: Math.max(0, Math.min(3600, Math.trunc(numberValue(form.elements.iteration_delay_seconds.value, 0))))
+      iteration_count: Math.trunc(numberValue(form.elements.iteration_count.value, 1)),
+      iteration_delay_seconds: Math.trunc(numberValue(form.elements.iteration_delay_seconds.value, 0)),
+      iteration_unlimited: form.elements.iteration_unlimited.checked,
+      iteration_no_keyword_stop_count: Math.trunc(numberValue(form.elements.iteration_no_keyword_stop_count.value, 0)),
+      iteration_random_delay_min_seconds: Math.trunc(numberValue(form.elements.iteration_random_delay_min_seconds.value, 0)),
+      iteration_random_delay_max_seconds: Math.trunc(numberValue(form.elements.iteration_random_delay_max_seconds.value, 0))
     };
   }
 
@@ -1778,11 +2095,28 @@
       iteration_start: payload.iteration_start,
       iteration_step: payload.iteration_step,
       iteration_count: payload.iteration_count,
-      iteration_delay_seconds: payload.iteration_delay_seconds
+      iteration_delay_seconds: payload.iteration_delay_seconds,
+      iteration_unlimited: payload.iteration_unlimited,
+      iteration_no_keyword_stop_count: payload.iteration_no_keyword_stop_count,
+      iteration_random_delay_min_seconds: payload.iteration_random_delay_min_seconds,
+      iteration_random_delay_max_seconds: payload.iteration_random_delay_max_seconds
     });
   }
 
-  async function saveKeywordAPISource(form) {
+  function keywordAPIIterationValidationError(payload) {
+    if (payload.iteration_count < 1 || payload.iteration_count > 100) return '请求次数必须是 1–100 之间的整数';
+    if (payload.iteration_delay_seconds < 0 || payload.iteration_delay_seconds > 3600) return '固定间隔必须是 0–3600 秒之间的整数';
+    if (payload.iteration_no_keyword_stop_count < 0 || payload.iteration_no_keyword_stop_count > 100) return '连续无关键词停止次数必须是 0–100 之间的整数';
+    if (payload.iteration_random_delay_min_seconds < -3600 || payload.iteration_random_delay_min_seconds > 3600 || payload.iteration_random_delay_max_seconds < -3600 || payload.iteration_random_delay_max_seconds > 3600) return '随机延迟最小值和最大值必须是 -3600–3600 秒之间的整数';
+    if (payload.iteration_random_delay_min_seconds > payload.iteration_random_delay_max_seconds) return '随机延迟最小值不能大于最大值';
+    if (!payload.iteration_enabled) return '';
+    if (!payload.iteration_path) return '启用分页迭代后必须填写参数路径';
+    if (payload.iteration_unlimited && payload.iteration_no_keyword_stop_count < 1) return '无限迭代必须设置连续无关键词停止次数（1–100）';
+    if (payload.iteration_location === 'body' && ['json', 'form'].indexOf(payload.body_type) < 0) return 'Body 迭代仅支持 JSON 或 Form 请求体';
+    return '';
+  }
+
+  async function saveKeywordAPISource(form, syncAfterSave) {
     var error = byId('keyword-form-error');
     error.hidden = true;
     var payload;
@@ -1801,13 +2135,9 @@
       error.hidden = false;
       return;
     }
-    if (payload.iteration_enabled && !payload.iteration_path) {
-      error.textContent = '启用分页迭代后必须填写参数路径';
-      error.hidden = false;
-      return;
-    }
-    if (payload.iteration_enabled && payload.iteration_location === 'body' && ['json', 'form'].indexOf(payload.body_type) < 0) {
-      error.textContent = 'Body 迭代仅支持 JSON 或 Form 请求体';
+    var iterationError = keywordAPIIterationValidationError(payload);
+    if (iterationError) {
+      error.textContent = iterationError;
       error.hidden = false;
       return;
     }
@@ -1819,18 +2149,43 @@
       error.hidden = false;
       return;
     }
-    var button = byId('keyword-save');
-    setButtonLoading(button, true, '保存中');
+    var button = syncAfterSave ? byId('keyword-save-and-sync') : byId('keyword-save');
+    var otherButton = syncAfterSave ? byId('keyword-save') : byId('keyword-save-and-sync');
+    setButtonLoading(button, true, syncAfterSave ? '保存中' : '保存中');
+    otherButton.disabled = true;
     try {
-      await apiRequest(editing ? API.keywordAPISources + '/' + encodeURIComponent(keywordSourceID(editing)) : API.keywordAPISources, { method: editing ? 'PUT' : 'POST', body: payload });
+      var saved = await apiRequest(editing ? API.keywordAPISources + '/' + encodeURIComponent(keywordSourceID(editing)) : API.keywordAPISources, { method: editing ? 'PUT' : 'POST', body: payload });
+      var savedSource = pick(saved, ['source', 'item'], saved);
+      var savedID = keywordSourceID(savedSource) || (editing ? keywordSourceID(editing) : '');
       byId('keyword-dialog').close();
-      toast(editing ? 'API 来源已更新' : 'API 来源已新增', 'success');
       state.keywordSources.loaded = false;
+      state.keywordSyncRuns.loaded = false;
       await loadKeywordSources(true);
+      if (!syncAfterSave) {
+        toast(editing ? 'API 来源已更新' : 'API 来源已新增', 'success');
+        return savedSource;
+      }
+      try {
+        if (!savedID) throw new Error('保存响应缺少来源 ID');
+        var started = await triggerKeywordAPISourceSync(savedID, 'save');
+        var run = pick(started, ['run'], null);
+        var runID = pick(started, ['run_id'], run ? keywordSyncRunID(run) : '');
+        toast(boolValue(pick(started, ['already_active'], false)) ? '配置已保存，已打开正在执行的同步' : '配置已保存并开始同步', 'success');
+        state.keywordSyncRuns.loaded = false;
+        switchKeywordTab('history');
+        loadKeywordSyncRuns({ force: true, silent: true });
+        if (runID) openKeywordSyncRunDetail(runID);
+      } catch (syncError) {
+        toast('配置已保存，但同步未启动：' + (syncError.message || '请稍后重试'), 'error');
+      }
+      return savedSource;
     } catch (saveError) {
       error.textContent = saveError.message || 'API 来源保存失败';
       error.hidden = false;
-    } finally { setButtonLoading(button, false); }
+    } finally {
+      setButtonLoading(button, false);
+      otherButton.disabled = false;
+    }
   }
 
   async function openKeywordAPISource(id) {
@@ -1862,6 +2217,10 @@
       form.elements.iteration_step.value = numberValue(source.iteration_step, 20);
       form.elements.iteration_count.value = Math.max(1, numberValue(source.iteration_count, 1));
       form.elements.iteration_delay_seconds.value = Math.max(0, numberValue(source.iteration_delay_seconds, 0));
+      form.elements.iteration_unlimited.checked = boolValue(source.iteration_unlimited, false);
+      form.elements.iteration_no_keyword_stop_count.value = numberValue(source.iteration_no_keyword_stop_count, 0);
+      form.elements.iteration_random_delay_min_seconds.value = numberValue(source.iteration_random_delay_min_seconds, 0);
+      form.elements.iteration_random_delay_max_seconds.value = numberValue(source.iteration_random_delay_max_seconds, 0);
       resetAPIEditor('header', source.request_headers || {});
       resetAPIEditor('query', source.query_params || {});
       if (source.body_type === 'json') form.elements.json_body.value = typeof source.request_body === 'string' ? source.request_body : JSON.stringify(source.request_body || {}, null, 2);
@@ -1920,13 +2279,9 @@
       error.hidden = false;
       return;
     }
-    if (payload.iteration_enabled && !payload.iteration_path) {
-      error.textContent = '测试迭代参数前，请填写参数路径';
-      error.hidden = false;
-      return;
-    }
-    if (payload.iteration_enabled && payload.iteration_location === 'body' && ['json', 'form'].indexOf(payload.body_type) < 0) {
-      error.textContent = 'Body 迭代仅支持 JSON 或 Form 请求体';
+    var iterationError = keywordAPIIterationValidationError(payload);
+    if (iterationError) {
+      error.textContent = iterationError;
       error.hidden = false;
       return;
     }
@@ -1986,14 +2341,146 @@
     updateKeywordAPIExtractPreview();
   }
 
+  function triggerKeywordAPISourceSync(id, trigger) {
+    return apiRequest(API.keywordAPISources + '/' + encodeURIComponent(id) + '/sync', { method: 'POST', body: { trigger: trigger || 'manual' } });
+  }
+
   async function syncKeywordAPISource(id) {
     try {
-      await apiRequest(API.keywordAPISources + '/' + encodeURIComponent(id) + '/sync', { method: 'POST' });
-      toast('API 来源已开始后台同步', 'success');
+      var started = await triggerKeywordAPISourceSync(id, 'manual');
+      var run = pick(started, ['run'], null);
+      var runID = pick(started, ['run_id'], run ? keywordSyncRunID(run) : '');
+      var alreadyActive = boolValue(pick(started, ['already_active'], false));
+      toast(alreadyActive ? '该来源已有同步在执行，已打开当前进度' : 'API 来源已开始后台同步', 'success');
       state.keywordSources.loaded = false;
+      state.keywordSyncRuns.loaded = false;
       await loadKeywordSources(true);
       state.loaded.keywords = false;
+      if (runID) openKeywordSyncRunDetail(runID);
     } catch (error) { toast(error.message || '立即同步失败', 'error'); }
+  }
+
+  async function openKeywordSyncRunDetail(id, silent) {
+    var dialog = byId('keyword-sync-detail-dialog');
+    var container = byId('keyword-sync-detail');
+    state.keywordSyncRuns.detailID = String(id);
+    if (!silent) {
+      if (!dialog.open) dialog.showModal();
+      container.innerHTML = '<div class="table-loading"><span>' + icon('loader-circle', 'spin') + '正在加载</span></div>';
+      refreshIcons(container);
+    }
+    try {
+      var data = await apiRequest(API.keywordAPISyncRuns + '/' + encodeURIComponent(id));
+      if (state.keywordSyncRuns.detailID !== String(id)) return;
+      var run = pick(data, ['run', 'item'], data);
+      renderKeywordSyncRunDetail(run);
+      if (ACTIVE_KEYWORD_SYNC_STATUSES.indexOf(keywordSyncRunStatus(run)) >= 0) startKeywordSyncDetailPolling();
+      else stopKeywordSyncDetailPolling();
+    } catch (error) {
+      if (!silent) container.innerHTML = '<div class="inline-alert error">' + escapeHTML(error.message || '同步详情加载失败') + '</div>';
+    }
+  }
+
+  function keywordSyncRequestSummaryMarkup(summary) {
+    summary = summary && typeof summary === 'object' ? summary : {};
+    var method = String(pick(summary, ['request_method'], 'GET')).toUpperCase();
+    var url = pick(summary, ['request_url'], '—');
+    var headers = arrayFrom(pick(summary, ['header_keys'], []), ['items']);
+    var query = arrayFrom(pick(summary, ['query_keys'], []), ['items']);
+    var bodyType = pick(summary, ['body_type'], 'none');
+    var iterationEnabled = boolValue(pick(summary, ['iteration_enabled'], false), false);
+    var iterationText = '未启用';
+    if (iterationEnabled) {
+      iterationText = (boolValue(pick(summary, ['iteration_unlimited'], false), false) ? '无限迭代' : formatNumber(pick(summary, ['iteration_count'], 1)) + ' 轮') +
+        ' · ' + escapeHTML(pick(summary, ['iteration_location'], 'query')) + ':' + escapeHTML(pick(summary, ['iteration_path'], '—')) +
+        ' · 起始 ' + formatNumber(pick(summary, ['iteration_start'], 0)) + ' / 步长 ' + formatNumber(pick(summary, ['iteration_step'], 0));
+    }
+    return '<div class="sync-request-card">' +
+      '<div class="api-request-summary"><span class="http-status status-ok">' + escapeHTML(method) + '</span><code title="' + escapeHTML(url) + '">' + escapeHTML(url) + '</code></div>' +
+      '<dl class="detail-grid">' +
+        '<div class="detail-pair"><dt>Header 名称</dt><dd>' + escapeHTML(headers.length ? headers.join(', ') : '无') + '</dd></div>' +
+        '<div class="detail-pair"><dt>Query 名称</dt><dd>' + escapeHTML(query.length ? query.join(', ') : '无') + '</dd></div>' +
+        '<div class="detail-pair"><dt>Body</dt><dd>' + escapeHTML(bodyType === 'none' ? '无' : bodyType + (boolValue(pick(summary, ['has_request_body'], false)) ? '（已配置，内容不保存）' : '')) + '</dd></div>' +
+        '<div class="detail-pair"><dt>代理 / 超时</dt><dd>' + escapeHTML(pick(summary, ['proxy_scheme'], '无代理') || '无代理') + ' · ' + formatNumber(pick(summary, ['timeout_seconds'], 0)) + ' 秒</dd></div>' +
+        '<div class="detail-pair full"><dt>提取路径</dt><dd class="mono">' + escapeHTML(pick(summary, ['response_path'], '—')) + '</dd></div>' +
+        '<div class="detail-pair full"><dt>迭代配置</dt><dd>' + iterationText + '</dd></div>' +
+      '</dl>' +
+    '</div>';
+  }
+
+  function renderKeywordSyncIteration(iteration, summary) {
+    var sequence = Math.max(1, numberValue(pick(iteration, ['index', 'sequence'], 1)));
+    var status = keywordSyncRunStatus(iteration);
+    var httpStatus = numberValue(pick(iteration, ['http_status', 'status_code'], 0));
+    var raw = numberValue(pick(iteration, ['raw_extracted_count'], 0));
+    var unique = numberValue(pick(iteration, ['unique_count'], 0));
+    var crossNew = numberValue(pick(iteration, ['cross_iteration_new'], 0));
+    var added = numberValue(pick(iteration, ['new_count'], 0));
+    var existing = numberValue(pick(iteration, ['existing_keyword_count', 'existing_count'], 0));
+    var samples = arrayFrom(pick(iteration, ['samples'], []), ['items']).slice(0, 5);
+    var error = pick(iteration, ['error'], '');
+    var iterationEnabled = boolValue(pick(summary, ['iteration_enabled'], false), false);
+    return '<tr>' +
+      '<td><strong>第 ' + sequence + ' 轮</strong><small class="table-subline mono">参数 ' + (iterationEnabled ? escapeHTML(pick(iteration, ['iteration_value'], '—')) : '—') + '</small></td>' +
+      '<td>' + statusBadge(status) + '</td>' +
+      '<td>' + (httpStatus ? '<span class="http-status ' + (httpStatus >= 200 && httpStatus < 300 ? 'status-ok' : 'status-error') + '">' + httpStatus + '</span>' : '<span class="muted">—</span>') + '</td>' +
+      '<td>' + formatNumber(pick(iteration, ['duration_ms'], 0)) + ' ms<small class="table-subline">' + formatBytes(pick(iteration, ['response_size'], 0)) + '</small></td>' +
+      '<td>原始 ' + formatNumber(raw) + '<small class="table-subline">轮内去重 ' + formatNumber(unique) + ' · 跨轮新增 ' + formatNumber(crossNew) + '</small></td>' +
+      '<td>+' + formatNumber(added) + ' 新增<small class="table-subline">' + formatNumber(existing) + ' 已存在</small></td>' +
+      '<td>' + (error ? '<span class="danger-text iteration-error" title="' + escapeHTML(error) + '">' + escapeHTML(error) + '</span>' : (samples.length ? '<div class="iteration-samples">' + samples.map(function (sample) { return '<span title="' + escapeHTML(sample) + '">' + escapeHTML(sample) + '</span>'; }).join('') + '</div>' : '<span class="muted">—</span>')) + '</td>' +
+    '</tr>';
+  }
+
+  function renderKeywordSyncRunDetail(run) {
+    var id = keywordSyncRunID(run);
+    var sourceName = pick(run, ['source_name'], '已删除来源');
+    var status = keywordSyncRunStatus(run);
+    var trigger = String(pick(run, ['trigger'], 'manual')).toLowerCase();
+    var progress = keywordSyncRunProgress(run);
+    var result = keywordSyncRunResult(run);
+    var summary = pick(run, ['request_summary'], {});
+    var iterations = arrayFrom(pick(run, ['iterations'], []), ['items']);
+    var progressLabel = progress.legacy ? '历史汇总' : (progress.unlimited ? '第 ' + progress.completed + ' 轮 / 无上限' : progress.completed + ' / ' + progress.total + ' 轮');
+    var recordsTotal = numberValue(pick(run, ['iteration_records_total'], iterations.length), iterations.length);
+    byId('keyword-sync-detail-title').textContent = (sourceName || '已删除来源') + ' · RUN #' + id;
+    byId('keyword-sync-detail').innerHTML =
+      '<section class="detail-section keyword-sync-run-hero">' +
+        '<div class="panel-heading"><div class="source-stack">' + statusBadge(status) + '<span class="type-badge">' + escapeHTML(triggerLabels[trigger] || trigger) + '</span><span class="type-badge">配置 v' + formatNumber(pick(run, ['config_revision'], 0)) + '</span></div><span class="batch-id">SYNC / ' + escapeHTML(id) + '</span></div>' +
+        '<div class="batch-progress-label"><span>' + escapeHTML(progressLabel) + '</span><span>' + (progress.unlimited ? (ACTIVE_KEYWORD_SYNC_STATUSES.indexOf(status) >= 0 ? '进行中' : '已结束') : progress.percent + '%') + '</span></div>' +
+        '<div class="progress-track' + (progress.unlimited && ACTIVE_KEYWORD_SYNC_STATUSES.indexOf(status) >= 0 ? ' is-unlimited' : '') + '"><div class="progress-bar" style="width:' + progress.percent + '%"></div></div>' +
+        '<small class="sync-progress-caption">成功 ' + formatNumber(pick(run, ['success_iterations'], 0)) + ' 轮 · 失败 ' + formatNumber(pick(run, ['failed_iterations'], 0)) + ' 轮' + (progress.unlimited ? ' · 无限迭代按停止条件结束' : '') + '</small>' +
+        '<div class="batch-metrics keyword-sync-metrics"><div><strong>' + formatNumber(result.raw) + '</strong><span>原始提取</span></div><div><strong>' + formatNumber(result.unique) + '</strong><span>跨轮去重</span></div><div><strong>+' + formatNumber(result.added) + '</strong><span>新增关键词</span></div><div><strong>' + formatNumber(result.existing) + '</strong><span>已有关键词</span></div></div>' +
+      '</section>' +
+      '<section class="detail-section"><h3>执行信息</h3><dl class="detail-grid">' +
+        '<div class="detail-pair"><dt>进入队列</dt><dd>' + escapeHTML(formatDate(pick(run, ['queued_at', 'created_at'], null), true)) + '</dd></div>' +
+        '<div class="detail-pair"><dt>开始时间</dt><dd>' + escapeHTML(formatDate(pick(run, ['started_at'], null), true)) + '</dd></div>' +
+        '<div class="detail-pair"><dt>完成时间</dt><dd>' + escapeHTML(formatDate(pick(run, ['finished_at'], null), true)) + '</dd></div>' +
+        '<div class="detail-pair"><dt>耗时</dt><dd>' + escapeHTML(durationFrom(run)) + '</dd></div>' +
+        '<div class="detail-pair full"><dt>错误信息</dt><dd class="' + (pick(run, ['error'], '') ? 'danger-text' : '') + '">' + escapeHTML(pick(run, ['error'], '无')) + '</dd></div>' +
+      '</dl></section>' +
+      '<section class="detail-section"><h3>脱敏请求摘要</h3>' + keywordSyncRequestSummaryMarkup(summary) + '</section>' +
+      '<section class="detail-section"><div class="sync-iterations-heading"><h3>迭代执行记录</h3><span>共 ' + formatNumber(recordsTotal) + ' 轮记录</span></div>' +
+        (boolValue(pick(run, ['iterations_truncated'], false), false) ? '<div class="inline-alert info">详情最多展示 100 轮；完整汇总已保留在运行记录中。</div>' : '') +
+        '<div class="table-wrap keyword-sync-iterations-wrap"><table class="keyword-sync-iterations-table"><thead><tr><th>轮次 / 参数</th><th>状态</th><th>HTTP</th><th>耗时 / 响应</th><th>提取</th><th>关键词</th><th>样例 / 错误</th></tr></thead><tbody>' +
+          (iterations.length ? iterations.map(function (iteration) { return renderKeywordSyncIteration(iteration, summary); }).join('') : '<tr class="table-empty"><td colspan="7">暂无逐轮记录</td></tr>') +
+        '</tbody></table></div>' +
+      '</section>';
+    refreshIcons(byId('keyword-sync-detail'));
+  }
+
+  function startKeywordSyncDetailPolling() {
+    if (document.visibilityState !== 'visible' || !byId('keyword-sync-detail-dialog').open) return;
+    if (state.keywordSyncRuns.detailPollTimer) return;
+    state.keywordSyncRuns.detailPollTimer = window.setInterval(function () {
+      var id = state.keywordSyncRuns.detailID;
+      if (id && document.visibilityState === 'visible' && byId('keyword-sync-detail-dialog').open) openKeywordSyncRunDetail(id, true);
+    }, 4000);
+  }
+
+  function stopKeywordSyncDetailPolling() {
+    if (!state.keywordSyncRuns.detailPollTimer) return;
+    clearInterval(state.keywordSyncRuns.detailPollTimer);
+    state.keywordSyncRuns.detailPollTimer = null;
   }
 
   async function copyKeywordAPISource(id, button) {
@@ -3567,9 +4054,13 @@
     else if (action === 'add-api-kv') addAPIRow(actionElement.dataset.target);
     else if (action === 'remove-api-kv') actionElement.closest('.api-kv-row').remove();
     else if (action === 'test-keyword-api') testKeywordAPI();
+    else if (action === 'save-and-sync-keyword-api') saveKeywordAPISource(byId('keyword-form'), true);
     else if (action === 'select-json-path') selectKeywordAPIPath(actionElement.dataset.path);
     else if (action === 'edit-keyword-api') openKeywordAPISource(actionElement.dataset.id);
     else if (action === 'sync-keyword-api') syncKeywordAPISource(actionElement.dataset.id);
+    else if (action === 'view-keyword-sync-history') viewKeywordSyncHistory(actionElement.dataset.id);
+    else if (action === 'view-keyword-sync-run') openKeywordSyncRunDetail(actionElement.dataset.id);
+    else if (action === 'reset-keyword-sync-filters') resetKeywordSyncFilters();
     else if (action === 'copy-keyword-api') copyKeywordAPISource(actionElement.dataset.id, actionElement);
     else if (action === 'delete-keyword-api') deleteKeywordAPISource(actionElement.dataset.id);
     else if (action === 'run-keyword') createRun([actionElement.dataset.id], false);
@@ -3627,8 +4118,9 @@
     }
     else if (target.matches('#resource-filters select, #resource-filters input[type="date"]')) readResourceFilters();
     else if (target.id === 'keyword-enabled-filter' || target.id === 'keyword-type-filter') updateKeywordFilters();
+    else if (target.id === 'keyword-sync-source-filter' || target.id === 'keyword-sync-status-filter' || target.id === 'keyword-sync-trigger-filter' || target.id === 'keyword-sync-from-filter' || target.id === 'keyword-sync-to-filter') updateKeywordSyncFilters();
     else if (target.id === 'api-body-type') syncAPIBodyEditor();
-    else if (target.id === 'api-iteration-enabled' || target.id === 'api-iteration-location') updateAPIIterationPreview();
+    else if (target.id === 'api-iteration-enabled' || target.id === 'api-iteration-unlimited' || target.id === 'api-iteration-location') updateAPIIterationPreview();
     else if (target.id === 'run-status-filter' || target.id === 'run-trigger-filter') updateRunFilters();
     else if (target.id === 'user-role-filter' || target.id === 'user-status-filter') updateUserFilters();
     else if (target.id === 'usage-range') changeUsageRange();
@@ -3666,6 +4158,10 @@
     if (scope === 'runs') loadRuns({ force: true });
     else if (scope === 'resources') loadResources(true);
     else if (scope === 'keywords') loadKeywords(true);
+    else if (scope === 'keywordSyncRuns') {
+      state.keywordSyncRuns.loaded = false;
+      loadKeywordSyncRuns({ force: true });
+    }
     else if (scope === 'users') loadUsers(true);
     else if (scope === 'usageLogs') {
       state.usage.page = page;
@@ -3688,10 +4184,14 @@
       event.preventDefault();
       readResourceFilters();
     });
+    byId('keyword-sync-filters').addEventListener('submit', function (event) {
+      event.preventDefault();
+      updateKeywordSyncFilters();
+    });
     byId('resource-filters').querySelector('[name="q"]').addEventListener('input', debounce(readResourceFilters, 350));
     byId('keyword-search').addEventListener('input', debounce(updateKeywordFilters, 350));
     byId('api-response-path').addEventListener('input', debounce(updateKeywordAPIExtractPreview, 120));
-    ['api-iteration-start', 'api-iteration-step', 'api-iteration-count', 'api-iteration-delay'].forEach(function (id) {
+    ['api-iteration-start', 'api-iteration-step', 'api-iteration-count', 'api-iteration-delay', 'api-iteration-no-keyword-stop-count', 'api-iteration-random-delay-min', 'api-iteration-random-delay-max'].forEach(function (id) {
       byId(id).addEventListener('input', updateAPIIterationPreview);
     });
     ['query', 'header', 'form'].forEach(function (target) {
@@ -3729,7 +4229,15 @@
     window.addEventListener('hashchange', function () { navigate(location.hash.slice(1) || 'overview'); });
     window.addEventListener('resize', debounce(resizeCharts, 120));
     document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState !== 'visible') {
+        stopKeywordSourcePolling();
+        stopKeywordSyncDetailPolling();
+        return;
+      }
       if (document.visibilityState === 'visible' && state.view === 'runs') loadRuns({ silent: true, force: true });
+      if (document.visibilityState === 'visible' && state.view === 'keywords' && state.keywords.tab === 'api' && keywordSourcesHaveActiveRun()) loadKeywordSources(true, { silent: true });
+      if (document.visibilityState === 'visible' && state.view === 'keywords' && state.keywords.tab === 'history' && keywordSyncHistoryHasActiveRun()) loadKeywordSyncRuns({ force: true, silent: true });
+      if (document.visibilityState === 'visible' && byId('keyword-sync-detail-dialog').open && state.keywordSyncRuns.detailID) openKeywordSyncRunDetail(state.keywordSyncRuns.detailID, true);
     });
     document.addEventListener('keydown', function (event) {
       if (event.key === 'Enter') {

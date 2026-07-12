@@ -355,6 +355,7 @@
           <div class="keyword-page-tabs" role="tablist" aria-label="关键词管理模块">
             <button class="active" type="button" role="tab" aria-selected="true" data-keyword-tab="list"><i data-lucide="list" aria-hidden="true"></i><span>关键词列表</span></button>
             <button type="button" role="tab" aria-selected="false" data-keyword-tab="api"><i data-lucide="webhook" aria-hidden="true"></i><span>API 来源</span></button>
+            <button type="button" role="tab" aria-selected="false" data-keyword-tab="history"><i data-lucide="history" aria-hidden="true"></i><span>同步记录</span></button>
           </div>
 
           <div id="keyword-list-panel" data-keyword-panel="list">
@@ -433,18 +434,38 @@
             <div class="keyword-api-overview">
               <div><strong id="keyword-api-total">0</strong><span>API 来源</span></div>
               <div><strong id="keyword-api-enabled">0</strong><span>自动同步中</span></div>
-              <div><strong id="keyword-api-items">0</strong><span>最近提取项</span></div>
+              <div><strong id="keyword-api-items">0</strong><span>最近去重项</span></div>
               <p>外部 API 同步后的内容会进入普通关键词列表，并继续使用现有冷却与采集流程。</p>
             </div>
             <div class="table-wrap keyword-api-table-wrap">
               <table class="keyword-api-table">
-                <thead><tr><th>来源</th><th>请求</th><th>同步周期</th><th>最近状态</th><th>提取数量</th><th><span class="sr-only">操作</span></th></tr></thead>
+                <thead><tr><th>来源</th><th>请求</th><th>同步周期</th><th>状态 / 进度</th><th>同步结果</th><th><span class="sr-only">操作</span></th></tr></thead>
                 <tbody id="keyword-api-body"></tbody>
               </table>
             </div>
             <div id="keyword-api-empty" class="empty-state" hidden>
               <i data-lucide="webhook" aria-hidden="true"></i><h2>暂无 API 来源</h2><p>新增来源并测试响应后即可自动同步关键词</p>
             </div>
+          </div>
+
+          <div id="keyword-sync-history-panel" data-keyword-panel="history" hidden>
+            <form id="keyword-sync-filters" class="filter-bar keyword-sync-filter-bar">
+              <label class="select-field"><span class="sr-only">API 来源</span><select id="keyword-sync-source-filter"><option value="">全部来源</option></select><i data-lucide="chevron-down" aria-hidden="true"></i></label>
+              <label class="select-field"><span class="sr-only">同步状态</span><select id="keyword-sync-status-filter"><option value="">全部状态</option><option value="queued">排队中</option><option value="running">同步中</option><option value="success">成功</option><option value="partial">部分成功</option><option value="failed">失败</option><option value="interrupted">已中断</option><option value="cancelled">已取消</option></select><i data-lucide="chevron-down" aria-hidden="true"></i></label>
+              <label class="select-field"><span class="sr-only">触发方式</span><select id="keyword-sync-trigger-filter"><option value="">全部触发方式</option><option value="manual">手动同步</option><option value="save">保存并同步</option><option value="scheduled">自动调度</option><option value="legacy">升级前记录</option></select><i data-lucide="chevron-down" aria-hidden="true"></i></label>
+              <label class="date-field keyword-sync-date"><span>从</span><input id="keyword-sync-from-filter" type="date" aria-label="同步开始日期"></label>
+              <label class="date-field keyword-sync-date"><span>至</span><input id="keyword-sync-to-filter" type="date" aria-label="同步结束日期"></label>
+              <button class="button secondary" type="button" data-action="reset-keyword-sync-filters"><i data-lucide="rotate-ccw" aria-hidden="true"></i><span>重置</span></button>
+            </form>
+            <div id="keyword-sync-history-alert" class="inline-alert error" role="alert" hidden></div>
+            <div class="table-wrap keyword-sync-history-table-wrap">
+              <table class="keyword-sync-history-table">
+                <thead><tr><th>来源 / 运行</th><th>状态</th><th>迭代进度</th><th>同步结果</th><th>触发方式</th><th>开始时间 / 耗时</th><th><span class="sr-only">操作</span></th></tr></thead>
+                <tbody id="keyword-sync-history-body"></tbody>
+              </table>
+            </div>
+            <div id="keyword-sync-history-empty" class="empty-state" hidden><i data-lucide="history" aria-hidden="true"></i><h2>暂无同步记录</h2><p>触发 API 来源同步后，可在此查看每轮进度和结果</p></div>
+            <nav id="keyword-sync-history-pagination" class="pagination" aria-label="API 来源同步记录分页"></nav>
           </div>
         </section>
 
@@ -908,8 +929,10 @@
               <div id="api-iteration-fields" class="api-iteration-fields" hidden>
                 <div class="form-grid api-iteration-targets"><label class="field"><span>参数位置</span><select id="api-iteration-location" name="iteration_location"><option value="query">Query</option><option value="header">Header</option><option value="body">Body</option></select></label><label class="field"><span>参数路径 <em>*</em></span><input id="api-iteration-path" name="iteration_path" type="text" placeholder="offset 或 pagination.offset"></label></div>
                 <p id="api-iteration-hint" class="api-iteration-hint">将覆盖 Query 中对应键的值。</p>
-                <div class="api-iteration-numbers"><label class="field"><span>起始值</span><input id="api-iteration-start" name="iteration_start" type="number" step="1" value="0"></label><label class="field"><span>步长</span><input id="api-iteration-step" name="iteration_step" type="number" step="1" value="20"></label><label class="field"><span>请求次数</span><input id="api-iteration-count" name="iteration_count" type="number" min="1" max="100" step="1" value="1"></label><label class="field"><span>间隔（秒）</span><input id="api-iteration-delay" name="iteration_delay_seconds" type="number" min="0" max="3600" step="1" value="0"></label></div>
-                <div id="api-iteration-preview" class="api-iteration-preview" aria-live="polite"><div><span>请求序列</span><strong>0</strong></div><div><span>预计最低耗时</span><strong>立即完成</strong></div></div>
+                <div class="api-iteration-mode"><label class="toggle-field api-unlimited-toggle"><span><strong>无限迭代</strong><small>由连续无关键词轮数停止</small></span><input id="api-iteration-unlimited" name="iteration_unlimited" type="checkbox"><span class="toggle" aria-hidden="true"></span></label><label class="field"><span>连续无关键词停止</span><input id="api-iteration-no-keyword-stop-count" name="iteration_no_keyword_stop_count" type="number" min="0" max="100" step="1" value="0"><small class="api-field-note">有限模式填 0 关闭；无限模式需填 1–100。</small></label></div>
+                <div class="api-iteration-numbers"><label class="field"><span>起始值</span><input id="api-iteration-start" name="iteration_start" type="number" step="1" value="0"></label><label class="field"><span>步长</span><input id="api-iteration-step" name="iteration_step" type="number" step="1" value="20"></label><label class="field"><span>请求次数</span><input id="api-iteration-count" name="iteration_count" type="number" min="1" max="100" step="1" value="1"></label><label class="field"><span>固定间隔（秒）</span><input id="api-iteration-delay" name="iteration_delay_seconds" type="number" min="0" max="3600" step="1" value="0"></label><label class="field"><span>随机最小（秒）</span><input id="api-iteration-random-delay-min" name="iteration_random_delay_min_seconds" type="number" min="-3600" max="3600" step="1" value="0"></label><label class="field"><span>随机最大（秒）</span><input id="api-iteration-random-delay-max" name="iteration_random_delay_max_seconds" type="number" min="-3600" max="3600" step="1" value="0"></label></div>
+                <p class="api-iteration-hint">单轮等待为固定间隔与随机秒数之和，结果小于 0 时按 0 秒执行。</p>
+                <div id="api-iteration-preview" class="api-iteration-preview" aria-live="polite"><div><span>有限序列 · 共 1 轮</span><strong>0</strong></div><div><span>理论总等待</span><strong>0 秒</strong><small>不含网络请求时间</small></div></div>
               </div>
             </div>
             <div class="api-builder-section"><div class="form-grid"><label class="field full"><span>代理地址</span><input name="proxy_url" type="text" placeholder="socks5h://user:pass@host:1080"></label><label class="field"><span>同步周期（分钟）</span><input name="sync_interval_minutes" type="number" min="1" value="60"></label><label class="toggle-field"><span><strong>启用自动同步</strong><small>每分钟检查到期来源</small></span><input name="api_enabled" type="checkbox"><span class="toggle"></span></label></div></div>
@@ -928,6 +951,7 @@
       </div>
       <footer class="dialog-footer">
         <button class="button secondary" type="button" data-action="close-dialog">取消</button>
+        <button id="keyword-save-and-sync" class="button secondary" type="button" data-action="save-and-sync-keyword-api" hidden><i data-lucide="refresh-cw" aria-hidden="true"></i><span>保存并同步</span></button>
         <button id="keyword-save" class="button primary" type="submit"><i data-lucide="save" aria-hidden="true"></i><span>保存</span></button>
       </footer>
     </form>
@@ -979,6 +1003,19 @@
         <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
       </header>
       <div id="run-detail" class="dialog-body"></div>
+    </div>
+  </dialog>
+
+  <dialog id="keyword-sync-detail-dialog" class="dialog wide-dialog keyword-sync-detail-dialog" aria-labelledby="keyword-sync-detail-title">
+    <div class="dialog-shell">
+      <header class="dialog-header">
+        <div>
+          <p class="eyebrow">API SYNC RUN</p>
+          <h2 id="keyword-sync-detail-title">同步详情</h2>
+        </div>
+        <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
+      </header>
+      <div id="keyword-sync-detail" class="dialog-body"></div>
     </div>
   </dialog>
 
