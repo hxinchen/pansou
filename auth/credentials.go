@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -14,7 +15,7 @@ import (
 const APIKeyPrefix = "psk_"
 
 func HashPassword(password string) (string, error) {
-	if len(password) < 10 {
+	if utf8.RuneCountInString(password) < 8 {
 		return "", ErrPasswordPolicyViolation
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)

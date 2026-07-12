@@ -28,7 +28,7 @@ PanSou是一个高性能的网盘资源搜索API服务，支持TG搜索和自定
 |----------|--------|------|
 | **DATABASE_URL** | 无 | PostgreSQL 连接串；为空时禁用资源库 |
 | **ADMIN_USERNAME** | 无 | 用户表为空时创建的初始管理员用户名 |
-| **ADMIN_PASSWORD** | 无 | 初始管理员密码，至少 10 个字符 |
+| **ADMIN_PASSWORD** | 无 | 初始管理员密码，至少 8 个字符 |
 | **PLUGIN_CREDENTIAL_MASTER_KEY** | 无 | Base64 编码的 32 字节主密钥；启用 QQ频道、观影、盘链或微博账号插件时必填 |
 | **DEFAULT_USER_RPS** | `3` | 新建用户默认每秒搜索请求数 |
 | **DEFAULT_USER_RPM** | `60` | 新建用户默认每分钟搜索请求数 |

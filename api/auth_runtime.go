@@ -52,7 +52,7 @@ func respondAuthError(c *gin.Context, err error) {
 	case errors.Is(err, accountauth.ErrPasswordChangeRequired):
 		status, code, message = http.StatusForbidden, "AUTH_PASSWORD_CHANGE_REQUIRED", "请先修改初始密码"
 	case errors.Is(err, accountauth.ErrPasswordPolicyViolation):
-		status, code, message = http.StatusBadRequest, "AUTH_PASSWORD_POLICY", "新密码至少需要 10 个字符"
+		status, code, message = http.StatusBadRequest, "AUTH_PASSWORD_POLICY", "新密码至少需要 8 个字符"
 	case errors.Is(err, accountauth.ErrTokenStale):
 		code, message = "AUTH_TOKEN_STALE", "登录状态已失效，请重新登录"
 	case errors.Is(err, accountauth.ErrInvalidAPIKey):
