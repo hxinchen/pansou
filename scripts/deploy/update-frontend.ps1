@@ -6,7 +6,7 @@ param(
     [string]$RemoteRoot = "/opt/pansou-web",
     [string]$FrontendRoot = "",
     [string]$BasePath = "/pansou/",
-    [string]$PublicBaseUrl = "http://103.236.97.248:22348",
+    [string]$PublicBaseUrl = "http://103.236.97.248:22350",
     [switch]$SkipNpmInstall,
     [switch]$SkipPublicCheck
 )

@@ -43,6 +43,13 @@ func SetupRouter(searchService service.SearchProvider, options ...RouterDependen
 
 	// 创建默认路由
 	r := gin.Default()
+	trustedProxies := []string(nil)
+	if config.AppConfig != nil {
+		trustedProxies = config.AppConfig.TrustedProxies
+	}
+	if err := r.SetTrustedProxies(trustedProxies); err != nil {
+		panic("configure trusted proxies: " + err.Error())
+	}
 
 	// 添加中间件
 	r.Use(CORSMiddleware())

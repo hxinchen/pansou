@@ -4,11 +4,14 @@
 
 ## 当前线上地址
 
-- 前端 UI: `http://103.236.97.248:22348/pansou/`
-- 实时监控: `http://103.236.97.248:22348/pansou/report.html`
-- API 健康检查: `http://103.236.97.248:22348/api/health`
+- 前端 UI: `http://103.236.97.248:22350/pansou/`
+- 管理台: `http://103.236.97.248:22350/pansou-admin/`
+- 实时监控: `http://103.236.97.248:22350/pansou/report.html`
+- API 健康检查: `http://103.236.97.248:22350/api/health`
 
-说明：炎火云当前通过 `22348` 端口同时转发 SSH 和 HTTP，因此浏览器访问也使用 `:22348`。
+说明：SSH 继续使用 `22348`。公网 HTTP 必须由服务商单独映射
+`103.236.97.248:22350 -> 172.16.1.69:80`，直接进入 Caddy，避免普通模式
+`sslh` 将所有 HTTP 请求的来源地址改写为 `127.0.0.1`。
 
 ## 当前部署结构
 
@@ -23,6 +26,7 @@
 - 前端：本地构建 `pansou-web`，以 `/pansou/` 为 base path，上传静态文件到服务器。`/pansou/report.html` 是静态监控页，会轮询 `/api/health`。
 - Caddy：托管 `/pansou/` 前端页面，并将 `/api/*` 反代到 `127.0.0.1:8889`。
 - 管理台：Caddy 将 `/pansou-admin/*` 重写到后端内置 `/admin/*`，避免与服务器上其他系统的 `/admin` 冲突。
+- 来源 IP：部署脚本从 `pansou-network` 读取 CIDR 并作为 `TRUSTED_PROXIES` 注入后端；Gin 只信任该 Docker 网络转发的真实 IP Header。
 
 服务器关键路径：
 
@@ -91,7 +95,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy\update-all.ps1
 3. 在服务器上构建 `local/pansou-api:latest` 镜像。
 4. 重建并启动 `pansou-api` 容器。
 5. 默认读取 `docker-compose.yml` 里的完整 `CHANNELS`，并保留 `PROXY=socks5h://192.168.0.1:7890`。
-6. 检查本机和公网 `/api/health`。
+6. 自动读取 `pansou-network` CIDR 并设置 `TRUSTED_PROXIES`。
+7. 检查本机和公网 `/api/health`。
 
 `scripts/deploy/update-frontend.ps1` 会执行：
 
@@ -120,9 +125,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy\update-all.ps1
 
 `qqpd`、`gying`、`weibo` 启用后还需要进入各自管理页登录或配置账号，才会在搜索中产出结果：
 
-- `http://103.236.97.248:22348/qqpd/你的QQ号`
-- `http://103.236.97.248:22348/gying/你的用户名`
-- `http://103.236.97.248:22348/weibo/你的微博用户名`
+- `http://103.236.97.248:22350/qqpd/你的QQ号`
+- `http://103.236.97.248:22350/gying/你的用户名`
+- `http://103.236.97.248:22350/weibo/你的微博用户名`
 
 更新时修改 TG 频道列表：
 
@@ -186,8 +191,25 @@ curl http://127.0.0.1/pansou/
 检查公网接口：
 
 ```bash
-curl http://103.236.97.248:22348/api/health
+curl http://103.236.97.248:22350/api/health
 ```
+
+## 公网端口切换与旧地址重定向
+
+1. 先在服务商侧创建 TCP 映射 `22350 -> 172.16.1.69:80`。
+2. 确认 `curl http://103.236.97.248:22350/api/health` 返回 `200`。
+3. 在 Caddy `route` 的最前面加入旧 PanSou HTTP 地址重定向；SSH 流量不会进入 Caddy，不受影响：
+
+```caddyfile
+@legacy_pansou {
+    header Host 103.236.97.248:22348
+    path /pansou* /pansou-admin* /api/* /qqpd/* /gying/* /panlian/* /weibo/*
+}
+redir @legacy_pansou http://103.236.97.248:22350{uri} 308
+```
+
+4. 执行 `caddy validate --config /etc/caddy/Caddyfile`，然后 reload Caddy。
+5. 从公网通过 `22350` 发起请求，确认 API 监控和容器日志不再记录 `127.0.0.1`。
 
 ## 本地忽略文件
 

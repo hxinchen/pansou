@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -63,6 +65,7 @@ type Config struct {
 	DefaultCooldown    time.Duration
 	LinkCheckWorkers   int
 	HybridRefreshAfter time.Duration
+	TrustedProxies     []string
 }
 
 // 全局配置实例
@@ -126,10 +129,44 @@ func Init() {
 		DefaultCooldown:    getDurationHours("COLLECTION_DEFAULT_COOLDOWN_HOURS", 7*24*time.Hour),
 		LinkCheckWorkers:   getPositiveInt("LINK_CHECK_WORKERS", 4),
 		HybridRefreshAfter: getDurationMinutes("HYBRID_REFRESH_AFTER_MINUTES", time.Hour),
+		TrustedProxies:     mustTrustedProxies(os.Getenv("TRUSTED_PROXIES")),
 	}
 
 	// 应用GC配置
 	applyGCSettings()
+}
+
+func ParseTrustedProxies(raw string) ([]string, error) {
+	values := strings.Split(raw, ",")
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if ip := net.ParseIP(value); ip != nil {
+			value = ip.String()
+		} else if _, network, err := net.ParseCIDR(value); err == nil {
+			value = network.String()
+		} else {
+			return nil, fmt.Errorf("TRUSTED_PROXIES contains invalid IP or CIDR %q", value)
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result, nil
+}
+
+func mustTrustedProxies(raw string) []string {
+	proxies, err := ParseTrustedProxies(raw)
+	if err != nil {
+		panic(err)
+	}
+	return proxies
 }
 
 func getPositiveInt(name string, fallback int) int {

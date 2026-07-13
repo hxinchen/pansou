@@ -7,7 +7,7 @@ param(
     [string]$EnabledPlugins = "labi,zhizhen,shandian,duoduo,muou,qqpd,gying,weibo",
     [string]$Channels = "",
     [string]$ProxyUrl = "socks5h://192.168.0.1:7890",
-    [string]$PublicBaseUrl = "http://103.236.97.248:22348",
+    [string]$PublicBaseUrl = "http://103.236.97.248:22350",
     [switch]$SkipPublicCheck
 )
 
@@ -164,6 +164,12 @@ chmod 600 "`$DATABASE_SECRETS_FILE"
 if ! docker network inspect pansou-network >/dev/null 2>&1; then
   docker network create pansou-network >/dev/null
 fi
+TRUSTED_PROXIES_VALUE=`$(docker network inspect --format '{{(index .IPAM.Config 0).Subnet}}' pansou-network)
+if [ -z "`$TRUSTED_PROXIES_VALUE" ]; then
+  echo 'Unable to determine pansou-network CIDR for TRUSTED_PROXIES.' >&2
+  exit 1
+fi
+echo "Trusted reverse-proxy network: `$TRUSTED_PROXIES_VALUE"
 if ! docker volume inspect pansou-postgres >/dev/null 2>&1; then
   docker volume create pansou-postgres >/dev/null
 fi
@@ -246,6 +252,7 @@ docker run -d \
   -e "ENABLED_PLUGINS=`$ENABLED_PLUGINS_VALUE" \
   -e ASYNC_LOG_ENABLED=false \
   -e CACHE_PATH=/app/cache \
+  -e "TRUSTED_PROXIES=`$TRUSTED_PROXIES_VALUE" \
   -e "PROXY=`$PROXY_URL_VALUE" \
   -v "`$REMOTE_ROOT/cache:/app/cache" \
   local/pansou-api:latest

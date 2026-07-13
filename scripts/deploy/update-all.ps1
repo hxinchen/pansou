@@ -7,7 +7,7 @@ param(
     [string]$EnabledPlugins = "labi,zhizhen,shandian,duoduo,muou,qqpd,gying,weibo",
     [string]$FrontendRoot = "",
     [string]$BasePath = "/pansou/",
-    [string]$PublicBaseUrl = "http://103.236.97.248:22348",
+    [string]$PublicBaseUrl = "http://103.236.97.248:22350",
     [switch]$SkipNpmInstall
 )
 
