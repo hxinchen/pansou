@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -30,6 +31,54 @@ func (f *fakeLiveSearch) Search(_ string, _ []string, _ int, force bool, _ strin
 }
 
 func (f *fakeLiveSearch) GetPluginManager() *plugin.PluginManager { return nil }
+
+type contextAwareLiveSearch struct {
+	fakeLiveSearch
+	contextErr error
+}
+
+type resolvingLiveSearch struct {
+	fakeLiveSearch
+	channels     []string
+	plugins      []string
+	requiresLive bool
+}
+
+func (f *resolvingLiveSearch) ResolveSearchRequest(_ context.Context, request ContextSearchRequest) (ContextSearchRequest, error) {
+	request.Channels = append([]string(nil), f.channels...)
+	request.Plugins = append([]string(nil), f.plugins...)
+	request.requiresLiveTG = f.requiresLive
+	return request, nil
+}
+
+func TestHybridSearchCustomChannelBypassesDatabase(t *testing.T) {
+	store := &fakeResourceStore{pages: []storage.ResourcePage{{Total: 1}}}
+	live := &resolvingLiveSearch{
+		fakeLiveSearch: fakeLiveSearch{response: sampleLiveResponse()},
+		channels:       []string{"custom_channel"},
+		requiresLive:   true,
+	}
+	hybrid := NewHybridSearchService(live, store, time.Hour)
+
+	_, err := hybrid.Search("sample", []string{"custom_channel"}, 1, false, "all", "tg", nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.queries) != 0 {
+		t.Fatalf("database queries = %d, want 0 for custom-channel live search", len(store.queries))
+	}
+	if live.calls != 1 || live.forced[0] {
+		t.Fatalf("live calls/force = %d/%v, want 1/false", live.calls, live.forced)
+	}
+}
+
+func (f *contextAwareLiveSearch) SearchContext(ctx context.Context, request ContextSearchRequest) (model.SearchResponse, error) {
+	f.contextErr = ctx.Err()
+	return f.Search(
+		request.Keyword, request.Channels, request.Concurrency, request.ForceRefresh,
+		request.ResultType, request.SourceType, request.Plugins, request.CloudTypes, request.Ext,
+	)
+}
 
 type fakeResourceStore struct {
 	mu         sync.Mutex
@@ -98,6 +147,31 @@ func TestHybridSearchDatabaseHitReturnsWithoutLiveSearch(t *testing.T) {
 	}
 }
 
+func TestHybridSearchResolvesSourcesBeforeDatabaseLookup(t *testing.T) {
+	now := time.Now()
+	store := &fakeResourceStore{pages: []storage.ResourcePage{{
+		Total: 1,
+		Items: []storage.Resource{{
+			ID: 1, URL: "https://pan.quark.cn/s/example", NormalizedURL: "https://pan.quark.cn/s/example",
+			Platform: "quark", Title: "stored", CheckStatus: storage.CheckValid, LastSeenAt: now,
+			Sources: []storage.ResourceSource{{SourceType: "tg", SourceKey: "resolved_channel"}},
+		}},
+	}}}
+	live := &resolvingLiveSearch{
+		fakeLiveSearch: fakeLiveSearch{response: sampleLiveResponse()},
+		channels:       []string{"resolved_channel"},
+	}
+	hybrid := NewHybridSearchService(live, store, time.Hour)
+
+	_, err := hybrid.Search("sample", nil, 1, false, "all", "tg", nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.queries) != 1 || !reflect.DeepEqual(store.queries[0].SourceKeys, []string{"resolved_channel"}) {
+		t.Fatalf("database source keys = %v", store.queries)
+	}
+}
+
 func TestHybridSearchMissCallsLiveAndPersists(t *testing.T) {
 	store := &fakeResourceStore{pages: []storage.ResourcePage{{}}}
 	live := &fakeLiveSearch{response: sampleLiveResponse()}
@@ -160,12 +234,37 @@ func TestHybridSearchDatabaseFailureFallsBackToLive(t *testing.T) {
 	live := &fakeLiveSearch{response: sampleLiveResponse()}
 	hybrid := NewHybridSearchService(live, store, time.Hour)
 
-	_, err := hybrid.Search("sample", nil, 1, false, "all", "all", nil, nil, nil)
+	_, err := hybrid.Search("sample", []string{"channel-a"}, 1, false, "all", "tg", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Search returned error: %v", err)
 	}
 	if live.calls != 1 {
 		t.Fatalf("live calls = %d, want 1", live.calls)
+	}
+}
+
+func TestHybridSearchFallbackKeepsRequestContextActive(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		store *fakeResourceStore
+	}{
+		{name: "database miss", store: &fakeResourceStore{pages: []storage.ResourcePage{{}}}},
+		{name: "database failure", store: &fakeResourceStore{err: errors.New("database unavailable")}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			live := &contextAwareLiveSearch{fakeLiveSearch: fakeLiveSearch{response: sampleLiveResponse()}}
+			hybrid := NewHybridSearchService(live, test.store, time.Hour)
+
+			_, err := hybrid.SearchContext(context.Background(), ContextSearchRequest{
+				Keyword: "sample", Channels: []string{"channel-a"}, ResultType: "all", SourceType: "tg",
+			})
+			if err != nil {
+				t.Fatalf("SearchContext returned error: %v", err)
+			}
+			if live.contextErr != nil {
+				t.Fatalf("live search received canceled context: %v", live.contextErr)
+			}
+		})
 	}
 }
 
@@ -183,6 +282,20 @@ func TestHybridSearchAllSourcesUsesIndependentFilters(t *testing.T) {
 	}
 	if got := store.queries[1].SourceTypes; len(got) != 1 || got[0] != "plugin" {
 		t.Fatalf("second source filter = %v, want plugin", got)
+	}
+}
+
+func TestHybridSearchSkipsEmptySourceBranches(t *testing.T) {
+	store := &fakeResourceStore{pages: []storage.ResourcePage{{}}}
+	live := &fakeLiveSearch{response: sampleLiveResponse()}
+	hybrid := NewHybridSearchService(live, store, time.Hour)
+
+	_, _ = hybrid.Search("sample", []string{}, 1, false, "all", "all", []string{"plugin-a"}, nil, nil)
+	if len(store.queries) != 1 {
+		t.Fatalf("database queries = %d, want plugin query only", len(store.queries))
+	}
+	if got := store.queries[0].SourceTypes; len(got) != 1 || got[0] != "plugin" {
+		t.Fatalf("source types = %v, want plugin", got)
 	}
 }
 

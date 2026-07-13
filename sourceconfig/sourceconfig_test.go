@@ -25,15 +25,22 @@ func TestCatalogRejectsUnknownAndSecretFields(t *testing.T) {
 
 func TestCatalogNormalizesChannelsAndBaseURL(t *testing.T) {
 	catalog, _ := DefaultCatalog([]string{"gying"})
-	config, err := catalog.Validate(Config{Channels: []Channel{{Key: "@Example", Enabled: true}}, Plugins: map[string]PluginConfig{"GYING": {Enabled: true, Config: map[string]any{"base_url": "https://example.test/path"}}}})
+	config, err := catalog.Validate(Config{Channels: []Channel{{Key: "https://t.me/s/Example_Channel", Enabled: true}}, Plugins: map[string]PluginConfig{"GYING": {Enabled: true, Config: map[string]any{"base_url": "https://example.test/path"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Channels[0].Key != "example" {
+	if config.Channels[0].Key != "example_channel" {
 		t.Fatalf("channel = %q", config.Channels[0].Key)
 	}
 	if got := config.Plugins["gying"].Config["base_url"]; got != "https://example.test" {
 		t.Fatalf("base_url = %v", got)
+	}
+}
+
+func TestCatalogRejectsInvalidPublicChannel(t *testing.T) {
+	catalog, _ := DefaultCatalog(nil)
+	if _, err := catalog.Validate(Config{Channels: []Channel{{Key: "https://t.me/+private"}}}); err == nil {
+		t.Fatal("expected invalid public channel error")
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"pansou/plugin"
 	"pansou/sourceconfig"
 	"pansou/storage"
+	"pansou/tgchannel"
 	"pansou/util"
 	"pansou/util/cache"
 	"pansou/util/pool"
@@ -54,6 +55,8 @@ func GetEnhancedTwoLevelCache() *cache.EnhancedTwoLevelCache {
 
 // 优先关键词列表
 var priorityKeywords = []string{"合集", "系列", "全", "完", "最新", "附", "complete"}
+
+const maxTGSearchWorkers = 20
 
 // extractKeywordFromCacheKey 从缓存键中提取关键词（简化版）
 func extractKeywordFromCacheKey(cacheKey string) string {
@@ -266,6 +269,67 @@ func (s *SearchService) SetCredentialService(service *credential.Service) {
 	}
 }
 
+func (s *SearchService) ResolveSearchRequest(ctx context.Context, request ContextSearchRequest) (ContextSearchRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return ContextSearchRequest{}, err
+	}
+	if s == nil || s.snapshots == nil {
+		channels, err := tgchannel.NormalizeList(request.Channels)
+		if err != nil {
+			return ContextSearchRequest{}, err
+		}
+		request.Channels = channels
+		return request, nil
+	}
+
+	lease, err := s.snapshots.Acquire()
+	if err != nil {
+		return ContextSearchRequest{}, err
+	}
+	defer lease.Release()
+	snapshot := lease.Snapshot()
+	if snapshot == nil || snapshot.PluginManager == nil {
+		return ContextSearchRequest{}, fmt.Errorf("source snapshot is incomplete")
+	}
+	return resolveManagedSearchRequest(request, snapshot)
+}
+
+func resolveManagedSearchRequest(request ContextSearchRequest, snapshot *sourceconfig.Snapshot) (ContextSearchRequest, error) {
+	sourceType := strings.ToLower(strings.TrimSpace(request.SourceType))
+	if sourceType == "plugin" {
+		request.Channels = []string{}
+		request.requiresLiveTG = false
+	} else {
+		if request.Channels == nil {
+			request.Channels = append([]string{}, snapshot.Channels()...)
+			request.requiresLiveTG = false
+		} else {
+			channels, err := tgchannel.NormalizeList(request.Channels)
+			if err != nil {
+				return ContextSearchRequest{}, err
+			}
+			request.Channels = channels
+			publicChannels := make(map[string]struct{}, len(snapshot.Channels()))
+			for _, channel := range snapshot.Channels() {
+				publicChannels[channel] = struct{}{}
+			}
+			request.requiresLiveTG = false
+			for _, channel := range channels {
+				if _, public := publicChannels[channel]; !public {
+					request.requiresLiveTG = true
+					break
+				}
+			}
+		}
+	}
+	if sourceType == "tg" {
+		request.Plugins = []string{}
+	} else {
+		request.Plugins = intersectSources(request.Plugins, snapshot.PluginNames())
+	}
+	return request, nil
+}
+
 // injectMainCacheToAsyncPlugins 将主缓存系统注入到异步插件中
 func injectMainCacheToAsyncPlugins(pluginManager *plugin.PluginManager, mainCache *cache.EnhancedTwoLevelCache) {
 	// 如果缓存或插件管理器不可用，直接返回
@@ -406,8 +470,10 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 		if snapshot == nil || snapshot.PluginManager == nil {
 			return model.SearchResponse{}, fmt.Errorf("source snapshot is incomplete")
 		}
-		request.Channels = intersectSources(request.Channels, snapshot.Channels())
-		request.Plugins = intersectSources(request.Plugins, snapshot.PluginNames())
+		request, err = resolveManagedSearchRequest(request, snapshot)
+		if err != nil {
+			return model.SearchResponse{}, err
+		}
 		static := NewSearchService(snapshot.PluginManager)
 		static.credentials = s.credentials
 		return static.SearchContext(ctx, request)
@@ -415,6 +481,11 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 	if err := ctx.Err(); err != nil {
 		return model.SearchResponse{}, err
 	}
+	normalizedChannels, err := tgchannel.NormalizeList(request.Channels)
+	if err != nil {
+		return model.SearchResponse{}, err
+	}
+	request.Channels = normalizedChannels
 	keyword, channels, concurrency, forceRefresh := request.Keyword, request.Channels, request.Concurrency, request.ForceRefresh
 	resultType, sourceType, plugins, cloudTypes, ext := request.ResultType, request.SourceType, request.Plugins, request.CloudTypes, request.Ext
 	// 确保ext不为nil
@@ -434,8 +505,10 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 		plugins = nil
 	} else if sourceType == "all" || sourceType == "plugin" {
 		// 检查是否为空列表或只包含空字符串
-		if plugins == nil || len(plugins) == 0 {
+		if plugins == nil {
 			plugins = nil
+		} else if len(plugins) == 0 {
+			plugins = []string{}
 		} else {
 			// 检查是否有非空元素
 			hasNonEmpty := false
@@ -504,7 +577,7 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 	var tgErr, pluginErr error
 
 	// 如果需要搜索TG
-	if sourceType == "all" || sourceType == "tg" {
+	if (sourceType == "all" || sourceType == "tg") && !(channels != nil && len(channels) == 0) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -512,7 +585,7 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 		}()
 	}
 	// 如果需要搜索插件（且插件功能已启用）
-	if (sourceType == "all" || sourceType == "plugin") && config.AppConfig.AsyncPluginEnabled {
+	if (sourceType == "all" || sourceType == "plugin") && config.AppConfig.AsyncPluginEnabled && !(plugins != nil && len(plugins) == 0) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1317,7 +1390,8 @@ func (s *SearchService) searchTG(keyword string, channels []string, forceRefresh
 	}
 
 	// 执行搜索任务并获取结果
-	taskResults := pool.ExecuteBatchWithTimeout(tasks, len(channels), config.AppConfig.PluginTimeout)
+	workers := tgSearchWorkerCount(len(channels))
+	taskResults := executeTGTasksWithTimeout(tasks, workers, config.AppConfig.PluginTimeout)
 
 	// 合并所有频道的结果
 	for _, result := range taskResults {
@@ -1344,6 +1418,99 @@ func (s *SearchService) searchTG(keyword string, channels []string, forceRefresh
 	}
 
 	return results, nil
+}
+
+func tgSearchWorkerCount(channelCount int) int {
+	if channelCount <= 0 {
+		return 0
+	}
+	if channelCount > maxTGSearchWorkers {
+		return maxTGSearchWorkers
+	}
+	return channelCount
+}
+
+type indexedTGTaskResult struct {
+	index int
+	value interface{}
+}
+
+func executeTGTasksWithTimeout(tasks []pool.Task, maxWorkers int, timeout time.Duration) []interface{} {
+	if len(tasks) == 0 || maxWorkers <= 0 {
+		return []interface{}{}
+	}
+	if maxWorkers > len(tasks) {
+		maxWorkers = len(tasks)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	jobs := make(chan int)
+	completed := make(chan indexedTGTaskResult, len(tasks))
+	var workers sync.WaitGroup
+
+	for worker := 0; worker < maxWorkers; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case index, ok := <-jobs:
+					if !ok {
+						return
+					}
+					value := tasks[index]()
+					select {
+					case completed <- indexedTGTaskResult{index: index, value: value}:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(jobs)
+		for index := range tasks {
+			select {
+			case jobs <- index:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		workers.Wait()
+		close(completed)
+	}()
+
+	ordered := make([]interface{}, len(tasks))
+	finished := make([]bool, len(tasks))
+	for {
+		select {
+		case result, ok := <-completed:
+			if !ok {
+				return compactTGTaskResults(ordered, finished)
+			}
+			ordered[result.index] = result.value
+			finished[result.index] = true
+		case <-ctx.Done():
+			return compactTGTaskResults(ordered, finished)
+		}
+	}
+}
+
+func compactTGTaskResults(values []interface{}, finished []bool) []interface{} {
+	result := make([]interface{}, 0, len(values))
+	for index, value := range values {
+		if finished[index] {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 // searchPlugins 搜索插件
@@ -1648,8 +1815,11 @@ func intersectSources(requested, enabled []string) []string {
 	if len(enabled) == 0 {
 		return []string{}
 	}
-	if len(requested) == 0 {
+	if requested == nil {
 		return append([]string(nil), enabled...)
+	}
+	if len(requested) == 0 {
+		return []string{}
 	}
 	allowed := make(map[string]string, len(enabled))
 	for _, value := range enabled {

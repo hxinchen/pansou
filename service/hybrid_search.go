@@ -70,17 +70,22 @@ func (s *HybridSearchService) Search(keyword string, channels []string, concurre
 }
 
 func (s *HybridSearchService) SearchContext(ctx context.Context, request ContextSearchRequest) (model.SearchResponse, error) {
-	keyword, channels, forceRefresh := request.Keyword, request.Channels, request.ForceRefresh
-	resultType, sourceType, plugins, cloudTypes, ext := request.ResultType, request.SourceType, request.Plugins, request.CloudTypes, request.Ext
 	if s == nil || s.live == nil {
 		return model.SearchResponse{}, fmt.Errorf("live search service is unavailable")
 	}
+	resolved, err := ResolveSearchRequest(ctx, s.live, request)
+	if err != nil {
+		return model.SearchResponse{}, err
+	}
+	request = resolved
+	keyword, channels, forceRefresh := request.Keyword, request.Channels, request.ForceRefresh
+	resultType, sourceType, plugins, cloudTypes, ext := request.ResultType, request.SourceType, request.Plugins, request.CloudTypes, request.Ext
 	if s.store == nil {
 		return SearchWithContext(ctx, s.live, request)
 	}
 
-	if forceRefresh {
-		request.ForceRefresh = true
+	if forceRefresh || request.requiresLiveTG {
+		request.ForceRefresh = forceRefresh
 		response, err := SearchWithContext(ctx, s.live, request)
 		if err != nil {
 			return response, err
@@ -89,8 +94,8 @@ func (s *HybridSearchService) SearchContext(ctx context.Context, request Context
 		return response, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	databaseResponse, latestSeen, err := s.searchDatabase(ctx, keyword, resultType, sourceType, channels, plugins, cloudTypes)
+	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	databaseResponse, latestSeen, err := s.searchDatabase(dbCtx, keyword, resultType, sourceType, channels, plugins, cloudTypes)
 	cancel()
 	if err == nil && databaseResponse.Total > 0 {
 		if latestSeen.IsZero() || time.Since(latestSeen) > s.refreshAfter {
@@ -141,27 +146,30 @@ func (s *HybridSearchService) searchDatabase(ctx context.Context, keyword, resul
 	filters := make([]storage.ResourceFilter, 0, 2)
 	switch strings.ToLower(strings.TrimSpace(sourceType)) {
 	case "tg":
-		base.SourceTypes = []string{"tg"}
-		base.SourceKeys = channels
-		filters = append(filters, base)
-	case "plugin":
-		base.SourceTypes = []string{"plugin"}
-		base.SourceKeys = plugins
-		filters = append(filters, base)
-	default:
-		if len(channels) == 0 && len(plugins) == 0 {
+		if len(channels) > 0 {
+			base.SourceTypes = []string{"tg"}
+			base.SourceKeys = channels
 			filters = append(filters, base)
-			break
 		}
-		tgFilter := base
-		tgFilter.SourceTypes = []string{"tg"}
-		tgFilter.SourceKeys = channels
-		filters = append(filters, tgFilter)
-
-		pluginFilter := base
-		pluginFilter.SourceTypes = []string{"plugin"}
-		pluginFilter.SourceKeys = plugins
-		filters = append(filters, pluginFilter)
+	case "plugin":
+		if len(plugins) > 0 {
+			base.SourceTypes = []string{"plugin"}
+			base.SourceKeys = plugins
+			filters = append(filters, base)
+		}
+	default:
+		if len(channels) > 0 {
+			tgFilter := base
+			tgFilter.SourceTypes = []string{"tg"}
+			tgFilter.SourceKeys = channels
+			filters = append(filters, tgFilter)
+		}
+		if len(plugins) > 0 {
+			pluginFilter := base
+			pluginFilter.SourceTypes = []string{"plugin"}
+			pluginFilter.SourceKeys = plugins
+			filters = append(filters, pluginFilter)
+		}
 	}
 
 	allResults := make([]model.SearchResult, 0)

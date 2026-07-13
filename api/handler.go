@@ -2,6 +2,7 @@ package api
 
 import (
 	// "fmt"
+	"errors"
 	"net/http"
 	// "os"
 
@@ -9,6 +10,7 @@ import (
 	"pansou/config"
 	"pansou/model"
 	"pansou/service"
+	"pansou/tgchannel"
 	"pansou/util"
 	jsonutil "pansou/util/json"
 	"strings"
@@ -180,7 +182,7 @@ func SearchHandler(c *gin.Context) {
 	}
 
 	// 检查并设置默认值
-	if len(req.Channels) == 0 && !service.UsesManagedSources(searchService) {
+	if req.Channels == nil && !service.UsesManagedSources(searchService) {
 		req.Channels = config.AppConfig.DefaultChannels
 	}
 
@@ -202,11 +204,6 @@ func SearchHandler(c *gin.Context) {
 		req.Plugins = nil // 忽略plugins参数
 	} else if req.SourceType == "plugin" {
 		req.Channels = nil // 忽略channels参数
-	} else if req.SourceType == "all" {
-		// 对于all类型，如果plugins为空或不存在，统一设为nil
-		if req.Plugins == nil || len(req.Plugins) == 0 {
-			req.Plugins = nil
-		}
 	}
 
 	// 可选：启用调试输出（生产环境建议注释掉）
@@ -234,6 +231,13 @@ func SearchHandler(c *gin.Context) {
 	})
 
 	if err != nil {
+		if errors.Is(err, tgchannel.ErrInvalidChannel) {
+			c.Set(usageErrorCodeContextKey, "SEARCH_INVALID_CHANNEL")
+			response := model.NewErrorResponse(http.StatusBadRequest, "TG 频道格式无效: "+err.Error())
+			jsonData, _ := jsonutil.Marshal(response)
+			c.Data(http.StatusBadRequest, "application/json", jsonData)
+			return
+		}
 		c.Set(usageErrorCodeContextKey, "SEARCH_FAILED")
 		response := model.NewErrorResponse(500, "搜索失败: "+err.Error())
 		jsonData, _ := jsonutil.Marshal(response)

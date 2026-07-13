@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+
+	"pansou/tgchannel"
 )
 
 var (
@@ -115,10 +117,11 @@ func (c *Catalog) Validate(config Config) (Config, error) {
 	seenChannels := make(map[string]struct{}, len(config.Channels))
 	for index := range config.Channels {
 		channel := &config.Channels[index]
-		channel.Key = normalizeChannel(channel.Key)
-		if channel.Key == "" {
-			return Config{}, fmt.Errorf("%w: channel %d is empty", ErrInvalidConfig, index+1)
+		normalized, err := tgchannel.Normalize(channel.Key)
+		if err != nil {
+			return Config{}, fmt.Errorf("%w: channel %d: %v", ErrInvalidConfig, index+1, err)
 		}
+		channel.Key = normalized
 		if _, exists := seenChannels[channel.Key]; exists {
 			return Config{}, fmt.Errorf("%w: duplicate channel %q", ErrInvalidConfig, channel.Key)
 		}
@@ -157,14 +160,6 @@ func (c *Catalog) Validate(config Config) (Config, error) {
 		return config.Channels[i].Order < config.Channels[j].Order
 	})
 	return config, nil
-}
-
-func normalizeChannel(value string) string {
-	value = strings.TrimSpace(value)
-	value = strings.TrimPrefix(value, "https://t.me/")
-	value = strings.TrimPrefix(value, "http://t.me/")
-	value = strings.TrimPrefix(value, "@")
-	return strings.ToLower(strings.Trim(value, "/"))
 }
 
 func uniqueStrings(values []string) []string {

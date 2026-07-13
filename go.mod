@@ -14,6 +14,7 @@ require (
 	go.etcd.io/bbolt v1.4.0
 	golang.org/x/crypto v0.39.0
 	golang.org/x/net v0.41.0
+	golang.org/x/sync v0.15.0
 	golang.org/x/text v0.26.0
 )
 
@@ -44,7 +45,6 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.11 // indirect
 	golang.org/x/arch v0.3.0 // indirect
-	golang.org/x/sync v0.15.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
 	google.golang.org/protobuf v1.30.0 // indirect
 	gopkg.in/sourcemap.v1 v1.0.5 // indirect

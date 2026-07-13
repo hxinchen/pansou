@@ -23,20 +23,27 @@ type SearchIdentity struct {
 }
 
 type ContextSearchRequest struct {
-	Keyword      string
-	Channels     []string
-	Concurrency  int
-	ForceRefresh bool
-	ResultType   string
-	SourceType   string
-	Plugins      []string
-	CloudTypes   []string
-	Ext          map[string]interface{}
-	Identity     SearchIdentity
+	Keyword        string
+	Channels       []string
+	Concurrency    int
+	ForceRefresh   bool
+	ResultType     string
+	SourceType     string
+	Plugins        []string
+	CloudTypes     []string
+	Ext            map[string]interface{}
+	Identity       SearchIdentity
+	requiresLiveTG bool
 }
 
 type ContextSearchProvider interface {
 	SearchContext(context.Context, ContextSearchRequest) (model.SearchResponse, error)
+}
+
+// ContextSearchRequestResolver resolves omitted managed-source defaults and
+// normalizes explicitly requested sources before database or live searching.
+type ContextSearchRequestResolver interface {
+	ResolveSearchRequest(context.Context, ContextSearchRequest) (ContextSearchRequest, error)
 }
 
 // ManagedSourceProvider reports whether a search provider resolves its default
@@ -60,4 +67,12 @@ func SearchWithContext(ctx context.Context, provider SearchProvider, request Con
 		request.Keyword, request.Channels, request.Concurrency, request.ForceRefresh,
 		request.ResultType, request.SourceType, request.Plugins, request.CloudTypes, request.Ext,
 	)
+}
+
+func ResolveSearchRequest(ctx context.Context, provider SearchProvider, request ContextSearchRequest) (ContextSearchRequest, error) {
+	resolver, ok := provider.(ContextSearchRequestResolver)
+	if !ok {
+		return request, nil
+	}
+	return resolver.ResolveSearchRequest(ctx, request)
 }
