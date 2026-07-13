@@ -78,7 +78,7 @@ const runItemSummaryColumns = `
 	i.id, i.run_id, i.keyword_id, i.keyword, i.normalized_keyword, i.keyword_type,
 	i.priority, i.cooldown_seconds, i.status, i.attempts, i.found_count, i.new_count,
 	i.duplicate_count,
-	COALESCE(jsonb_object_length(i.source_summary), 0),
+	COALESCE((SELECT count(*) FROM jsonb_each(i.source_summary)), 0),
 	COALESCE((SELECT count(*) FROM jsonb_each(i.source_summary) s WHERE s.value->>'status'='success'), 0),
 	COALESCE((SELECT count(*) FROM jsonb_each(i.source_summary) s WHERE s.value->>'status'='success_empty'), 0),
 	COALESCE((SELECT count(*) FROM jsonb_each(i.source_summary) s WHERE s.value->>'status'='failed'), 0),
