@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	cloudscraper "github.com/Advik-B/cloudscraper/lib"
 	"pansou/model"
 	"pansou/plugin"
 	"pansou/util/json"
@@ -32,23 +33,37 @@ func init() {
 const (
 	// API端点
 	HunhepanAPI = "https://hunhepan.com/open/search/disk"
-	QkpansoAPI  = "https://qkpanso.com/v1/search/disk"
-	KuakeAPI    = "https://kuake8.com/v1/search/disk"
-	MisosoAPI   = "https://www.misoso.cc/v1/search/disk"
 
 	// 默认页大小
 	DefaultPageSize = 30
 )
 
+type searchEndpoint struct {
+	name    string
+	apiURL  string
+	referer string
+	origin  string
+}
+
+var searchEndpoints = []searchEndpoint{
+	{name: "hunhepan", apiURL: HunhepanAPI, referer: "https://hunhepan.com/search", origin: "https://hunhepan.com"},
+}
+
 // HunhepanAsyncPlugin 混合盘搜索异步插件
 type HunhepanAsyncPlugin struct {
 	*plugin.BaseAsyncPlugin
+	scraper *cloudscraper.Scraper
 }
 
 // NewHunhepanAsyncPlugin 创建新的混合盘搜索异步插件
 func NewHunhepanAsyncPlugin() *HunhepanAsyncPlugin {
+	scraper, err := cloudscraper.New()
+	if err != nil {
+		log.Printf("[hunhepan] cloudscraper 初始化失败: %v", err)
+	}
 	return &HunhepanAsyncPlugin{
 		BaseAsyncPlugin: plugin.NewBaseAsyncPlugin("hunhepan", 3),
+		scraper:         scraper,
 	}
 }
 
@@ -69,58 +84,25 @@ func (p *HunhepanAsyncPlugin) SearchWithResult(keyword string, ext map[string]in
 // doSearch 实际的搜索实现
 func (p *HunhepanAsyncPlugin) doSearch(client *http.Client, keyword string, ext map[string]interface{}) ([]model.SearchResult, error) {
 	debugLog("开始搜索，关键词: %s", keyword)
-	
-	// 创建结果通道和错误通道
-	resultChan := make(chan []HunhepanItem, 4)
-	errChan := make(chan error, 4)
+
+	resultChan := make(chan []HunhepanItem, len(searchEndpoints))
+	errChan := make(chan error, len(searchEndpoints))
 
 	// 创建等待组
 	var wg sync.WaitGroup
-	wg.Add(4)
-
-	// 并行请求三个API
-	go func() {
-		defer wg.Done()
-		items, err := p.searchAPI(client, HunhepanAPI, keyword)
-		if err != nil {
-			errChan <- fmt.Errorf("hunhepan API error: %w", err)
-			return
-		}
-		resultChan <- items
-	}()
-
-	go func() {
-		defer wg.Done()
-		items, err := p.searchAPI(client, QkpansoAPI, keyword)
-		if err != nil {
-			errChan <- fmt.Errorf("qkpanso API error: %w", err)
-			return
-		}
-		resultChan <- items
-	}()
-
-	go func() {
-		defer wg.Done()
-		items, err := p.searchAPI(client, KuakeAPI, keyword)
-		if err != nil {
-			errChan <- fmt.Errorf("kuake API error: %w", err)
-			return
-		}
-		resultChan <- items
-	}()
-
-	go func() {
-		defer wg.Done()
-		debugLog("调用 misoso API")
-		items, err := p.searchAPI(client, MisosoAPI, keyword)
-		if err != nil {
-			debugLog("misoso API 错误: %v", err)
-			errChan <- fmt.Errorf("misoso API error: %w", err)
-			return
-		}
-		debugLog("misoso API 返回 %d 条结果", len(items))
-		resultChan <- items
-	}()
+	wg.Add(len(searchEndpoints))
+	for _, endpoint := range searchEndpoints {
+		endpoint := endpoint
+		go func() {
+			defer wg.Done()
+			items, err := p.searchAPI(client, endpoint, keyword)
+			if err != nil {
+				errChan <- fmt.Errorf("%s API error: %w", endpoint.name, err)
+				return
+			}
+			resultChan <- items
+		}()
+	}
 
 	// 启动一个goroutine等待所有请求完成并关闭通道
 	go func() {
@@ -162,7 +144,7 @@ func (p *HunhepanAsyncPlugin) doSearch(client *http.Client, keyword string, ext 
 }
 
 // searchAPI 向单个API发送请求
-func (p *HunhepanAsyncPlugin) searchAPI(client *http.Client, apiURL, keyword string) ([]HunhepanItem, error) {
+func (p *HunhepanAsyncPlugin) searchAPI(client *http.Client, endpoint searchEndpoint, keyword string) ([]HunhepanItem, error) {
 	maxPages := 3 // 最多获取3页数据，可以根据需要调整
 
 	// 创建结果通道和错误通道
@@ -203,9 +185,9 @@ func (p *HunhepanAsyncPlugin) searchAPI(client *http.Client, apiURL, keyword str
 				return
 			}
 
-			debugLog("发送请求到 %s (page %d): %s", apiURL, pageNum, string(jsonData))
+			debugLog("发送请求到 %s (page %d): %s", endpoint.apiURL, pageNum, string(jsonData))
 
-			req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
+			req, err := http.NewRequest("POST", endpoint.apiURL, bytes.NewBuffer(jsonData))
 			if err != nil {
 				debugLog("创建请求失败 (page %d): %v", pageNum, err)
 				errChan <- fmt.Errorf("create request failed (page %d): %w", pageNum, err)
@@ -216,24 +198,28 @@ func (p *HunhepanAsyncPlugin) searchAPI(client *http.Client, apiURL, keyword str
 			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 			req.Header.Set("Accept", "application/json, text/plain, */*")
 			req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+			req.Header.Set("Sec-Fetch-Dest", "empty")
+			req.Header.Set("Sec-Fetch-Mode", "cors")
+			req.Header.Set("Sec-Fetch-Site", "same-origin")
 
-			// 根据不同的API设置不同的Referer
-			if strings.Contains(apiURL, "qkpanso.com") {
-				req.Header.Set("Referer", "https://qkpanso.com/search")
-			} else if strings.Contains(apiURL, "kuake8.com") {
-				req.Header.Set("Referer", "https://kuake8.com/search")
-			} else if strings.Contains(apiURL, "hunhepan.com") {
-				req.Header.Set("Referer", "https://hunhepan.com/search")
-			} else if strings.Contains(apiURL, "misoso.cc") {
-				req.Header.Set("Referer", "https://www.misoso.cc/search")
-				req.Header.Set("Origin", "https://www.misoso.cc")
+			if endpoint.referer != "" {
+				req.Header.Set("Referer", endpoint.referer)
+			}
+			if endpoint.origin != "" {
+				req.Header.Set("Origin", endpoint.origin)
 			}
 
 			// 发送请求
-			resp, err := client.Do(req)
-			if err != nil {
-				debugLog("请求失败 (page %d): %v", pageNum, err)
-				errChan <- fmt.Errorf("request failed (page %d): %w", pageNum, err)
+			var resp *http.Response
+			var respErr error
+			if endpoint.name == "hunhepan" && p.scraper != nil {
+				resp, respErr = p.scraper.Post(endpoint.apiURL, "application/json", bytes.NewBuffer(jsonData))
+			} else {
+				resp, respErr = client.Do(req)
+			}
+			if respErr != nil {
+				debugLog("请求失败 (page %d): %v", pageNum, respErr)
+				errChan <- fmt.Errorf("request failed (page %d): %w", pageNum, respErr)
 				return
 			}
 			defer resp.Body.Close()

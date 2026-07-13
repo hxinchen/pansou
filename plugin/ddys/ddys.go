@@ -1,39 +1,78 @@
 package ddys
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	cloudscraper "github.com/Advik-B/cloudscraper/lib"
 	"github.com/PuerkitoBio/goquery"
 	"pansou/model"
 	"pansou/plugin"
 )
 
 const (
-	PluginName    = "ddys"
-	DisplayName   = "低端影视"
-	Description   = "低端影视 - 影视资源网盘链接搜索"
-	BaseURL       = "https://ddys.pro"
-	SearchPath    = "/?s=%s&post_type=post"
-	UserAgent     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
-	MaxResults    = 50
-	MaxConcurrency = 20
+	PluginName     = "ddys"
+	DisplayName    = "低端影视"
+	Description    = "低端影视 - 影视资源网盘链接搜索"
+	BaseURL        = "https://ddys.io"
+	SearchPath     = "/api/v1/search?q=%s&type=movie&per_page=5"
+	UserAgent      = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+	MaxResults     = 50
+	MaxConcurrency = 4
+	DetailTimeout  = 8 * time.Second
 )
+
+type ddysSearchResponse struct {
+	Success bool `json:"success"`
+	Data    []struct {
+		ID       int    `json:"id"`
+		Title    string `json:"title"`
+		Aka      string `json:"aka"`
+		Slug     string `json:"slug"`
+		Year     int    `json:"year"`
+		Type     string `json:"type"`
+		TypeCode string `json:"type_code"`
+		Region   string `json:"region"`
+		URL      string `json:"url"`
+	} `json:"data"`
+	Message string `json:"message"`
+}
+
+type ddysSourcesResponse struct {
+	Success bool `json:"success"`
+	Data    struct {
+		Download []struct {
+			ID           int    `json:"id"`
+			Name         string `json:"name"`
+			URL          string `json:"url"`
+			Quality      string `json:"quality"`
+			DownloadType string `json:"download_type"`
+			Size         string `json:"size"`
+			ExtractCode  string `json:"extract_code"`
+		} `json:"download"`
+	} `json:"data"`
+	Message string `json:"message"`
+}
 
 // DdysPlugin 低端影视插件
 type DdysPlugin struct {
 	*plugin.BaseAsyncPlugin
-	debugMode    bool
-	detailCache  sync.Map // 缓存详情页结果
-	cacheTTL     time.Duration
+	debugMode   bool
+	detailCache sync.Map // 缓存详情页结果
+	cacheTTL    time.Duration
+	scraper     *cloudscraper.Scraper
 }
 
 // init 注册插件
@@ -44,11 +83,16 @@ func init() {
 // NewDdysPlugin 创建新的低端影视插件实例
 func NewDdysPlugin() *DdysPlugin {
 	debugMode := false // 生产环境关闭调试
+	scraper, err := cloudscraper.New()
+	if err != nil {
+		log.Printf("[DDYS] cloudscraper 初始化失败: %v", err)
+	}
 
 	p := &DdysPlugin{
 		BaseAsyncPlugin: plugin.NewBaseAsyncPlugin(PluginName, 1), // 标准网盘插件，启用Service层过滤
 		debugMode:       debugMode,
 		cacheTTL:        30 * time.Minute, // 详情页缓存30分钟
+		scraper:         scraper,
 	}
 
 	return p
@@ -99,7 +143,7 @@ func (p *DdysPlugin) searchImpl(client *http.Client, keyword string, ext map[str
 
 	// 第三步：关键词过滤（标准网盘插件需要过滤）
 	filteredResults := plugin.FilterResultsByKeyword(finalResults, keyword)
-	
+
 	if p.debugMode {
 		log.Printf("[DDYS] 关键词过滤后剩余 %d 个结果", len(filteredResults))
 	}
@@ -109,72 +153,245 @@ func (p *DdysPlugin) searchImpl(client *http.Client, keyword string, ext map[str
 
 // executeSearch 执行搜索请求
 func (p *DdysPlugin) executeSearch(client *http.Client, keyword string) ([]model.SearchResult, error) {
-	// 构建搜索URL
-	searchURL := fmt.Sprintf("%s%s", BaseURL, fmt.Sprintf(SearchPath, url.QueryEscape(keyword)))
+	return p.executeSuggestSearch(client, keyword)
+}
 
-	// 创建带超时的上下文
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+func (p *DdysPlugin) executeSuggestSearch(client *http.Client, keyword string) ([]model.SearchResult, error) {
+	searchURL := fmt.Sprintf(BaseURL+SearchPath, url.QueryEscape(keyword))
+	respBody, err := p.fetchAPIJSON(client, searchURL, 4*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] 搜索API请求失败: %w", p.Name(), err)
+	}
+
+	var payload ddysSearchResponse
+	if err := json.Unmarshal(respBody, &payload); err != nil {
+		return nil, fmt.Errorf("[%s] 解析搜索API失败: %w", p.Name(), err)
+	}
+	if !payload.Success {
+		if strings.TrimSpace(payload.Message) != "" {
+			return nil, fmt.Errorf("[%s] 搜索API返回失败: %s", p.Name(), payload.Message)
+		}
+		return nil, fmt.Errorf("[%s] 搜索API返回失败", p.Name())
+	}
+
+	results := make([]model.SearchResult, 0, len(payload.Data))
+	for index, item := range payload.Data {
+		title := strings.TrimSpace(item.Title)
+		if title == "" {
+			continue
+		}
+		displayTitle := title
+		if item.Year > 0 {
+			displayTitle = fmt.Sprintf("%s（%d）", title, item.Year)
+		}
+		detailURL := strings.TrimSpace(item.URL)
+		if detailURL == "" && strings.TrimSpace(item.Slug) != "" {
+			detailURL = "/movie/" + strings.TrimSpace(item.Slug)
+		}
+		if strings.HasPrefix(detailURL, "/") {
+			detailURL = BaseURL + detailURL
+		}
+		if detailURL == "" {
+			continue
+		}
+		contentParts := []string{
+			fmt.Sprintf("类型：%s", strings.TrimSpace(item.Type)),
+			fmt.Sprintf("详情页: %s", detailURL),
+		}
+		if strings.TrimSpace(item.Aka) != "" {
+			contentParts = append(contentParts, "别名："+strings.TrimSpace(item.Aka))
+		}
+		if strings.TrimSpace(item.Region) != "" {
+			contentParts = append(contentParts, "地区："+strings.TrimSpace(item.Region))
+		}
+
+		results = append(results, model.SearchResult{
+			Title:     displayTitle,
+			Content:   strings.Join(contentParts, "\n"),
+			Channel:   "",
+			MessageID: fmt.Sprintf("%s-suggest-%d", p.Name(), index+1),
+			UniqueID:  fmt.Sprintf("%s-%s-%d", p.Name(), strings.TrimSpace(item.Slug), item.ID),
+			Datetime:  time.Now(),
+			Links:     []model.Link{},
+			Tags:      []string{strings.TrimSpace(item.Type), strings.TrimSpace(item.TypeCode)},
+		})
+	}
+
+	return results, nil
+}
+
+func (p *DdysPlugin) doGet(client *http.Client, req *http.Request) (*http.Response, error) {
+	if p.scraper != nil {
+		return p.scraper.Get(req.URL.String())
+	}
+	return client.Do(req)
+}
+
+func (p *DdysPlugin) fetchAPIJSON(client *http.Client, apiURL string, directTimeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), directTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", searchURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("[%s] 创建搜索请求失败: %w", p.Name(), err)
+		return nil, fmt.Errorf("创建API请求失败: %w", err)
 	}
-
-	// 设置完整的请求头
 	req.Header.Set("User-Agent", UserAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	req.Header.Set("Cache-Control", "max-age=0")
 	req.Header.Set("Referer", BaseURL+"/")
 
-	resp, err := p.doRequestWithRetry(req, client)
+	resp, err := client.Do(req)
+	if err == nil && resp.StatusCode == http.StatusOK {
+		defer resp.Body.Close()
+		return io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	}
+	if resp != nil {
+		resp.Body.Close()
+		err = fmt.Errorf("API HTTP状态错误: %d", resp.StatusCode)
+	}
+
+	body, chromeErr := ddysFetchWithChrome(apiURL, directTimeout+8*time.Second)
+	if chromeErr != nil {
+		if err != nil {
+			return nil, fmt.Errorf("%w; Chrome兜底失败: %v", err, chromeErr)
+		}
+		return nil, chromeErr
+	}
+
+	return []byte(ddysExtractChromeResponse(body)), nil
+}
+
+func ddysFetchWithChrome(targetURL string, timeout time.Duration) (string, error) {
+	candidates := ddysChromeCandidates()
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("未找到Chrome可执行文件")
+	}
+
+	var lastErr error
+	for _, chromePath := range candidates {
+		userDataDir, err := os.MkdirTemp("", "pansou-ddys-chrome-*")
+		if err != nil {
+			return "", err
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		cmd := exec.CommandContext(ctx, chromePath,
+			"--headless=new",
+			"--disable-gpu",
+			"--disable-extensions",
+			"--disable-background-networking",
+			"--disable-dev-shm-usage",
+			"--no-sandbox",
+			"--user-data-dir="+userDataDir,
+			"--dump-dom",
+			targetURL,
+		)
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err = cmd.Run()
+		cancel()
+		_ = os.RemoveAll(userDataDir)
+
+		body := stdout.String()
+		if err == nil && strings.TrimSpace(body) != "" {
+			return body, nil
+		}
+		if ctx.Err() != nil {
+			lastErr = ctx.Err()
+		} else if err != nil {
+			lastErr = fmt.Errorf("%s: %w (%s)", chromePath, err, strings.TrimSpace(stderr.String()))
+		} else {
+			lastErr = fmt.Errorf("%s: Chrome输出为空", chromePath)
+		}
+	}
+
+	return "", lastErr
+}
+
+func ddysExtractChromeResponse(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "{") || strings.HasPrefix(raw, "[") {
+		return raw
+	}
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(raw))
 	if err != nil {
-		return nil, fmt.Errorf("[%s] 搜索请求失败: %w", p.Name(), err)
+		return raw
 	}
-	defer resp.Body.Close()
+	if pre := strings.TrimSpace(doc.Find("pre").First().Text()); pre != "" {
+		return pre
+	}
+	return strings.TrimSpace(doc.Find("body").Text())
+}
 
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("[%s] 搜索请求HTTP状态错误: %d", p.Name(), resp.StatusCode)
+func ddysChromeCandidates() []string {
+	var candidates []string
+	seen := make(map[string]struct{})
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		candidates = append(candidates, path)
 	}
 
-	// 解析HTML提取搜索结果
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("[%s] 解析搜索结果HTML失败: %w", p.Name(), err)
+	if envPath := os.Getenv("PANSOU_CHROME_PATH"); envPath != "" {
+		if _, err := os.Stat(envPath); err == nil {
+			add(envPath)
+		}
 	}
 
-	return p.parseSearchResults(doc)
+	for _, path := range []string{
+		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	} {
+		if _, err := os.Stat(path); err == nil {
+			add(path)
+		}
+	}
+
+	for _, name := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome", "msedge"} {
+		if path, err := exec.LookPath(name); err == nil {
+			add(path)
+		}
+	}
+
+	return candidates
 }
 
 // doRequestWithRetry 带重试机制的HTTP请求
 func (p *DdysPlugin) doRequestWithRetry(req *http.Request, client *http.Client) (*http.Response, error) {
 	maxRetries := 3
 	var lastErr error
-	
+
 	for i := 0; i < maxRetries; i++ {
 		if i > 0 {
 			// 指数退避重试
 			backoff := time.Duration(1<<uint(i-1)) * 200 * time.Millisecond
 			time.Sleep(backoff)
 		}
-		
+
 		// 克隆请求避免并发问题
 		reqClone := req.Clone(req.Context())
-		
+
 		resp, err := client.Do(reqClone)
 		if err == nil && resp.StatusCode == 200 {
 			return resp, nil
 		}
-		
+
 		if resp != nil {
 			resp.Body.Close()
 		}
 		lastErr = err
 	}
-	
+
 	return nil, fmt.Errorf("[%s] 重试 %d 次后仍然失败: %w", p.Name(), maxRetries, lastErr)
 }
 
@@ -334,7 +551,7 @@ func (p *DdysPlugin) fetchDetailLinks(client *http.Client, searchResults []model
 		wg.Add(1)
 		go func(r model.SearchResult) {
 			defer wg.Done()
-			semaphore <- struct{}{} // 获取信号量
+			semaphore <- struct{}{}        // 获取信号量
 			defer func() { <-semaphore }() // 释放信号量
 
 			// 从Content中提取详情页URL
@@ -409,6 +626,11 @@ func (p *DdysPlugin) fetchDetailPageLinks(client *http.Client, detailURL string)
 		}
 	}
 
+	if links := p.fetchSourceAPILinks(client, detailURL); len(links) > 0 {
+		p.detailCache.Store(detailURL, links)
+		return links
+	}
+
 	// 创建带超时的上下文
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -427,7 +649,7 @@ func (p *DdysPlugin) fetchDetailPageLinks(client *http.Client, detailURL string)
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	req.Header.Set("Referer", BaseURL+"/")
 
-	resp, err := client.Do(req)
+	resp, err := p.doGet(client, req)
 	if err != nil {
 		if p.debugMode {
 			log.Printf("[DDYS] 详情页请求失败: %v", err)
@@ -467,6 +689,82 @@ func (p *DdysPlugin) fetchDetailPageLinks(client *http.Client, detailURL string)
 	return links
 }
 
+func (p *DdysPlugin) fetchSourceAPILinks(client *http.Client, detailURL string) []model.Link {
+	slug := extractDdysSlug(detailURL)
+	if slug == "" {
+		return nil
+	}
+
+	apiURL := fmt.Sprintf("%s/api/v1/movies/%s/sources", BaseURL, url.PathEscape(slug))
+	respBody, err := p.fetchAPIJSON(client, apiURL, 4*time.Second)
+	if err != nil {
+		if p.debugMode {
+			log.Printf("[DDYS] sources API请求失败: %v", err)
+		}
+		return nil
+	}
+
+	var payload ddysSourcesResponse
+	if err := json.Unmarshal(respBody, &payload); err != nil {
+		if p.debugMode {
+			log.Printf("[DDYS] 解析sources API失败: %v", err)
+		}
+		return nil
+	}
+	if !payload.Success {
+		return nil
+	}
+
+	links := make([]model.Link, 0, len(payload.Data.Download))
+	seen := make(map[string]struct{})
+	for _, source := range payload.Data.Download {
+		rawURL := strings.TrimSpace(source.URL)
+		if rawURL == "" {
+			continue
+		}
+		if _, ok := seen[rawURL]; ok {
+			continue
+		}
+		seen[rawURL] = struct{}{}
+
+		linkType := strings.TrimSpace(source.DownloadType)
+		if linkType == "" {
+			linkType = p.determineCloudType(rawURL)
+		}
+		if linkType == "" || linkType == "others" {
+			linkType = p.determineCloudType(rawURL)
+		}
+		if linkType == "" || linkType == "others" {
+			continue
+		}
+
+		link := model.Link{
+			Type:      linkType,
+			URL:       rawURL,
+			Password:  strings.TrimSpace(source.ExtractCode),
+			WorkTitle: strings.TrimSpace(source.Name),
+		}
+		if link.WorkTitle == "" {
+			link.WorkTitle = strings.TrimSpace(source.Quality)
+		}
+		links = append(links, link)
+	}
+
+	return links
+}
+
+func extractDdysSlug(detailURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(detailURL))
+	if err != nil {
+		return ""
+	}
+	path := strings.Trim(parsed.Path, "/")
+	if !strings.HasPrefix(path, "movie/") {
+		return ""
+	}
+	return strings.Trim(strings.TrimPrefix(path, "movie/"), "/")
+}
+
 // parseNetworkDiskLinks 解析网盘链接
 func (p *DdysPlugin) parseNetworkDiskLinks(htmlContent string) []model.Link {
 	var links []model.Link
@@ -496,7 +794,7 @@ func (p *DdysPlugin) parseNetworkDiskLinks(htmlContent string) []model.Link {
 		for _, match := range matches {
 			if len(match) >= 3 {
 				url := match[1]
-				
+
 				// 去重
 				if seen[url] {
 					continue
@@ -555,7 +853,7 @@ func (p *DdysPlugin) extractPassword(content string, panURL string) string {
 	if end > len(content) {
 		end = len(content)
 	}
-	
+
 	searchArea := content[start:end]
 
 	for _, pattern := range patterns {

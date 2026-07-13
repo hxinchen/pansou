@@ -35,7 +35,7 @@ const (
 )
 
 var (
-	dataKeyRegex = regexp.MustCompile(`data-key="([0-9a-fA-F]+)"`)
+	dataKeyRegex = regexp.MustCompile(`data-key=["']([^"']+)["']`)
 
 	linkPatterns = []struct {
 		reg *regexp.Regexp

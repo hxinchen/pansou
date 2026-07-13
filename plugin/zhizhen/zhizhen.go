@@ -17,6 +17,8 @@ import (
 )
 
 const (
+	BaseURL = "https://mihdr.top"
+
 	// 默认超时时间 - 优化为更短时间
 	DefaultTimeout = 8 * time.Second
 	DetailTimeout  = 6 * time.Second
@@ -57,21 +59,21 @@ var (
 	passwordRegex = regexp.MustCompile(`\?pwd=([0-9a-zA-Z]+)`)
 
 	// 常见网盘链接的正则表达式（支持16种类型）
-	quarkLinkRegex     = regexp.MustCompile(`https?://pan\.quark\.cn/s/[0-9a-zA-Z]+`)
-	ucLinkRegex        = regexp.MustCompile(`https?://drive\.uc\.cn/s/[0-9a-zA-Z]+(\?[^"'\s]*)?`)
-	baiduLinkRegex     = regexp.MustCompile(`https?://pan\.baidu\.com/s/[0-9a-zA-Z_\-]+(\?pwd=[0-9a-zA-Z]+)?`)
-	aliyunLinkRegex    = regexp.MustCompile(`https?://(www\.)?(aliyundrive\.com|alipan\.com)/s/[0-9a-zA-Z]+`)
-	xunleiLinkRegex    = regexp.MustCompile(`https?://pan\.xunlei\.com/s/[0-9a-zA-Z_\-]+(\?pwd=[0-9a-zA-Z]+)?`)
-	tianyiLinkRegex    = regexp.MustCompile(`https?://cloud\.189\.cn/t/[0-9a-zA-Z]+`)
-	link115Regex       = regexp.MustCompile(`https?://115\.com/s/[0-9a-zA-Z]+`)
-	mobileLinkRegex    = regexp.MustCompile(`https?://caiyun\.feixin\.10086\.cn/[0-9a-zA-Z]+`)
-	weiyunLinkRegex    = regexp.MustCompile(`https?://share\.weiyun\.com/[0-9a-zA-Z]+`)
-	lanzouLinkRegex    = regexp.MustCompile(`https?://(www\.)?(lanzou[uixys]*|lan[zs]o[ux])\.(com|net|org)/[0-9a-zA-Z]+`)
+	quarkLinkRegex      = regexp.MustCompile(`https?://pan\.quark\.cn/s/[0-9a-zA-Z]+`)
+	ucLinkRegex         = regexp.MustCompile(`https?://drive\.uc\.cn/s/[0-9a-zA-Z]+(\?[^"'\s]*)?`)
+	baiduLinkRegex      = regexp.MustCompile(`https?://pan\.baidu\.com/s/[0-9a-zA-Z_\-]+(\?pwd=[0-9a-zA-Z]+)?`)
+	aliyunLinkRegex     = regexp.MustCompile(`https?://(www\.)?(aliyundrive\.com|alipan\.com)/s/[0-9a-zA-Z]+`)
+	xunleiLinkRegex     = regexp.MustCompile(`https?://pan\.xunlei\.com/s/[0-9a-zA-Z_\-]+(\?pwd=[0-9a-zA-Z]+)?`)
+	tianyiLinkRegex     = regexp.MustCompile(`https?://cloud\.189\.cn/t/[0-9a-zA-Z]+`)
+	link115Regex        = regexp.MustCompile(`https?://115\.com/s/[0-9a-zA-Z]+`)
+	mobileLinkRegex     = regexp.MustCompile(`https?://caiyun\.feixin\.10086\.cn/[0-9a-zA-Z]+`)
+	weiyunLinkRegex     = regexp.MustCompile(`https?://share\.weiyun\.com/[0-9a-zA-Z]+`)
+	lanzouLinkRegex     = regexp.MustCompile(`https?://(www\.)?(lanzou[uixys]*|lan[zs]o[ux])\.(com|net|org)/[0-9a-zA-Z]+`)
 	jianguoyunLinkRegex = regexp.MustCompile(`https?://(www\.)?jianguoyun\.com/p/[0-9a-zA-Z]+`)
-	link123Regex       = regexp.MustCompile(`https?://123pan\.com/s/[0-9a-zA-Z]+`)
-	pikpakLinkRegex    = regexp.MustCompile(`https?://mypikpak\.com/s/[0-9a-zA-Z]+`)
-	magnetLinkRegex    = regexp.MustCompile(`magnet:\?xt=urn:btih:[0-9a-fA-F]{40}`)
-	ed2kLinkRegex      = regexp.MustCompile(`ed2k://\|file\|.+\|\d+\|[0-9a-fA-F]{32}\|/`)
+	link123Regex        = regexp.MustCompile(`https?://123pan\.com/s/[0-9a-zA-Z]+`)
+	pikpakLinkRegex     = regexp.MustCompile(`https?://mypikpak\.com/s/[0-9a-zA-Z]+`)
+	magnetLinkRegex     = regexp.MustCompile(`magnet:\?xt=urn:btih:[0-9a-fA-F]{40}`)
+	ed2kLinkRegex       = regexp.MustCompile(`ed2k://\|file\|.+\|\d+\|[0-9a-fA-F]{32}\|/`)
 
 	// 缓存相关
 	detailCache = sync.Map{} // 缓存详情页解析结果
@@ -137,7 +139,7 @@ func (p *ZhizhenAsyncPlugin) searchImpl(client *http.Client, keyword string, ext
 	}
 
 	// 1. 构建搜索URL
-	searchURL := fmt.Sprintf("https://xiaomi666.fun/index.php/vod/search/wd/%s.html", url.QueryEscape(keyword))
+	searchURL := fmt.Sprintf("%s/index.php/vod/search/wd/%s.html", BaseURL, url.QueryEscape(keyword))
 
 	// 2. 创建带超时的上下文
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
@@ -156,7 +158,7 @@ func (p *ZhizhenAsyncPlugin) searchImpl(client *http.Client, keyword string, ext
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 	req.Header.Set("Cache-Control", "max-age=0")
-	req.Header.Set("Referer", "https://xiaomi666.fun/")
+	req.Header.Set("Referer", BaseURL+"/")
 
 	// 5. 发送请求（带重试机制）
 	resp, err := p.doRequestWithRetry(req, client)
@@ -286,7 +288,7 @@ func (p *ZhizhenAsyncPlugin) parseSearchItem(s *goquery.Selection, keyword strin
 	}
 
 	result.Content = strings.Join(contentParts, "\n")
-	result.Channel = "" // 插件搜索结果不设置频道名，只有Telegram频道结果才设置
+	result.Channel = ""           // 插件搜索结果不设置频道名，只有Telegram频道结果才设置
 	result.Datetime = time.Time{} // 使用零值而不是nil，参考jikepan插件标准
 
 	return result
@@ -295,29 +297,29 @@ func (p *ZhizhenAsyncPlugin) parseSearchItem(s *goquery.Selection, keyword strin
 // isValidNetworkDriveURL 检查URL是否为有效的网盘链接
 func (p *ZhizhenAsyncPlugin) isValidNetworkDriveURL(url string) bool {
 	// 过滤掉明显无效的链接
-	if strings.Contains(url, "javascript:") || 
-	   strings.Contains(url, "#") ||
-	   url == "" ||
-	   (!strings.HasPrefix(url, "http") && !strings.HasPrefix(url, "magnet:") && !strings.HasPrefix(url, "ed2k:")) {
+	if strings.Contains(url, "javascript:") ||
+		strings.Contains(url, "#") ||
+		url == "" ||
+		(!strings.HasPrefix(url, "http") && !strings.HasPrefix(url, "magnet:") && !strings.HasPrefix(url, "ed2k:")) {
 		return false
 	}
-	
+
 	// 检查是否匹配任何支持的网盘格式（16种）
 	return quarkLinkRegex.MatchString(url) ||
-		   ucLinkRegex.MatchString(url) ||
-		   baiduLinkRegex.MatchString(url) ||
-		   aliyunLinkRegex.MatchString(url) ||
-		   xunleiLinkRegex.MatchString(url) ||
-		   tianyiLinkRegex.MatchString(url) ||
-		   link115Regex.MatchString(url) ||
-		   mobileLinkRegex.MatchString(url) ||
-		   weiyunLinkRegex.MatchString(url) ||
-		   lanzouLinkRegex.MatchString(url) ||
-		   jianguoyunLinkRegex.MatchString(url) ||
-		   link123Regex.MatchString(url) ||
-		   pikpakLinkRegex.MatchString(url) ||
-		   magnetLinkRegex.MatchString(url) ||
-		   ed2kLinkRegex.MatchString(url)
+		ucLinkRegex.MatchString(url) ||
+		baiduLinkRegex.MatchString(url) ||
+		aliyunLinkRegex.MatchString(url) ||
+		xunleiLinkRegex.MatchString(url) ||
+		tianyiLinkRegex.MatchString(url) ||
+		link115Regex.MatchString(url) ||
+		mobileLinkRegex.MatchString(url) ||
+		weiyunLinkRegex.MatchString(url) ||
+		lanzouLinkRegex.MatchString(url) ||
+		jianguoyunLinkRegex.MatchString(url) ||
+		link123Regex.MatchString(url) ||
+		pikpakLinkRegex.MatchString(url) ||
+		magnetLinkRegex.MatchString(url) ||
+		ed2kLinkRegex.MatchString(url)
 }
 
 // determineLinkType 根据URL确定链接类型（支持16种类型）
@@ -469,7 +471,7 @@ func (p *ZhizhenAsyncPlugin) fetchDetailLinksAndImages(client *http.Client, item
 		atomic.AddInt64(&totalDetailTime, duration)
 	}()
 
-	detailURL := fmt.Sprintf("https://xiaomi666.fun/index.php/vod/detail/id/%s.html", itemID)
+	detailURL := fmt.Sprintf("%s/index.php/vod/detail/id/%s.html", BaseURL, itemID)
 
 	// 创建带超时的上下文
 	ctx, cancel := context.WithTimeout(context.Background(), DetailTimeout)
@@ -486,7 +488,7 @@ func (p *ZhizhenAsyncPlugin) fetchDetailLinksAndImages(client *http.Client, item
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Referer", "https://xiaomi666.fun/")
+	req.Header.Set("Referer", BaseURL+"/")
 
 	// 发送请求（带重试）
 	resp, err := p.doRequestWithRetry(req, client)
@@ -596,14 +598,14 @@ func (p *ZhizhenAsyncPlugin) GetPerformanceStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"search_requests":        totalSearchRequests,
-		"detail_page_requests":   totalDetailRequests,
-		"cache_hits":            totalCacheHits,
-		"cache_misses":          totalCacheMisses,
-		"cache_hit_rate":        cacheHitRate,
-		"avg_search_time_ms":    avgSearchTime,
-		"avg_detail_time_ms":    avgDetailTime,
-		"total_search_time_ns":  totalSearchTime,
-		"total_detail_time_ns":  totalDetailTime,
+		"search_requests":      totalSearchRequests,
+		"detail_page_requests": totalDetailRequests,
+		"cache_hits":           totalCacheHits,
+		"cache_misses":         totalCacheMisses,
+		"cache_hit_rate":       cacheHitRate,
+		"avg_search_time_ms":   avgSearchTime,
+		"avg_detail_time_ms":   avgDetailTime,
+		"total_search_time_ns": totalSearchTime,
+		"total_detail_time_ns": totalDetailTime,
 	}
 }

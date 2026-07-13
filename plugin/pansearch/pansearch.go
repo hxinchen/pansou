@@ -1,20 +1,28 @@
 package pansearch
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	cloudscraper "github.com/Advik-B/cloudscraper/lib"
+	"github.com/PuerkitoBio/goquery"
 	"pansou/model"
 	"pansou/plugin"
 	"pansou/util/json"
-	"sync/atomic"
 )
 
 // 预编译正则表达式
@@ -102,6 +110,7 @@ type PanSearchAsyncPlugin struct {
 	maxResults    int
 	maxConcurrent int
 	retries       int
+	scraper       *cloudscraper.Scraper
 }
 
 // WorkerPool 工作池结构
@@ -212,28 +221,16 @@ func (wp *WorkerPool) Close() {
 // NewPanSearchPlugin 创建新的盘搜异步插件
 func NewPanSearchPlugin() *PanSearchAsyncPlugin {
 	timeout := DefaultTimeout
-	maxConcurrent := MaxConcurrent
+	scraper, _ := cloudscraper.New()
 
-	p := &PanSearchAsyncPlugin{
+	return &PanSearchAsyncPlugin{
 		BaseAsyncPlugin: plugin.NewBaseAsyncPlugin("pansearch", 3),
 		timeout:         timeout,
 		maxResults:      MaxResults,
-		maxConcurrent:   maxConcurrent,
+		maxConcurrent:   MaxConcurrent,
 		retries:         MaxRetries,
+		scraper:         scraper,
 	}
-
-	// 初始化时预热获取 buildId
-	go func() {
-		_, err := p.getBuildId()
-		if err != nil {
-			// fmt.Printf("预热获取 buildId 失败: %v\n", err)
-		}
-	}()
-
-	// 启动后台 buildId 更新器
-	go p.startBuildIdUpdater()
-
-	return p
 }
 
 // startBuildIdUpdater 启动一个定期更新 buildId 的后台协程
@@ -482,261 +479,364 @@ func (p *PanSearchAsyncPlugin) SearchWithResult(keyword string, ext map[string]i
 
 // doSearch 执行具体的搜索逻辑
 func (p *PanSearchAsyncPlugin) doSearch(client *http.Client, keyword string, ext map[string]interface{}) ([]model.SearchResult, error) {
-	// 获取API基础URL
-	baseURL, err := p.getBaseURL(client)
+	if cached, ok := searchResultCache.Load(keyword); ok {
+		if cache, ok := cached.(cachedResponse); ok && time.Since(cache.timestamp) < cacheTTL {
+			return cache.results, nil
+		}
+	}
+
+	results, err := p.fetchHTMLSearchResults(client, keyword)
 	if err != nil {
-		return nil, fmt.Errorf("获取API基础URL失败: %w", err)
+		return nil, fmt.Errorf("[%s] 获取搜索页失败: %w", p.Name(), err)
 	}
 
-	// 1. 发起首次请求获取total和第一页数据
-	firstPageResults, total, err := p.fetchFirstPage(keyword, baseURL, client)
-	if err != nil {
-		// 如果返回404错误，可能是buildId过期，尝试强制刷新buildId
-		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "Not Found") {
-			fmt.Println("检测到404错误，buildId可能已过期，尝试强制刷新")
-
-			// 强制刷新buildId
-			buildIdMutex.Lock()
-			buildIdCache = ""              // 清空缓存
-			buildIdCacheTime = time.Time{} // 重置缓存时间
-			buildIdMutex.Unlock()
-
-			// 重新获取buildId
-			baseURL, err = p.getBaseURL(client)
-			if err != nil {
-				return nil, fmt.Errorf("刷新buildId失败: %w", err)
-			}
-
-			// 重试请求
-			firstPageResults, total, err = p.fetchFirstPage(keyword, baseURL, client)
-			if err != nil {
-				return nil, fmt.Errorf("刷新buildId后获取首页仍然失败: %w", err)
-			}
-
-			// 成功刷新后，触发后台更新以保持最新状态
-			go p.updateBuildId()
-		} else {
-			return nil, fmt.Errorf("获取首页失败: %w", err)
-		}
-	}
-
-	allResults := firstPageResults
-
-	// 2. 计算需要的页数，但限制在最大结果数内和API最大页数内
-	remainingResults := min(total-PageSize, p.maxResults-PageSize)
-	if remainingResults <= 0 {
-		results := p.convertResults(allResults, keyword)
-
-		// 缓存结果
-		searchResultCache.Store(keyword, cachedResponse{
-			results:   results,
-			timestamp: time.Now(),
-		})
-
-		return results, nil
-	}
-
-	// 计算需要的页数，考虑API的100页限制
-	neededPages := min((remainingResults+PageSize-1)/PageSize, MaxAPIPages-1) // 向上取整，减1是因为第一页已经获取
-
-	// 如果只需要获取少量页面，直接返回
-	if neededPages <= 0 {
-		results := p.convertResults(allResults, keyword)
-
-		// 缓存结果
-		searchResultCache.Store(keyword, cachedResponse{
-			results:   results,
-			timestamp: time.Now(),
-		})
-
-		return results, nil
-	}
-
-	// 根据实际页数确定并发数，但不超过最大并发数
-	actualConcurrent := min(neededPages, p.maxConcurrent)
-
-	// 工作池是单次请求的局部资源，避免并发请求共享状态
-	pool := NewWorkerPool(actualConcurrent, neededPages)
-
-	// 创建上下文用于管理所有请求
-	ctx, cancel := context.WithTimeout(context.Background(), p.timeout*2)
-	defer cancel()
-
-	// 创建一个标志，用于标记是否需要刷新buildId
-	needRefreshBuildId := &atomic.Bool{}
-
-	// 启动工作池
-	pool.Start(ctx, func(ctx context.Context, task Task) (TaskResult, error) {
-		var pageResults []PanSearchItem
-		var err error
-
-		for retry := 0; retry <= p.retries; retry++ {
-			// 如果有其他协程发现buildId过期，等待刷新完成
-			if needRefreshBuildId.Load() {
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-
-			pageResults, err = p.fetchPage(task.keyword, task.offset, task.baseURL)
-			if err == nil {
-				break
-			}
-
-			// 如果返回404错误，可能是buildId过期
-			if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "Not Found") {
-				// 标记需要刷新buildId
-				if !needRefreshBuildId.Load() {
-					needRefreshBuildId.Store(true)
-					// 在一个新的协程中刷新buildId
-					go func() {
-						buildIdMutex.Lock()
-						buildIdCache = ""              // 清空缓存
-						buildIdCacheTime = time.Time{} // 重置缓存时间
-						buildIdMutex.Unlock()
-
-						// 重新获取buildId
-						newBuildId, err := p.getBuildId()
-						if err == nil && newBuildId != "" {
-							// 更新baseURL
-							task.baseURL = fmt.Sprintf(BaseURLTemplate, newBuildId)
-							fmt.Printf("成功刷新buildId: %s\n", newBuildId)
-						}
-
-						// 重置标志
-						needRefreshBuildId.Store(false)
-					}()
-				}
-
-				// 等待刷新完成
-				for i := 0; i < 10 && needRefreshBuildId.Load(); i++ {
-					time.Sleep(100 * time.Millisecond)
-				}
-
-				// 如果还在刷新，报告错误
-				if needRefreshBuildId.Load() {
-					return TaskResult{}, fmt.Errorf("404错误，buildId可能已过期: %w", err)
-				}
-
-				// 刷新完成后重试
-				continue
-			}
-
-			if retry < p.retries {
-				// 指数退避重试
-				select {
-				case <-time.After(time.Duration(1<<retry) * 100 * time.Millisecond):
-					// 继续重试
-				case <-ctx.Done():
-					return TaskResult{}, ctx.Err()
-				}
-			}
-		}
-
-		if err != nil {
-			return TaskResult{}, fmt.Errorf("获取偏移量 %d 的结果失败: %w", task.offset, err)
-		}
-
-		return TaskResult{offset: task.offset, results: pageResults}, nil
-	})
-
-	// 提交任务计数器
-	submittedTasks := 0
-
-	// 提交所有任务
-	for i := 0; i < neededPages; i++ {
-		// 检查上下文是否已取消
-		select {
-		case <-ctx.Done():
-			// 上下文已取消，停止提交任务
-			goto CollectResults
-		default:
-			// 继续执行
-		}
-
-		offset := PageSize + i*PageSize
-		if offset < p.maxResults {
-			task := Task{
-				keyword: keyword,
-				offset:  offset,
-				baseURL: baseURL,
-			}
-
-			if !pool.Submit(task) {
-				fmt.Printf("无法提交任务，工作池可能已关闭\n")
-				goto CollectResults
-			}
-
-			submittedTasks++
-		}
-	}
-
-CollectResults:
-	// 关闭任务提交通道
-	go pool.Close()
-
-	// 收集结果
-	resultCount := 0
-	errorCount := 0
-	var lastError error
-
-	// 使用select非阻塞地收集结果和错误
-	for resultCount+errorCount < submittedTasks {
-		select {
-		case result, ok := <-pool.results:
-			if !ok {
-				// 结果通道已关闭
-				goto ProcessResults
-			}
-			allResults = append(allResults, result.results...)
-			resultCount++
-
-		case err, ok := <-pool.errors:
-			if !ok {
-				// 错误通道已关闭
-				goto ProcessResults
-			}
-			errorCount++
-			lastError = err
-
-		case <-ctx.Done():
-			// 上下文超时，返回已收集的结果
-			results := p.convertResults(allResults, keyword)
-
-			// 缓存结果（即使超时也缓存已获取的结果）
-			searchResultCache.Store(keyword, cachedResponse{
-				results:   results,
-				timestamp: time.Now(),
-			})
-
-			return results, fmt.Errorf("搜索超时: %w", ctx.Err())
-		}
-	}
-
-ProcessResults:
-	// 如果所有请求都失败且没有获得首页以外的结果，则返回错误
-	if submittedTasks > 0 && errorCount == submittedTasks && len(allResults) == len(firstPageResults) {
-		results := p.convertResults(allResults, keyword)
-
-		// 缓存结果（即使有错误也缓存已获取的结果）
-		searchResultCache.Store(keyword, cachedResponse{
-			results:   results,
-			timestamp: time.Now(),
-		})
-
-		return results, fmt.Errorf("所有后续页面请求失败: %v", lastError)
-	}
-
-	// 4. 去重和格式化结果
-	uniqueResults := p.deduplicateItems(allResults)
-	results := p.convertResults(uniqueResults, keyword)
-
-	// 缓存结果
 	searchResultCache.Store(keyword, cachedResponse{
 		results:   results,
 		timestamp: time.Now(),
 	})
 
 	return results, nil
+}
+
+func (p *PanSearchAsyncPlugin) fetchHTMLSearchResults(client *http.Client, keyword string) ([]model.SearchResult, error) {
+	reqURL := fmt.Sprintf("%s?keyword=%s", WebsiteURL, url.QueryEscape(keyword))
+	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	req.Header.Set("Referer", "https://www.pansearch.me/")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Cache-Control", "no-cache")
+
+	resp, err := p.doHTMLSearchRequest(client, req)
+	if err == nil && resp.StatusCode == http.StatusOK {
+		defer resp.Body.Close()
+		doc, err := goquery.NewDocumentFromReader(io.LimitReader(resp.Body, 4<<20))
+		if err != nil {
+			return nil, fmt.Errorf("解析HTML失败: %w", err)
+		}
+		return p.parseHTMLResults(doc, keyword), nil
+	}
+
+	if resp != nil {
+		err = fmt.Errorf("服务器返回非200状态码: %d", resp.StatusCode)
+		resp.Body.Close()
+	}
+
+	body, chromeErr := fetchPanSearchHTMLWithChrome(reqURL, p.timeout+10*time.Second)
+	if chromeErr != nil {
+		if err != nil {
+			return nil, fmt.Errorf("请求失败: %w; Chrome兜底失败: %v", err, chromeErr)
+		}
+		return nil, fmt.Errorf("Chrome兜底失败: %w", chromeErr)
+	}
+
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("解析Chrome HTML失败: %w", err)
+	}
+	return p.parseHTMLResults(doc, keyword), nil
+}
+
+func (p *PanSearchAsyncPlugin) doHTMLSearchRequest(client *http.Client, req *http.Request) (*http.Response, error) {
+	resp, err := client.Do(req)
+	if err == nil && (resp.StatusCode == http.StatusOK || p.scraper == nil) {
+		return resp, nil
+	}
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if p.scraper == nil {
+		return resp, err
+	}
+	return p.scraper.Get(req.URL.String())
+}
+
+func fetchPanSearchHTMLWithChrome(targetURL string, timeout time.Duration) (string, error) {
+	candidates := panSearchChromeCandidates()
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("未找到Chrome可执行文件")
+	}
+
+	var lastErr error
+	for _, chromePath := range candidates {
+		userDataDir, err := os.MkdirTemp("", "pansou-pansearch-chrome-*")
+		if err != nil {
+			return "", err
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		cmd := exec.CommandContext(ctx, chromePath,
+			"--headless=new",
+			"--disable-gpu",
+			"--disable-extensions",
+			"--disable-background-networking",
+			"--disable-dev-shm-usage",
+			"--no-sandbox",
+			"--user-data-dir="+userDataDir,
+			"--dump-dom",
+			targetURL,
+		)
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err = cmd.Run()
+		cancel()
+		_ = os.RemoveAll(userDataDir)
+
+		body := stdout.String()
+		if err == nil && strings.Contains(body, "<html") {
+			return body, nil
+		}
+		if ctx.Err() != nil {
+			lastErr = ctx.Err()
+		} else if err != nil {
+			lastErr = fmt.Errorf("%s: %w (%s)", chromePath, err, strings.TrimSpace(stderr.String()))
+		} else {
+			lastErr = fmt.Errorf("%s: Chrome输出不是HTML", chromePath)
+		}
+	}
+
+	return "", lastErr
+}
+
+func panSearchChromeCandidates() []string {
+	var candidates []string
+	seen := make(map[string]struct{})
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		candidates = append(candidates, path)
+	}
+
+	if envPath := os.Getenv("PANSOU_CHROME_PATH"); envPath != "" {
+		if _, err := os.Stat(envPath); err == nil {
+			add(envPath)
+		}
+	}
+
+	for _, path := range []string{
+		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+		`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	} {
+		if _, err := os.Stat(path); err == nil {
+			add(path)
+		}
+	}
+
+	for _, name := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome", "msedge"} {
+		if path, err := exec.LookPath(name); err == nil {
+			add(path)
+		}
+	}
+
+	return candidates
+}
+
+func (p *PanSearchAsyncPlugin) parseHTMLResults(doc *goquery.Document, keyword string) []model.SearchResult {
+	results := make([]model.SearchResult, 0, 20)
+	seen := make(map[string]struct{})
+
+	doc.Find("a.resource-link[href]").EachWithBreak(func(index int, s *goquery.Selection) bool {
+		rawURL, _ := s.Attr("href")
+		rawURL = normalizePanSearchURL(rawURL)
+		linkType := panSearchLinkType(rawURL)
+		if rawURL == "" || linkType == "" {
+			return true
+		}
+		if _, ok := seen[rawURL]; ok {
+			return true
+		}
+		seen[rawURL] = struct{}{}
+
+		contentSelection := s.Closest("div.whitespace-pre-wrap")
+		content := cleanPanSearchText(contentSelection.Text())
+		if content == "" {
+			content = cleanPanSearchText(s.Parent().Text())
+		}
+		if content == "" {
+			content = rawURL
+		}
+
+		title := extractHTMLResultTitle(content, s.Text(), keyword)
+		cardText := cleanPanSearchText(s.Closest("div.flex-1").Text())
+		if cardText == "" {
+			cardText = content
+		}
+
+		result := model.SearchResult{
+			MessageID: fmt.Sprintf("pansearch-html-%s", shortHash(rawURL)),
+			UniqueID:  fmt.Sprintf("pansearch-%s", shortHash(title+"|"+rawURL)),
+			Channel:   "",
+			Datetime:  parsePanSearchTime(cardText),
+			Title:     title,
+			Content:   content,
+			Links: []model.Link{{
+				Type:     linkType,
+				URL:      rawURL,
+				Password: extractPanSearchPassword(rawURL, cardText),
+			}},
+		}
+		results = append(results, result)
+
+		return len(results) < p.maxResults
+	})
+
+	return plugin.FilterResultsByKeyword(results, keyword)
+}
+
+func normalizePanSearchURL(raw string) string {
+	raw = strings.TrimSpace(html.UnescapeString(raw))
+	raw = strings.ReplaceAll(raw, "&amp;", "&")
+	if raw == "" || strings.Contains(raw, "<") || strings.Contains(raw, "...") {
+		return ""
+	}
+	if strings.HasPrefix(raw, "//") {
+		raw = "https:" + raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ""
+	}
+	return parsed.String()
+}
+
+func panSearchLinkType(raw string) string {
+	lowerURL := strings.ToLower(raw)
+	switch {
+	case strings.Contains(lowerURL, "pan.quark.cn"):
+		return "quark"
+	case strings.Contains(lowerURL, "drive.uc.cn"):
+		return "uc"
+	case strings.Contains(lowerURL, "pan.baidu.com"):
+		return "baidu"
+	case strings.Contains(lowerURL, "pan.xunlei.com"):
+		return "xunlei"
+	case strings.Contains(lowerURL, "aliyundrive.com") || strings.Contains(lowerURL, "alipan.com"):
+		return "aliyun"
+	case strings.Contains(lowerURL, "cloud.189.cn") || strings.Contains(lowerURL, "content.21cn.com"):
+		return "tianyi"
+	case strings.Contains(lowerURL, "115.com") || strings.Contains(lowerURL, "115cdn.com") || strings.Contains(lowerURL, "anxia.com"):
+		return "115"
+	case strings.Contains(lowerURL, "123pan.com") || strings.Contains(lowerURL, "123pan.cn") ||
+		strings.Contains(lowerURL, "123684.com") || strings.Contains(lowerURL, "123685.com") ||
+		strings.Contains(lowerURL, "123912.com") || strings.Contains(lowerURL, "123592.com") ||
+		strings.Contains(lowerURL, "123865.com"):
+		return "123"
+	case strings.Contains(lowerURL, "caiyun.139.com"):
+		return "mobile"
+	case strings.Contains(lowerURL, "mypikpak.com"):
+		return "pikpak"
+	default:
+		return ""
+	}
+}
+
+func extractPanSearchPassword(rawURL, contextText string) string {
+	if parsed, err := url.Parse(rawURL); err == nil {
+		if pwd := strings.TrimSpace(parsed.Query().Get("pwd")); pwd != "" {
+			return pwd
+		}
+	}
+
+	for _, pattern := range []string{`(?i)(?:提取码|密码|pwd|code)[:：\s]*([A-Za-z0-9]{4,8})`, `\?pwd=([A-Za-z0-9]+)`} {
+		re := regexp.MustCompile(pattern)
+		if matches := re.FindStringSubmatch(contextText); len(matches) > 1 {
+			return strings.TrimSpace(matches[1])
+		}
+	}
+
+	return ""
+}
+
+func extractHTMLResultTitle(content, linkText, keyword string) string {
+	linkText = strings.TrimSpace(linkText)
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		line = cleanPanSearchText(line)
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, linkText) || strings.Contains(line, "http") {
+			if idx := strings.Index(line, linkText); idx >= 0 {
+				line = line[:idx]
+			} else if idx := strings.Index(line, "http"); idx >= 0 {
+				line = line[:idx]
+			}
+			line = regexp.MustCompile(`^\s*\d+[、.．]\s*`).ReplaceAllString(line, "")
+			line = strings.TrimRight(line, ":：;； ")
+			line = cleanPanSearchText(line)
+			if line != "" {
+				return line
+			}
+		}
+	}
+
+	for _, line := range lines {
+		line = cleanPanSearchText(line)
+		if strings.HasPrefix(line, "名称：") {
+			title := strings.TrimSpace(strings.TrimPrefix(line, "名称："))
+			if title != "" {
+				return title
+			}
+		}
+	}
+
+	if keyword = strings.TrimSpace(keyword); keyword != "" {
+		return keyword
+	}
+	return "PanSearch资源"
+}
+
+func cleanPanSearchText(text string) string {
+	text = html.UnescapeString(text)
+	text = strings.ReplaceAll(text, "\u00a0", " ")
+	lines := strings.Split(text, "\n")
+	cleaned := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "展开" {
+			continue
+		}
+		cleaned = append(cleaned, strings.Join(strings.Fields(line), " "))
+	}
+	return strings.TrimSpace(strings.Join(cleaned, "\n"))
+}
+
+func parsePanSearchTime(text string) time.Time {
+	re := regexp.MustCompile(`发布时间[:：]\s*(\d{4}-\d{2}-\d{2})`)
+	matches := re.FindStringSubmatch(text)
+	if len(matches) < 2 {
+		return time.Time{}
+	}
+	parsed, err := time.Parse("2006-01-02", matches[1])
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
+}
+
+func shortHash(input string) string {
+	sum := sha1.Sum([]byte(input))
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 // fetchFirstPage 获取第一页结果和总数

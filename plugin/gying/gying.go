@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"html"
 	"io"
 	"io/ioutil"
 	"math/big"
@@ -41,21 +42,30 @@ import (
 
 // 插件配置参数
 const (
-	MaxConcurrentUsers   = 10    // 最多使用的用户数
-	MaxConcurrentDetails = 50    // 最大并发详情请求数
+	MaxConcurrentUsers   = 3     // 最多尝试的用户数
+	MaxConcurrentDetails = 4     // 最大并发详情请求数
+	MaxSearchSuggestions = 10    // 单次最多解析的搜索建议数量
 	DebugLog             = false // 调试日志开关（排查问题时改为true）
 )
 
 // 默认账户配置（可通过Web界面添加更多账户）
 // 用户数据会保存到文件，重启后自动恢复
 const (
-	DefaultGyingBaseURL = "https://www.gying.net"
+	DefaultGyingBaseURL = "https://www.xn--wcv59z.com"
 	GyingConfigFileName = "gying_config.json"
 )
 
+var legacyGyingBaseURLAliases = map[string]string{
+	"https://www.gying.net": DefaultGyingBaseURL,
+	"http://www.gying.net":  DefaultGyingBaseURL,
+	"https://gying.net":     DefaultGyingBaseURL,
+	"http://gying.net":      DefaultGyingBaseURL,
+}
+
 var (
 	challengeJSONPattern  = regexp.MustCompile(`(?s)const\s+json\s*=\s*(\{.*?\})\s*;\s*const\s+jss\s*=`)
-	searchDataPattern     = regexp.MustCompile(`(?s)_obj\s*\.\s*search\s*=\s*(\{.*?\})\s*;`)
+	dataPanPattern        = regexp.MustCompile(`(?is)data-pan\s*=\s*(?:"([^"]*)"|'([^']*)')`)
+	dataMagnetPattern     = regexp.MustCompile(`(?is)data-magnet\s*=\s*(?:"([^"]*)"|'([^']*)')`)
 	accessCodeBlockRegex  = regexp.MustCompile(`[（(]\s*访问码[:：]\s*[^)）]+[)）]`)
 	yearSuffixRegex       = regexp.MustCompile(`[（(]\d{4}[)）]`)
 	baiduLinkRegex        = regexp.MustCompile(`https?://pan\.baidu\.com/s/[a-zA-Z0-9_-]+(?:\?pwd=[a-zA-Z0-9]{4})?`)
@@ -244,7 +254,7 @@ const HTMLTemplate = `<!DOCTYPE html>
 
             <div class="form-group">
                 <label>站点地址</label>
-                <input type="text" id="base-url" placeholder="例如: https://www.gying.net">
+                <input type="text" id="base-url" placeholder="例如: https://www.xn--wcv59z.com">
             </div>
             <button class="btn btn-primary" onclick="saveBaseURL()">保存站点地址</button>
             <p style="margin-top: 10px; font-size: 12px; color: #666;">
@@ -507,20 +517,30 @@ type User struct {
 	LastAccessAt      time.Time `json:"last_access_at"`
 }
 
-// SearchData 搜索页面JSON数据结构
-type SearchData struct {
-	Q  string   `json:"q"`  // 搜索关键词
-	WD []string `json:"wd"` // 分词
-	N  string   `json:"n"`  // 结果数量
-	L  struct {
-		Title  []string `json:"title"`  // 标题数组
-		Year   []int    `json:"year"`   // 年份数组
-		D      []string `json:"d"`      // 类型数组（mv/ac/tv）
-		I      []string `json:"i"`      // 资源ID数组
-		Info   []string `json:"info"`   // 信息数组
-		Daoyan []string `json:"daoyan"` // 导演数组
-		Zhuyan []string `json:"zhuyan"` // 主演数组
-	} `json:"l"`
+// SearchSuggestItem 新站点搜索建议接口返回的影视条目
+type SearchSuggestItem struct {
+	Title string `json:"title"`
+	ID    string `json:"id"`
+	Year  int    `json:"year"`
+	Type  string `json:"type"`
+	Dir   string `json:"dir"`
+	EName string `json:"ename"`
+	Score string `json:"score"`
+}
+
+type PanResource struct {
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Password string `json:"password"`
+	Size     string `json:"size"`
+	Provider string `json:"provider"`
+}
+
+type MagnetResource struct {
+	Name   string `json:"name"`
+	Magnet string `json:"magnet"`
+	Size   string `json:"size"`
+	Source string `json:"source"`
 }
 
 // DetailData 详情接口JSON数据结构
@@ -544,6 +564,7 @@ type DetailData struct {
 			K []interface{} `json:"k"`
 			N []string      `json:"n"` // 更新时间
 		} `json:"list"`
+		Key string `json:"key"`
 	} `json:"downlist"`
 	Panlist struct {
 		ID    []string `json:"id"`
@@ -554,7 +575,14 @@ type DetailData struct {
 		User  []string `json:"user"`  // 分享用户
 		Time  []string `json:"time"`  // 分享时间
 		TName []string `json:"tname"` // 网盘类型名称
+		Key   string   `json:"key"`
 	} `json:"panlist"`
+	Sort            []int            `json:"sort"`
+	ID              string           `json:"-"`
+	Dir             string           `json:"-"`
+	PanResources    []PanResource    `json:"-"`
+	MagnetResources []MagnetResource `json:"-"`
+	FetchedAt       time.Time        `json:"-"`
 }
 
 type ChallengePageData struct {
@@ -580,7 +608,7 @@ type GyingConfig struct {
 func init() {
 	newPlugin := func() plugin.AsyncSearchPlugin {
 		return &GyingPlugin{
-			BaseAsyncPlugin: plugin.NewBaseAsyncPlugin("gying", 3),
+			BaseAsyncPlugin: plugin.NewBaseAsyncPluginWithFilter("gying", 3, true),
 		}
 	}
 	plugin.RegisterGlobalPluginFactory("gying", newPlugin)
@@ -637,7 +665,7 @@ func (p *GyingPlugin) setBaseURL(baseURL string) {
 }
 
 func (p *GyingPlugin) getLoginPageURL() string {
-	return p.getBaseURL()
+	return p.getBaseURL() + "/user/login"
 }
 
 func (p *GyingPlugin) getLoginAPIURL() string {
@@ -645,7 +673,7 @@ func (p *GyingPlugin) getLoginAPIURL() string {
 }
 
 func (p *GyingPlugin) getWarmupDetailURL() string {
-	return p.getBaseURL() + "/mv/wkMn"
+	return p.getBaseURL() + "/mv/yX3p"
 }
 
 func (p *GyingPlugin) loadConfig() error {
@@ -671,6 +699,10 @@ func (p *GyingPlugin) loadConfig() error {
 	baseURL, err := normalizeBaseURL(config.BaseURL)
 	if err != nil {
 		return err
+	}
+	if migratedURL, ok := legacyGyingBaseURLAliases[baseURL]; ok {
+		baseURL = migratedURL
+		_ = p.saveConfig(baseURL)
 	}
 	p.setBaseURL(baseURL)
 	return nil
@@ -1935,6 +1967,45 @@ func (p *GyingPlugin) requestWithChallengeRetry(scraper *cloudscraper.Scraper, m
 	return nil, 0, nil, fmt.Errorf("请求重试次数已耗尽")
 }
 
+func parseLoginFailure(body []byte) error {
+	bodyText := strings.TrimSpace(string(body))
+	if bodyText == "" {
+		return nil
+	}
+
+	var loginResp map[string]interface{}
+	if err := json.Unmarshal(body, &loginResp); err != nil {
+		return nil
+	}
+
+	msg := strings.TrimSpace(fmt.Sprint(loginResp["msg"]))
+	codeRaw, hasCode := loginResp["code"]
+	if !hasCode {
+		if msg != "" && msg != "<nil>" {
+			return fmt.Errorf("登录失败: %s", msg)
+		}
+		return nil
+	}
+
+	codeStr := strings.TrimSpace(fmt.Sprint(codeRaw))
+	if codeStr == "" || codeStr == "<nil>" {
+		return nil
+	}
+	codeValue, err := strconv.Atoi(codeStr)
+	if err != nil {
+		return nil
+	}
+
+	if codeValue == 0 || codeValue >= 400 {
+		if msg == "" || msg == "<nil>" {
+			msg = fmt.Sprintf("code=%d", codeValue)
+		}
+		return fmt.Errorf("登录失败: %s", msg)
+	}
+
+	return nil
+}
+
 // createScraperWithCookies 创建一个带有指定cookies的cloudscraper实例
 // 使用反射访问内部的http.Client并设置cookies到cookiejar
 // 关键：禁用session refresh以防止cookies被清空
@@ -2043,9 +2114,9 @@ func parseCookieString(cookieStr string) map[string]string {
 // doLogin 执行登录，返回scraper实例和cookie字符串
 //
 // 登录流程（3步）：
-//  1. GET登录页 (https://www.gying.net/user/login/) → 获取PHPSESSID
-//  2. POST登录  (https://www.gying.net/user/login)  → 获取BT_auth、BT_cookietime等认证cookies
-//  3. GET详情页 (https://www.gying.net/mv/wkMn)     → 触发防爬cookies (vrg_sc、vrg_go等)
+//  1. GET登录页 (/user/login) → 获取初始Cookie
+//  2. POST登录 (/user/login)  → 获取认证Cookie
+//  3. GET详情页 (/mv/yX3p)    → 验证登录态并触发防爬Cookie
 //
 // 返回: (*cloudscraper.Scraper, cookie字符串, error)
 func (p *GyingPlugin) doLogin(username, password string) (*cloudscraper.Scraper, string, error) {
@@ -2112,14 +2183,17 @@ func (p *GyingPlugin) doLogin(username, password string) (*cloudscraper.Scraper,
 
 	// ========== 步骤2: POST登录 (获取认证cookies) ==========
 	loginURL := p.getLoginAPIURL()
-	postData := fmt.Sprintf("code=&siteid=1&dosubmit=1&cookietime=10506240&username=%s&password=%s",
-		url.QueryEscape(username),
-		url.QueryEscape(password))
+	form := url.Values{}
+	form.Set("username", username)
+	form.Set("password", password)
+	form.Set("cookietime", "10506240")
+	form.Set("dosubmit", "1")
+	postData := form.Encode()
 
 	if DebugLog {
 		fmt.Printf("[Gying] 步骤2: POST登录\n")
 		fmt.Printf("[Gying] 登录URL: %s\n", loginURL)
-		fmt.Printf("[Gying] POST数据: code=&siteid=1&dosubmit=1&cookietime=10506240&username=%s&password=<len:%d>\n",
+		fmt.Printf("[Gying] POST数据: cookietime=10506240&dosubmit=1&username=%s&password=<len:%d>\n",
 			url.QueryEscape(username), len(password))
 	}
 
@@ -2136,59 +2210,15 @@ func (p *GyingPlugin) doLogin(username, password string) (*cloudscraper.Scraper,
 
 	if DebugLog {
 		fmt.Printf("[Gying] 响应状态码: %d\n", statusCode)
-	}
-
-	// 读取响应
-	if DebugLog {
 		fmt.Printf("[Gying] 响应内容: %s\n", string(body))
 	}
 
-	var loginResp map[string]interface{}
-	if err := json.Unmarshal(body, &loginResp); err != nil {
-		if DebugLog {
-			fmt.Printf("[Gying] JSON解析失败: %v\n", err)
-		}
-		return nil, "", fmt.Errorf("JSON解析失败: %w, 响应内容: %s", err, string(body))
+	if statusCode >= http.StatusBadRequest {
+		return nil, "", fmt.Errorf("登录失败: HTTP %d", statusCode)
 	}
 
-	if DebugLog {
-		fmt.Printf("[Gying] 解析后的响应: %+v\n", loginResp)
-		fmt.Printf("[Gying] code字段类型: %T, 值: %v\n", loginResp["code"], loginResp["code"])
-	}
-
-	// 检查登录结果（兼容多种类型：int、float64、json.Number、string）
-	var codeValue int
-	codeInterface := loginResp["code"]
-
-	switch v := codeInterface.(type) {
-	case int:
-		codeValue = v
-	case float64:
-		codeValue = int(v)
-	case int64:
-		codeValue = int(v)
-	default:
-		// 尝试转换为字符串再解析
-		codeStr := fmt.Sprintf("%v", codeInterface)
-		parsed, err := strconv.Atoi(codeStr)
-		if err != nil {
-			if DebugLog {
-				fmt.Printf("[Gying] 无法解析code字段: %T, 值: %v, 错误: %v\n", codeInterface, codeInterface, err)
-			}
-			return nil, "", fmt.Errorf("无法解析code字段，类型: %T, 值: %v", codeInterface, codeInterface)
-		}
-		codeValue = parsed
-	}
-
-	if DebugLog {
-		fmt.Printf("[Gying] 解析后的code值: %d\n", codeValue)
-	}
-
-	if codeValue != 200 {
-		if DebugLog {
-			fmt.Printf("[Gying] 登录失败: code=%d (期望200)\n", codeValue)
-		}
-		return nil, "", fmt.Errorf("登录失败: code=%d, 响应=%s", codeValue, string(body))
+	if loginErr := parseLoginFailure(body); loginErr != nil {
+		return nil, "", loginErr
 	}
 
 	// ========== 步骤3: GET详情页 (触发防爬cookies如vrg_sc、vrg_go等) ==========
@@ -2196,7 +2226,7 @@ func (p *GyingPlugin) doLogin(username, password string) (*cloudscraper.Scraper,
 		fmt.Printf("[Gying] 步骤3: GET详情页收集完整Cookie\n")
 	}
 
-	_, warmupStatus, warmupHeaders, err := p.requestWithChallengeRetry(scraper, http.MethodGet, p.getWarmupDetailURL(), "", "")
+	warmupBody, warmupStatus, warmupHeaders, err := p.requestWithChallengeRetry(scraper, http.MethodGet, p.getWarmupDetailURL(), "", "")
 	if err == nil {
 		if DebugLog {
 			fmt.Printf("[Gying] 详情页状态码: %d\n", warmupStatus)
@@ -2205,11 +2235,20 @@ func (p *GyingPlugin) doLogin(username, password string) (*cloudscraper.Scraper,
 		collectSetCookies(warmupHeaders, cookieMap)
 		logSetCookiesForDebug(warmupHeaders, "[Gying]   详情页Cookie: %s=%s\n", 30)
 	}
+	if err != nil {
+		return nil, "", fmt.Errorf("登录态验证失败: %w", err)
+	}
+	if warmupStatus == http.StatusForbidden || isLoginShell(warmupBody) {
+		return nil, "", fmt.Errorf("登录失败: 未获得有效会话")
+	}
 
 	// 构建cookie字符串
 	cookieStr, err := p.exportCookies(scraper, p.getBaseURL())
 	if err != nil {
 		return nil, "", fmt.Errorf("导出cookie失败: %w", err)
+	}
+	if strings.TrimSpace(cookieStr) == "" {
+		return nil, "", fmt.Errorf("登录失败: 未获取到Cookie")
 	}
 	cookieMap = parseCookieString(cookieStr)
 
@@ -2289,69 +2328,49 @@ func (p *GyingPlugin) reloginUser(user *User) error {
 
 // executeSearchTasks 并发执行搜索任务
 func (p *GyingPlugin) executeSearchTasks(users []*User, keyword string) []model.SearchResult {
-	var allResults []model.SearchResult
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-
 	for _, user := range users {
-		wg.Add(1)
-		go func(u *User) {
-			defer wg.Done()
+		// 获取用户的scraper实例
+		scraperVal, exists := p.scrapers.Load(user.Hash)
+		var scraper *cloudscraper.Scraper
 
-			// 获取用户的scraper实例
-			scraperVal, exists := p.scrapers.Load(u.Hash)
-			var scraper *cloudscraper.Scraper
-
-			if !exists {
-				if DebugLog {
-					fmt.Printf("[Gying] 用户 %s 没有scraper实例，尝试使用已保存的cookie创建\n", u.Username)
-				}
-
-				// 使用已保存的cookie创建scraper实例（关键！）
-				newScraper, err := p.createScraperWithCookies(u.Cookie)
-				if err != nil {
-					if DebugLog {
-						fmt.Printf("[Gying] 为用户 %s 创建scraper失败: %v\n", u.Username, err)
-					}
-					return
-				}
-
-				// 存储新创建的scraper实例
-				p.scrapers.Store(u.Hash, newScraper)
-				scraper = newScraper
-
-				if DebugLog {
-					fmt.Printf("[Gying] 已为用户 %s 恢复scraper实例（含cookie）\n", u.Username)
-				}
-			} else {
-				var ok bool
-				scraper, ok = scraperVal.(*cloudscraper.Scraper)
-				if !ok || scraper == nil {
-					if DebugLog {
-						fmt.Printf("[Gying] 用户 %s scraper实例无效，跳过\n", u.Username)
-					}
-					return
-				}
+		if !exists {
+			if DebugLog {
+				fmt.Printf("[Gying] 用户 %s 没有scraper实例，尝试使用已保存的cookie创建\n", user.Username)
 			}
 
-			results, err := p.searchWithScraperWithRetry(keyword, scraper, u)
+			newScraper, err := p.createScraperWithCookies(user.Cookie)
 			if err != nil {
 				if DebugLog {
-					fmt.Printf("[Gying] 用户 %s 搜索失败（已重试）: %v\n", u.Username, err)
+					fmt.Printf("[Gying] 为用户 %s 创建scraper失败: %v\n", user.Username, err)
 				}
-				return
+				continue
 			}
 
-			mu.Lock()
-			allResults = append(allResults, results...)
-			mu.Unlock()
-		}(user)
+			p.scrapers.Store(user.Hash, newScraper)
+			scraper = newScraper
+		} else {
+			var ok bool
+			scraper, ok = scraperVal.(*cloudscraper.Scraper)
+			if !ok || scraper == nil {
+				if DebugLog {
+					fmt.Printf("[Gying] 用户 %s scraper实例无效，跳过\n", user.Username)
+				}
+				continue
+			}
+		}
+
+		results, err := p.searchWithScraperWithRetry(keyword, scraper, user)
+		if err != nil {
+			if DebugLog {
+				fmt.Printf("[Gying] 用户 %s 搜索失败（已重试）: %v\n", user.Username, err)
+			}
+			continue
+		}
+
+		return p.deduplicateResults(results)
 	}
 
-	wg.Wait()
-
-	// 去重
-	return p.deduplicateResults(allResults)
+	return []model.SearchResult{}
 }
 
 // searchWithScraperWithRetry 使用scraper搜索（带403自动重新登录重试）
@@ -2411,121 +2430,19 @@ func (p *GyingPlugin) searchWithScraper(keyword string, scraper *cloudscraper.Sc
 		fmt.Printf("[Gying] 关键词: %s\n", keyword)
 	}
 
-	// 1. 使用cloudscraper请求搜索页面
-	// searchURL := fmt.Sprintf("%s/s/1---1/%s", p.getBaseURL(), url.QueryEscape(keyword))
-	searchURL := fmt.Sprintf("%s/search?q=%s&type=0&mode=2", p.getBaseURL(), url.QueryEscape(keyword))
-
-	if DebugLog {
-		fmt.Printf("[Gying] 搜索URL: %s\n", searchURL)
-		fmt.Printf("[Gying] 使用cloudscraper发送请求\n")
-	}
-
-	body, statusCode, _, err := p.requestWithChallengeRetry(scraper, http.MethodGet, searchURL, "", "")
+	searchItems, err := p.fetchSearchSuggestions(keyword, scraper)
 	if err != nil {
-		if DebugLog {
-			fmt.Printf("[Gying] 搜索请求失败: %v\n", err)
-		}
 		return nil, err
 	}
-
-	if DebugLog {
-		fmt.Printf("[Gying] 搜索响应状态码: %d\n", statusCode)
+	if len(searchItems) == 0 {
+		return []model.SearchResult{}, nil
 	}
 
 	if DebugLog {
-		fmt.Printf("[Gying] 响应Body长度: %d 字节\n", len(body))
-		if len(body) > 0 {
-			// 打印前500字符
-			preview := string(body)
-			if len(preview) > 500 {
-				preview = preview[:500] + "..."
-			}
-			fmt.Printf("[Gying] 响应预览: %s\n", preview)
-		}
+		fmt.Printf("[Gying] 搜索建议返回 %d 条\n", len(searchItems))
 	}
 
-	// 检查403错误
-	if statusCode == http.StatusForbidden {
-		if DebugLog {
-			fmt.Printf("[Gying] ❌ 收到403 Forbidden - Cookie可能已过期或被网站拒绝\n")
-			if len(body) > 0 {
-				preview := string(body)
-				if len(preview) > 300 {
-					preview = preview[:300] + "..."
-				}
-				fmt.Printf("[Gying] 403响应内容: %s\n", preview)
-			}
-		}
-		return nil, fmt.Errorf("HTTP 403 Forbidden - 可能需要重新登录")
-	}
-
-	// 2. 提取 _obj.search JSON
-	matches := searchDataPattern.FindSubmatch(body)
-
-	if DebugLog {
-		fmt.Printf("[Gying] 正则匹配结果: 找到 %d 个匹配\n", len(matches))
-	}
-
-	if isLoginShell(body) {
-		return nil, fmt.Errorf("HTTP 403 Forbidden - 需要重新登录")
-	}
-
-	if len(matches) < 2 {
-		if DebugLog {
-			fmt.Printf("[Gying] ❌ 未找到 _obj.search JSON数据\n")
-
-			// 尝试查找是否有其他模式
-			if strings.Contains(string(body), "_obj.search") {
-				fmt.Printf("[Gying] 但是Body中包含 '_obj.search' 字符串\n")
-			} else {
-				fmt.Printf("[Gying] Body中不包含 '_obj.search' 字符串\n")
-			}
-		}
-		return nil, fmt.Errorf("未找到搜索结果数据")
-	}
-
-	if DebugLog {
-		jsonStr := string(matches[1])
-		if len(jsonStr) > 200 {
-			jsonStr = jsonStr[:200] + "..."
-		}
-		fmt.Printf("[Gying] 提取的JSON数据: %s\n", jsonStr)
-	}
-
-	var searchData SearchData
-	if err := json.Unmarshal(matches[1], &searchData); err != nil {
-		if DebugLog {
-			fmt.Printf("[Gying] JSON解析失败: %v\n", err)
-			fmt.Printf("[Gying] 原始JSON: %s\n", string(matches[1]))
-		}
-		return nil, fmt.Errorf("解析搜索数据失败: %w", err)
-	}
-
-	if DebugLog {
-		fmt.Printf("[Gying] 搜索数据解析成功:\n")
-		fmt.Printf("[Gying]   - 关键词: %s\n", searchData.Q)
-		fmt.Printf("[Gying]   - 结果数量字符串: %s\n", searchData.N)
-		fmt.Printf("[Gying]   - 资源ID数组长度: %d\n", len(searchData.L.I))
-		fmt.Printf("[Gying]   - 标题数组长度: %d\n", len(searchData.L.Title))
-		if len(searchData.L.I) > 0 {
-			fmt.Printf("[Gying]   - 前3个资源ID: %v\n", searchData.L.I[:min(3, len(searchData.L.I))])
-			fmt.Printf("[Gying]   - 前3个标题: %v\n", searchData.L.Title[:min(3, len(searchData.L.Title))])
-		}
-	}
-
-	// 3. 刷新防爬cookies（关键！访问详情页触发vrg_sc、vrg_go等防爬cookies）
-	if DebugLog {
-		fmt.Printf("[Gying] 刷新防爬cookies...\n")
-	}
-	_, refreshStatus, _, err := p.requestWithChallengeRetry(scraper, http.MethodGet, p.getWarmupDetailURL(), "", "")
-	if err == nil {
-		if DebugLog {
-			fmt.Printf("[Gying] 防爬cookies刷新成功 (状态码: %d)\n", refreshStatus)
-		}
-	}
-
-	// 4. 并发请求详情接口
-	results, err := p.fetchAllDetails(&searchData, scraper, keyword)
+	results, err := p.fetchAllDetails(searchItems, scraper, keyword)
 	if err != nil {
 		if DebugLog {
 			fmt.Printf("[Gying] fetchAllDetails 失败: %v\n", err)
@@ -2542,11 +2459,51 @@ func (p *GyingPlugin) searchWithScraper(keyword string, scraper *cloudscraper.Sc
 	return results, nil
 }
 
+func (p *GyingPlugin) fetchSearchSuggestions(keyword string, scraper *cloudscraper.Scraper) ([]SearchSuggestItem, error) {
+	searchURL := fmt.Sprintf("%s/res/search_suggest?q=%s", p.getBaseURL(), url.QueryEscape(keyword))
+
+	if DebugLog {
+		fmt.Printf("[Gying] 搜索建议URL: %s\n", searchURL)
+	}
+
+	body, statusCode, _, err := p.requestWithChallengeRetry(scraper, http.MethodGet, searchURL, "", "")
+	if err != nil {
+		return nil, err
+	}
+	if statusCode == http.StatusForbidden || isLoginShell(body) {
+		return nil, fmt.Errorf("HTTP 403 Forbidden - 需要重新登录")
+	}
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("搜索建议接口返回 HTTP %d", statusCode)
+	}
+
+	var items []SearchSuggestItem
+	if err := json.Unmarshal(body, &items); err != nil {
+		return nil, fmt.Errorf("解析搜索建议失败: %w", err)
+	}
+
+	filtered := make([]SearchSuggestItem, 0, min(len(items), MaxSearchSuggestions))
+	for _, item := range items {
+		item.ID = strings.TrimSpace(item.ID)
+		item.Dir = strings.TrimSpace(item.Dir)
+		item.Title = strings.TrimSpace(item.Title)
+		if item.ID == "" || item.Dir == "" || item.Title == "" {
+			continue
+		}
+		filtered = append(filtered, item)
+		if len(filtered) >= MaxSearchSuggestions {
+			break
+		}
+	}
+
+	return filtered, nil
+}
+
 // fetchAllDetails 并发获取所有详情
-func (p *GyingPlugin) fetchAllDetails(searchData *SearchData, scraper *cloudscraper.Scraper, keyword string) ([]model.SearchResult, error) {
+func (p *GyingPlugin) fetchAllDetails(items []SearchSuggestItem, scraper *cloudscraper.Scraper, keyword string) ([]model.SearchResult, error) {
 	if DebugLog {
 		fmt.Printf("[Gying] >>> fetchAllDetails 开始\n")
-		fmt.Printf("[Gying] 需要获取 %d 个详情，关键词: %s\n", len(searchData.L.I), keyword)
+		fmt.Printf("[Gying] 需要获取 %d 个详情，关键词: %s\n", len(items), keyword)
 	}
 
 	var results []model.SearchResult
@@ -2560,10 +2517,8 @@ func (p *GyingPlugin) fetchAllDetails(searchData *SearchData, scraper *cloudscra
 	failCount := 0
 	has403 := false
 
-	// 将关键词转为小写，用于不区分大小写的匹配
-	keywordLower := strings.ToLower(keyword)
-
-	for i := 0; i < len(searchData.L.I); i++ {
+	for i, item := range items {
+		item := item
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
@@ -2579,34 +2534,15 @@ func (p *GyingPlugin) fetchAllDetails(searchData *SearchData, scraper *cloudscra
 			}
 			mu.Unlock()
 
-			// 检查标题是否包含搜索关键词
-			if index >= len(searchData.L.Title) {
-				if DebugLog {
-					fmt.Printf("[Gying]   [%d/%d] ⏭️  跳过: 索引超出标题数组范围\n",
-						index+1, len(searchData.L.I))
-				}
-				return
-			}
-
-			title := searchData.L.Title[index]
-			titleLower := strings.ToLower(title)
-			if !strings.Contains(titleLower, keywordLower) {
-				if DebugLog {
-					fmt.Printf("[Gying]   [%d/%d] ⏭️  跳过: 标题不包含关键词 '%s' (标题: %s)\n",
-						index+1, len(searchData.L.I), keyword, title)
-				}
-				return
-			}
-
 			if DebugLog {
 				fmt.Printf("[Gying]   [%d/%d] 获取详情: ID=%s, Type=%s, 标题=%s\n",
-					index+1, len(searchData.L.I), searchData.L.I[index], searchData.L.D[index], title)
+					index+1, len(items), item.ID, item.Dir, item.Title)
 			}
 
-			detail, err := p.fetchDetail(searchData.L.I[index], searchData.L.D[index], scraper)
+			detail, err := p.fetchDetail(item.ID, item.Dir, scraper)
 			if err != nil {
 				if DebugLog {
-					fmt.Printf("[Gying]   [%d/%d] ❌ 获取详情失败: %v\n", index+1, len(searchData.L.I), err)
+					fmt.Printf("[Gying]   [%d/%d] ❌ 获取详情失败: %v\n", index+1, len(items), err)
 				}
 
 				// 检查是否是403错误
@@ -2628,11 +2564,11 @@ func (p *GyingPlugin) fetchAllDetails(searchData *SearchData, scraper *cloudscra
 				return
 			}
 
-			result := p.buildResult(detail, searchData, index)
+			result := p.buildResult(detail, item)
 			if result.Title != "" && len(result.Links) > 0 {
 				if DebugLog {
 					fmt.Printf("[Gying]   [%d/%d] ✅ 成功: %s (%d个链接)\n",
-						index+1, len(searchData.L.I), result.Title, len(result.Links))
+						index+1, len(items), result.Title, len(result.Links))
 				}
 				mu.Lock()
 				results = append(results, result)
@@ -2641,7 +2577,7 @@ func (p *GyingPlugin) fetchAllDetails(searchData *SearchData, scraper *cloudscra
 			} else {
 				if DebugLog {
 					fmt.Printf("[Gying]   [%d/%d] ⚠️  跳过: 标题或链接为空 (标题:%s, 链接数:%d)\n",
-						index+1, len(searchData.L.I), result.Title, len(result.Links))
+						index+1, len(items), result.Title, len(result.Links))
 				}
 			}
 		}(i)
@@ -2661,7 +2597,7 @@ func (p *GyingPlugin) fetchAllDetails(searchData *SearchData, scraper *cloudscra
 
 	if DebugLog {
 		fmt.Printf("[Gying] <<< fetchAllDetails 完成: 成功=%d, 失败=%d, 总计=%d\n",
-			successCount, failCount, len(searchData.L.I))
+			successCount, failCount, len(items))
 	}
 
 	return results, nil
@@ -2669,7 +2605,7 @@ func (p *GyingPlugin) fetchAllDetails(searchData *SearchData, scraper *cloudscra
 
 // fetchDetail 获取详情
 func (p *GyingPlugin) fetchDetail(resourceID, resourceType string, scraper *cloudscraper.Scraper) (*DetailData, error) {
-	detailURL := fmt.Sprintf("%s/res/downurl/%s/%s", p.getBaseURL(), resourceType, resourceID)
+	detailURL := fmt.Sprintf("%s/res/downurl/%s/%s", p.getBaseURL(), url.PathEscape(resourceType), url.PathEscape(resourceID))
 
 	if DebugLog {
 		fmt.Printf("[Gying]     fetchDetail: %s\n", detailURL)
@@ -2712,61 +2648,45 @@ func (p *GyingPlugin) fetchDetail(resourceID, resourceType string, scraper *clou
 
 	var detail DetailData
 	if err := json.Unmarshal(body, &detail); err != nil {
-		if DebugLog {
-			fmt.Printf("[Gying]     JSON解析失败: %v\n", err)
-			// 打印前200字符
-			preview := string(body)
-			if len(preview) > 200 {
-				preview = preview[:200] + "..."
-			}
-			fmt.Printf("[Gying]     响应内容: %s\n", preview)
-		}
-		return nil, err
+		return nil, fmt.Errorf("解析详情资源失败: %w", err)
 	}
+	if detail.Code == http.StatusForbidden {
+		return nil, fmt.Errorf("详情接口返回 code=403，登录状态可能已失效")
+	}
+	detail.ID = resourceID
+	detail.Dir = resourceType
+	detail.FetchedAt = time.Now()
 
 	if DebugLog {
-		fmt.Printf("[Gying]     详情Code: %d, 网盘链接数: %d\n", detail.Code, len(detail.Panlist.URL))
-	}
-
-	// 检查JSON响应中的code字段（关键！）
-	if detail.Code == 403 {
-		if DebugLog {
-			fmt.Printf("[Gying]     ❌ 详情接口返回Code=403 - 登录状态可能已失效\n")
-		}
-		return nil, fmt.Errorf("详情接口返回 code=403，登录状态可能已失效")
+		fmt.Printf("[Gying]     详情资源: code=%d 网盘=%d 磁力=%d\n", detail.Code, len(detail.Panlist.URL), len(detail.Downlist.List.M))
 	}
 
 	return &detail, nil
 }
 
 // buildResult 构建SearchResult
-func (p *GyingPlugin) buildResult(detail *DetailData, searchData *SearchData, index int) model.SearchResult {
-	if index >= len(searchData.L.Title) {
-		return model.SearchResult{}
-	}
-
-	title := searchData.L.Title[index]
-	resourceType := searchData.L.D[index]
-	resourceID := searchData.L.I[index]
+func (p *GyingPlugin) buildResult(detail *DetailData, item SearchSuggestItem) model.SearchResult {
+	title := item.Title
+	resourceType := item.Dir
+	resourceID := item.ID
 
 	// 获取年份并拼接到标题后面
-	var year int
-	if index < len(searchData.L.Year) && searchData.L.Year[index] > 0 {
-		year = searchData.L.Year[index]
+	year := item.Year
+	if year > 0 {
 		// 拼接年份到标题：遮天（2023）
 		title = fmt.Sprintf("%s（%d）", title, year)
 	}
 
 	// 构建描述
 	var contentParts []string
-	if index < len(searchData.L.Info) && searchData.L.Info[index] != "" {
-		contentParts = append(contentParts, searchData.L.Info[index])
+	if item.EName != "" {
+		contentParts = append(contentParts, "英文名: "+item.EName)
 	}
-	if index < len(searchData.L.Daoyan) && searchData.L.Daoyan[index] != "" {
-		contentParts = append(contentParts, fmt.Sprintf("导演: %s", searchData.L.Daoyan[index]))
+	if item.Type != "" {
+		contentParts = append(contentParts, "类型: "+item.Type)
 	}
-	if index < len(searchData.L.Zhuyan) && searchData.L.Zhuyan[index] != "" {
-		contentParts = append(contentParts, fmt.Sprintf("主演: %s", searchData.L.Zhuyan[index]))
+	if item.Score != "" {
+		contentParts = append(contentParts, "评分: "+item.Score)
 	}
 
 	// 同时提取网盘和磁力链接
@@ -2777,25 +2697,18 @@ func (p *GyingPlugin) buildResult(detail *DetailData, searchData *SearchData, in
 	if year > 0 {
 		tags = append(tags, fmt.Sprintf("%d", year))
 	}
+	if item.Type != "" {
+		tags = append(tags, item.Type)
+	}
 
-	// 从网盘时间数组中选择最新的时间（最小的相对时间值）
-	// 检查 detail 是否为 nil
 	var datetime time.Time
 	if detail == nil {
-		if DebugLog {
-			fmt.Printf("[Gying] buildResult: detail为nil，使用当前时间\n")
-		}
 		datetime = time.Now()
+	} else if !detail.FetchedAt.IsZero() {
+		datetime = detail.FetchedAt
 	} else {
 		detailTimes := p.collectDetailTimes(detail)
 		datetime = p.parseUpdateTime(detailTimes)
-		if DebugLog {
-			fmt.Printf("[Gying] buildResult时间解析: 时间数组长度=%d, 解析后时间=%v\n",
-				len(detailTimes), datetime.Format("2006-01-02 15:04:05"))
-			if len(detailTimes) > 0 {
-				fmt.Printf("[Gying]   前3个时间字符串: %v\n", detailTimes[:min(3, len(detailTimes))])
-			}
-		}
 	}
 
 	return model.SearchResult{
@@ -2925,6 +2838,120 @@ func (p *GyingPlugin) collectDetailTimes(detail *DetailData) []string {
 	return times
 }
 
+func extractProtectedAttribute(body []byte, pattern *regexp.Regexp) string {
+	matches := pattern.FindSubmatch(body)
+	if len(matches) == 0 {
+		return ""
+	}
+	for i := 1; i < len(matches); i++ {
+		if len(matches[i]) > 0 {
+			return html.UnescapeString(strings.TrimSpace(string(matches[i])))
+		}
+	}
+	return ""
+}
+
+func decryptProtectedData(encoded, key string) ([]byte, error) {
+	encoded = strings.TrimSpace(encoded)
+	key = strings.TrimSpace(key)
+	if encoded == "" || key == "" {
+		return nil, fmt.Errorf("受保护数据或密钥为空")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]byte, len(decoded))
+	keyBytes := []byte(key)
+	for i, b := range decoded {
+		out[i] = b ^ keyBytes[i%len(keyBytes)]
+	}
+	return out, nil
+}
+
+func parsePanResources(data []byte) []PanResource {
+	data = []byte(strings.TrimSpace(string(data)))
+	if len(data) == 0 {
+		return nil
+	}
+
+	var resources []PanResource
+	if err := json.Unmarshal(data, &resources); err == nil {
+		return resources
+	}
+
+	lines := strings.Split(string(data), "\n")
+	resources = make([]PanResource, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "|")
+		resource := PanResource{}
+		if len(parts) > 0 {
+			resource.Name = strings.TrimSpace(parts[0])
+		}
+		if len(parts) > 1 {
+			resource.URL = strings.TrimSpace(parts[1])
+		}
+		if len(parts) > 2 {
+			resource.Password = strings.TrimSpace(parts[2])
+		}
+		if len(parts) > 3 {
+			resource.Size = strings.TrimSpace(parts[3])
+		}
+		if len(parts) > 4 {
+			resource.Provider = strings.TrimSpace(parts[4])
+		}
+		if resource.URL != "" {
+			resources = append(resources, resource)
+		}
+	}
+	return resources
+}
+
+func parseMagnetResources(data []byte) []MagnetResource {
+	data = []byte(strings.TrimSpace(string(data)))
+	if len(data) == 0 {
+		return nil
+	}
+
+	var resources []MagnetResource
+	if err := json.Unmarshal(data, &resources); err == nil {
+		return resources
+	}
+
+	lines := strings.Split(string(data), "\n")
+	resources = make([]MagnetResource, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "|")
+		resource := MagnetResource{}
+		if len(parts) > 0 {
+			resource.Name = strings.TrimSpace(parts[0])
+		}
+		if len(parts) > 1 {
+			resource.Magnet = strings.TrimSpace(parts[1])
+		}
+		if len(parts) > 2 {
+			resource.Size = strings.TrimSpace(parts[2])
+		}
+		if len(parts) > 3 {
+			resource.Source = strings.TrimSpace(parts[3])
+		}
+		if resource.Magnet != "" {
+			resources = append(resources, resource)
+		}
+	}
+	return resources
+}
+
 // extractLinks 提取详情中的所有链接
 func (p *GyingPlugin) extractLinks(detail *DetailData, resultTitle string) []model.Link {
 	if detail == nil {
@@ -2933,11 +2960,79 @@ func (p *GyingPlugin) extractLinks(detail *DetailData, resultTitle string) []mod
 
 	now := time.Now()
 	seen := make(map[string]struct{})
-	links := make([]model.Link, 0, len(detail.Panlist.URL)+len(detail.Downlist.List.M))
+	links := make([]model.Link, 0, len(detail.PanResources)+len(detail.MagnetResources)+len(detail.Panlist.URL)+len(detail.Downlist.List.M))
 
+	links = append(links, p.extractProtectedPanLinks(detail, resultTitle, now, seen)...)
+	links = append(links, p.extractProtectedMagnetLinks(detail, resultTitle, now, seen)...)
 	links = append(links, p.extractPanLinks(detail, resultTitle, now, seen)...)
 	links = append(links, p.extractMagnetLinks(detail, resultTitle, now, seen)...)
 
+	return links
+}
+
+func (p *GyingPlugin) extractProtectedPanLinks(detail *DetailData, resultTitle string, now time.Time, seen map[string]struct{}) []model.Link {
+	links := make([]model.Link, 0, len(detail.PanResources))
+	for _, resource := range detail.PanResources {
+		rawURL := strings.TrimSpace(resource.URL)
+		typeName := strings.TrimSpace(resource.Provider)
+		linkURL := p.normalizePanURL(rawURL, -1, typeName)
+		if linkURL == "" {
+			linkURL = strings.TrimSpace(rawURL)
+		}
+		linkType := p.determineLinkType(linkURL, -1, typeName)
+		if linkURL == "" || linkType == "others" {
+			continue
+		}
+
+		seenKey := linkType + ":" + strings.ToLower(linkURL)
+		if _, exists := seen[seenKey]; exists {
+			continue
+		}
+		seen[seenKey] = struct{}{}
+
+		resourceName := strings.TrimSpace(resource.Name)
+		if resource.Size != "" {
+			resourceName = strings.TrimSpace(resourceName + " " + resource.Size)
+		}
+
+		links = append(links, model.Link{
+			Type:      linkType,
+			URL:       linkURL,
+			Password:  p.extractPassword(rawURL, resource.Password),
+			Datetime:  now,
+			WorkTitle: p.buildLinkWorkTitle(resultTitle, resourceName),
+		})
+	}
+	return links
+}
+
+func (p *GyingPlugin) extractProtectedMagnetLinks(detail *DetailData, resultTitle string, now time.Time, seen map[string]struct{}) []model.Link {
+	links := make([]model.Link, 0, len(detail.MagnetResources))
+	for _, resource := range detail.MagnetResources {
+		magnetURL := strings.TrimSpace(resource.Magnet)
+		if !strings.HasPrefix(strings.ToLower(magnetURL), "magnet:?xt=urn:btih:") {
+			continue
+		}
+
+		seenKey := "magnet:" + strings.ToLower(magnetURL)
+		if _, exists := seen[seenKey]; exists {
+			continue
+		}
+		seen[seenKey] = struct{}{}
+
+		resourceName := strings.TrimSpace(resource.Name)
+		if resource.Size != "" {
+			resourceName = strings.TrimSpace(resourceName + " " + resource.Size)
+		}
+
+		links = append(links, model.Link{
+			Type:      "magnet",
+			URL:       magnetURL,
+			Password:  "",
+			Datetime:  now,
+			WorkTitle: p.buildLinkWorkTitle(resultTitle, resourceName),
+		})
+	}
 	return links
 }
 
@@ -2987,7 +3082,7 @@ func (p *GyingPlugin) extractMagnetLinks(detail *DetailData, resultTitle string,
 
 	links := make([]model.Link, 0, len(hashes))
 	for i := 0; i < len(hashes); i++ {
-		infoHash := strings.ToLower(strings.TrimSpace(hashes[i]))
+		infoHash := p.decodeMagnetHash(strings.TrimSpace(hashes[i]), detail.Downlist.Key, detail.Sort)
 		if !magnetHashRegex.MatchString(infoHash) {
 			continue
 		}
@@ -3018,6 +3113,46 @@ func (p *GyingPlugin) extractMagnetLinks(detail *DetailData, resultTitle string,
 	}
 
 	return links
+}
+
+func (p *GyingPlugin) decodeMagnetHash(raw, key string, sortOrder []int) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	infoHash := strings.ToLower(raw)
+	if magnetHashRegex.MatchString(infoHash) {
+		return infoHash
+	}
+
+	if key == "" {
+		return ""
+	}
+	decrypted, err := decryptProtectedData(raw, key)
+	if err != nil {
+		if DebugLog {
+			fmt.Printf("[Gying] 解密磁力hash失败: %v\n", err)
+		}
+		return ""
+	}
+
+	parts := strings.Split(strings.TrimSpace(string(decrypted)), "|")
+	var builder strings.Builder
+	if len(sortOrder) > 0 {
+		for _, idx := range sortOrder {
+			if idx < 0 || idx >= len(parts) {
+				return ""
+			}
+			builder.WriteString(parts[idx])
+		}
+	} else {
+		for _, part := range parts {
+			builder.WriteString(part)
+		}
+	}
+
+	return strings.ToLower(strings.TrimSpace(builder.String()))
 }
 
 func (p *GyingPlugin) getPanTypeName(detail *DetailData, typeCode int) string {
