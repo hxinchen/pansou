@@ -292,6 +292,13 @@ type KeywordAPISyncRunPage struct {
 	PageSize int                 `json:"page_size"`
 }
 
+type KeywordAPISyncIterationPage struct {
+	Items    []KeywordAPISyncIteration `json:"items"`
+	Total    int64                     `json:"total"`
+	Page     int                       `json:"page"`
+	PageSize int                       `json:"page_size"`
+}
+
 type KeywordAPISyncClaim struct {
 	Run    KeywordAPISyncRun `json:"run"`
 	Source KeywordAPISource  `json:"source"`

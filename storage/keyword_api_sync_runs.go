@@ -1185,6 +1185,60 @@ func (s *Store) GetKeywordAPISyncRun(ctx context.Context, id int64) (KeywordAPIS
 	return run, nil
 }
 
+func (s *Store) GetKeywordAPISyncRunSummary(ctx context.Context, id int64) (KeywordAPISyncRun, error) {
+	if s == nil || s.pool == nil {
+		return KeywordAPISyncRun{}, fmt.Errorf("storage is disabled")
+	}
+	run, err := scanKeywordAPISyncRun(s.pool.QueryRow(ctx, "SELECT "+keywordAPISyncRunColumns+" FROM keyword_api_sync_runs WHERE id=$1", id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return KeywordAPISyncRun{}, ErrNotFound
+	}
+	if err != nil {
+		return KeywordAPISyncRun{}, fmt.Errorf("get keyword API sync run summary: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM keyword_api_sync_iterations WHERE run_id=$1", id).Scan(&run.IterationRecordsTotal); err != nil {
+		return KeywordAPISyncRun{}, fmt.Errorf("count keyword API sync iterations: %w", err)
+	}
+	run.IterationsTruncated = run.IterationRecordsTotal > 0
+	return run, nil
+}
+
+func (s *Store) ListKeywordAPISyncRunIterations(ctx context.Context, runID int64, page, pageSize int) (KeywordAPISyncIterationPage, error) {
+	if s == nil || s.pool == nil {
+		return KeywordAPISyncIterationPage{}, fmt.Errorf("storage is disabled")
+	}
+	page, pageSize = normalizePage(page, pageSize, 50, 100)
+	var exists bool
+	if err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM keyword_api_sync_runs WHERE id=$1)", runID).Scan(&exists); err != nil {
+		return KeywordAPISyncIterationPage{}, fmt.Errorf("check keyword API sync run: %w", err)
+	}
+	if !exists {
+		return KeywordAPISyncIterationPage{}, ErrNotFound
+	}
+	var total int64
+	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM keyword_api_sync_iterations WHERE run_id=$1", runID).Scan(&total); err != nil {
+		return KeywordAPISyncIterationPage{}, fmt.Errorf("count keyword API sync iterations: %w", err)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+keywordAPISyncIterationColumns+` FROM keyword_api_sync_iterations
+		WHERE run_id=$1 ORDER BY sequence LIMIT $2 OFFSET $3`, runID, pageSize, (page-1)*pageSize)
+	if err != nil {
+		return KeywordAPISyncIterationPage{}, fmt.Errorf("list keyword API sync iterations: %w", err)
+	}
+	defer rows.Close()
+	items := make([]KeywordAPISyncIteration, 0, pageSize)
+	for rows.Next() {
+		iteration, scanErr := scanKeywordAPISyncIteration(rows)
+		if scanErr != nil {
+			return KeywordAPISyncIterationPage{}, fmt.Errorf("scan keyword API sync iteration: %w", scanErr)
+		}
+		items = append(items, iteration)
+	}
+	if err := rows.Err(); err != nil {
+		return KeywordAPISyncIterationPage{}, fmt.Errorf("iterate keyword API sync iterations: %w", err)
+	}
+	return KeywordAPISyncIterationPage{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
 func (s *Store) loadKeywordAPISourceRunSummaries(ctx context.Context, sources []*KeywordAPISource) error {
 	sourceByID := make(map[int64]*KeywordAPISource, len(sources))
 	sourceIDs := make([]int64, 0, len(sources))

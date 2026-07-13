@@ -25,6 +25,15 @@ type AdminHandler struct {
 	sources        *sourceconfig.Service
 	credentials    *credential.Service
 	keywordSources *keywordsync.Service
+	overviewCache  *adminOverviewCache
+}
+
+type adminOverviewResponse struct {
+	storage.OverviewStats
+	Trends      []storage.TrendPoint `json:"trends"`
+	GeneratedAt time.Time            `json:"generated_at"`
+	Stale       bool                 `json:"stale"`
+	Refreshing  bool                 `json:"refreshing"`
 }
 
 func NewAdminHandler(store *storage.Store, runner *collection.Runner, sources ...*sourceconfig.Service) *AdminHandler {
@@ -32,7 +41,11 @@ func NewAdminHandler(store *storage.Store, runner *collection.Runner, sources ..
 	if len(sources) > 0 {
 		runtime = sources[0]
 	}
-	return &AdminHandler{store: store, runner: runner, sources: runtime}
+	handler := &AdminHandler{store: store, runner: runner, sources: runtime}
+	if store != nil {
+		handler.overviewCache = newAdminOverviewCache(store)
+	}
+	return handler
 }
 
 func (h *AdminHandler) Register(group *gin.RouterGroup) {
@@ -40,6 +53,8 @@ func (h *AdminHandler) Register(group *gin.RouterGroup) {
 	group.GET("/trends", h.trends)
 	group.GET("/resources", h.listResources)
 	group.GET("/resources/:id", h.getResource)
+	group.GET("/resources/:id/sources", h.listResourceSources)
+	group.GET("/resources/:id/keywords", h.listResourceKeywords)
 	group.GET("/keywords", h.listKeywords)
 	group.POST("/keywords", h.createKeyword)
 	group.PUT("/keywords/:id", h.updateKeyword)
@@ -48,6 +63,8 @@ func (h *AdminHandler) Register(group *gin.RouterGroup) {
 	group.GET("/runs", h.listRuns)
 	group.POST("/runs", h.createRun)
 	group.GET("/runs/:id", h.getRun)
+	group.GET("/runs/:id/items", h.listRunItems)
+	group.GET("/runs/:id/items/:itemId/sources", h.listRunItemSources)
 	group.GET("/users", h.listUsers)
 	group.POST("/users", h.createUser)
 	group.PUT("/users/:id", h.updateUser)
@@ -78,34 +95,44 @@ func (h *AdminHandler) available(c *gin.Context) bool {
 }
 
 func (h *AdminHandler) overview(c *gin.Context) {
-	if !h.available(c) {
+	if !h.overviewAvailable(c) {
 		return
 	}
-	stats, err := h.store.Overview(c.Request.Context())
+	days := normalizeOverviewDays(queryInt(c, "days", defaultAdminOverviewTrendDays))
+	force := queryBool(c, "force", false)
+	snapshot, err := h.overviewCache.dashboard(c.Request.Context(), days, force)
 	if err != nil {
 		respondAdminError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, model.NewSuccessResponse(stats))
+	c.JSON(http.StatusOK, model.NewSuccessResponse(adminOverviewResponse{
+		OverviewStats: snapshot.stats,
+		Trends:        snapshot.trends,
+		GeneratedAt:   snapshot.generatedAt,
+		Stale:         snapshot.stale,
+		Refreshing:    snapshot.refreshing,
+	}))
 }
 
 func (h *AdminHandler) trends(c *gin.Context) {
-	if !h.available(c) {
+	if !h.overviewAvailable(c) {
 		return
 	}
-	days := queryInt(c, "days", 7)
-	if days < 1 {
-		days = 1
-	}
-	if days > 366 {
-		days = 366
-	}
-	points, err := h.store.Trends(c.Request.Context(), days)
+	days := normalizeOverviewDays(queryInt(c, "days", defaultAdminOverviewTrendDays))
+	snapshot, err := h.overviewCache.snapshot(c.Request.Context(), days, false)
 	if err != nil {
 		respondAdminError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, model.NewSuccessResponse(points))
+	c.JSON(http.StatusOK, model.NewSuccessResponse(snapshot.trends))
+}
+
+func (h *AdminHandler) overviewAvailable(c *gin.Context) bool {
+	if h == nil || h.store == nil || h.overviewCache == nil {
+		c.JSON(http.StatusServiceUnavailable, model.NewErrorResponse(http.StatusServiceUnavailable, "资源库未配置"))
+		return false
+	}
+	return true
 }
 
 func (h *AdminHandler) listResources(c *gin.Context) {
@@ -151,7 +178,7 @@ func (h *AdminHandler) listResources(c *gin.Context) {
 		return
 	}
 	filter.From, filter.To = from, to
-	page, err := h.store.ListResources(c.Request.Context(), filter)
+	page, err := h.store.ListResourceSummaries(c.Request.Context(), filter)
 	if err != nil {
 		respondAdminError(c, err)
 		return
@@ -173,6 +200,42 @@ func (h *AdminHandler) getResource(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, model.NewSuccessResponse(resource))
+}
+
+func (h *AdminHandler) listResourceSources(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	page, err := h.store.ListResourceSources(c.Request.Context(), id, storage.ResourceAssociationFilter{
+		Page: queryInt(c, "page", 1), PageSize: queryInt(c, "page_size", 50),
+	})
+	if err != nil {
+		respondAdminError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, model.NewSuccessResponse(page))
+}
+
+func (h *AdminHandler) listResourceKeywords(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	page, err := h.store.ListResourceKeywords(c.Request.Context(), id, storage.ResourceAssociationFilter{
+		Page: queryInt(c, "page", 1), PageSize: queryInt(c, "page_size", 50),
+	})
+	if err != nil {
+		respondAdminError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, model.NewSuccessResponse(page))
 }
 
 func (h *AdminHandler) listKeywords(c *gin.Context) {
@@ -460,12 +523,54 @@ func (h *AdminHandler) getRun(c *gin.Context) {
 	if !ok {
 		return
 	}
-	run, err := h.store.GetRun(c.Request.Context(), id)
+	run, err := h.store.GetRunSummary(c.Request.Context(), id)
 	if err != nil {
 		respondAdminError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, model.NewSuccessResponse(run))
+}
+
+func (h *AdminHandler) listRunItems(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	page, err := h.store.ListRunItems(c.Request.Context(), id, storage.RunItemFilter{
+		Query: strings.TrimSpace(c.Query("q")), Statuses: queryList(c, "status", "statuses"),
+		Page: queryInt(c, "page", 1), PageSize: queryInt(c, "page_size", 30),
+	})
+	if err != nil {
+		respondAdminError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, model.NewSuccessResponse(page))
+}
+
+func (h *AdminHandler) listRunItemSources(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	runID, ok := pathParamID(c, "id")
+	if !ok {
+		return
+	}
+	itemID, ok := pathParamID(c, "itemId")
+	if !ok {
+		return
+	}
+	page, err := h.store.ListRunItemSources(c.Request.Context(), runID, itemID, storage.RunSourceFilter{
+		Types: queryList(c, "type", "types", "source_type"), Statuses: queryList(c, "status", "statuses"),
+		Page: queryInt(c, "page", 1), PageSize: queryInt(c, "page_size", 50),
+	})
+	if err != nil {
+		respondAdminError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, model.NewSuccessResponse(page))
 }
 
 func respondAdminError(c *gin.Context, err error) {
@@ -482,9 +587,13 @@ func respondAdminError(c *gin.Context, err error) {
 }
 
 func pathID(c *gin.Context) (int64, bool) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	return pathParamID(c, "id")
+}
+
+func pathParamID(c *gin.Context, name string) (int64, bool) {
+	id, err := strconv.ParseInt(c.Param(name), 10, 64)
 	if err != nil || id <= 0 {
-		c.JSON(http.StatusBadRequest, model.NewErrorResponse(http.StatusBadRequest, "id 必须是正整数"))
+		c.JSON(http.StatusBadRequest, model.NewErrorResponse(http.StatusBadRequest, name+" 必须是正整数"))
 		return 0, false
 	}
 	return id, true

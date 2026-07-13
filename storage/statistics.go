@@ -9,8 +9,54 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+type overviewSnapshotResult struct {
+	stats OverviewStats
+	err   error
+}
+
+type overviewActivityResult struct {
+	active *CollectionRun
+	recent []CollectionRun
+	err    error
+}
+
 // Overview returns the resource-library counters used by the admin dashboard.
+// Snapshot statistics and frequently changing collection activity are loaded in
+// parallel so callers that still use this compatibility method do not pay the
+// sum of both query latencies.
 func (s *Store) Overview(ctx context.Context) (OverviewStats, error) {
+	if s == nil || s.pool == nil {
+		return OverviewStats{}, fmt.Errorf("storage is disabled")
+	}
+
+	snapshotCh := make(chan overviewSnapshotResult, 1)
+	activityCh := make(chan overviewActivityResult, 1)
+	go func() {
+		stats, err := s.OverviewSnapshot(ctx)
+		snapshotCh <- overviewSnapshotResult{stats: stats, err: err}
+	}()
+	go func() {
+		active, recent, err := s.OverviewActivity(ctx)
+		activityCh <- overviewActivityResult{active: active, recent: recent, err: err}
+	}()
+
+	snapshot := <-snapshotCh
+	activity := <-activityCh
+	if snapshot.err != nil {
+		return OverviewStats{}, snapshot.err
+	}
+	if activity.err != nil {
+		return OverviewStats{}, activity.err
+	}
+	snapshot.stats.ActiveRun = activity.active
+	snapshot.stats.RecentRuns = activity.recent
+	return snapshot.stats, nil
+}
+
+// OverviewSnapshot loads the comparatively expensive statistics that are safe
+// to cache for a short period. ActiveRun and RecentRuns are intentionally left
+// empty; use OverviewActivity for those frequently changing fields.
+func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 	if s == nil || s.pool == nil {
 		return OverviewStats{}, fmt.Errorf("storage is disabled")
 	}
@@ -19,85 +65,192 @@ func (s *Store) Overview(ctx context.Context) (OverviewStats, error) {
 	tomorrow := today.AddDate(0, 0, 1)
 	sevenDaysAgo := today.AddDate(0, 0, -6)
 
-	var result OverviewStats
-	if err := s.pool.QueryRow(ctx, `
-		SELECT
-			(SELECT count(*) FROM resources),
-			(SELECT count(*) FROM resources WHERE first_seen_at >= $1 AND first_seen_at < $2),
-			(SELECT count(*) FROM resources WHERE first_seen_at >= $3 AND first_seen_at < $2),
-			(SELECT count(*) FROM keywords),
-			(SELECT count(*) FROM keywords WHERE enabled)`,
-		today, tomorrow, sevenDaysAgo,
-	).Scan(&result.ResourceCount, &result.TodayNew, &result.LastSevenDaysNew,
-		&result.KeywordCount, &result.EnabledKeywordCount); err != nil {
-		return OverviewStats{}, fmt.Errorf("load overview counters: %w", err)
+	type resourceResult struct {
+		resourceCount    int64
+		todayNew         int64
+		lastSevenDaysNew int64
+		statusCounts     StatusCounts
+		err              error
+	}
+	type keywordResult struct {
+		keywordCount        int64
+		enabledKeywordCount int64
+		err                 error
+	}
+	type sourcesResult struct {
+		topSources []SourceContribution
+		err        error
 	}
 
-	counts := StatusCounts{
-		CheckPending: 0, CheckValid: 0, CheckInvalid: 0, CheckUnknown: 0, CheckUnsupported: 0,
-	}
-	rows, err := s.pool.Query(ctx, `SELECT check_status, count(*) FROM resources
-		GROUP BY check_status`)
-	if err != nil {
-		return OverviewStats{}, fmt.Errorf("load resource status counts: %w", err)
-	}
-	for rows.Next() {
-		var status string
-		var count int64
-		if err := rows.Scan(&status, &count); err != nil {
-			rows.Close()
-			return OverviewStats{}, fmt.Errorf("scan resource status count: %w", err)
+	resourcesCh := make(chan resourceResult, 1)
+	keywordsCh := make(chan keywordResult, 1)
+	sourcesCh := make(chan sourcesResult, 1)
+
+	go func() {
+		var result resourceResult
+		var pending, valid, invalid, unknown, unsupported int64
+		result.err = s.pool.QueryRow(ctx, `
+			SELECT
+				count(*),
+				count(*) FILTER (WHERE first_seen_at >= $1 AND first_seen_at < $2),
+				count(*) FILTER (WHERE first_seen_at >= $3 AND first_seen_at < $2),
+				count(*) FILTER (WHERE check_status = 'pending'),
+				count(*) FILTER (WHERE check_status = 'valid'),
+				count(*) FILTER (WHERE check_status = 'invalid'),
+				count(*) FILTER (WHERE check_status = 'unknown'),
+				count(*) FILTER (WHERE check_status = 'unsupported')
+			FROM resources`, today, tomorrow, sevenDaysAgo).Scan(
+			&result.resourceCount,
+			&result.todayNew,
+			&result.lastSevenDaysNew,
+			&pending,
+			&valid,
+			&invalid,
+			&unknown,
+			&unsupported,
+		)
+		if result.err != nil {
+			result.err = fmt.Errorf("load resource overview statistics: %w", result.err)
+		} else {
+			result.statusCounts = StatusCounts{
+				CheckPending: pending, CheckValid: valid, CheckInvalid: invalid,
+				CheckUnknown: unknown, CheckUnsupported: unsupported,
+			}
 		}
-		counts[status] = count
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return OverviewStats{}, fmt.Errorf("iterate resource status counts: %w", err)
-	}
-	rows.Close()
-	result.StatusCounts = counts
+		resourcesCh <- result
+	}()
 
-	active, err := scanRun(s.pool.QueryRow(ctx, runSelect+`
-		WHERE cr.status IN ('pending','running')`+runGroup+`
-		ORDER BY cr.created_at ASC, cr.id ASC LIMIT 1`))
-	if err == nil {
-		result.ActiveRun = &active
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return OverviewStats{}, fmt.Errorf("load active collection run: %w", err)
-	}
-
-	rows, err = s.pool.Query(ctx, `
-		SELECT source_type, source_key, count(DISTINCT resource_id), sum(discovery_count)
-		FROM resource_sources
-		GROUP BY source_type, source_key
-		ORDER BY count(DISTINCT resource_id) DESC, sum(discovery_count) DESC,
-			source_type, source_key
-		LIMIT 10`)
-	if err != nil {
-		return OverviewStats{}, fmt.Errorf("load source contributions: %w", err)
-	}
-	result.TopSources = make([]SourceContribution, 0, 10)
-	for rows.Next() {
-		var contribution SourceContribution
-		if err := rows.Scan(&contribution.SourceType, &contribution.SourceKey,
-			&contribution.ResourceCount, &contribution.DiscoveryCount); err != nil {
-			rows.Close()
-			return OverviewStats{}, fmt.Errorf("scan source contribution: %w", err)
+	go func() {
+		var result keywordResult
+		result.err = s.pool.QueryRow(ctx, `
+			SELECT count(*), count(*) FILTER (WHERE enabled)
+			FROM keywords`).Scan(&result.keywordCount, &result.enabledKeywordCount)
+		if result.err != nil {
+			result.err = fmt.Errorf("load keyword overview statistics: %w", result.err)
 		}
-		result.TopSources = append(result.TopSources, contribution)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return OverviewStats{}, fmt.Errorf("iterate source contributions: %w", err)
-	}
-	rows.Close()
+		keywordsCh <- result
+	}()
 
-	recent, err := s.ListRuns(ctx, RunFilter{Page: 1, PageSize: 5})
-	if err != nil {
-		return OverviewStats{}, fmt.Errorf("load recent collection runs: %w", err)
+	go func() {
+		result := sourcesResult{topSources: make([]SourceContribution, 0, 10)}
+		rows, err := s.pool.Query(ctx, `
+			SELECT source_type, source_key, count(DISTINCT resource_id), sum(discovery_count)
+			FROM resource_sources
+			GROUP BY source_type, source_key
+			ORDER BY count(DISTINCT resource_id) DESC, sum(discovery_count) DESC,
+				source_type, source_key
+			LIMIT 10`)
+		if err != nil {
+			result.err = fmt.Errorf("load source contributions: %w", err)
+			sourcesCh <- result
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var contribution SourceContribution
+			if err := rows.Scan(&contribution.SourceType, &contribution.SourceKey,
+				&contribution.ResourceCount, &contribution.DiscoveryCount); err != nil {
+				result.err = fmt.Errorf("scan source contribution: %w", err)
+				sourcesCh <- result
+				return
+			}
+			result.topSources = append(result.topSources, contribution)
+		}
+		if err := rows.Err(); err != nil {
+			result.err = fmt.Errorf("iterate source contributions: %w", err)
+		}
+		sourcesCh <- result
+	}()
+
+	resources := <-resourcesCh
+	keywords := <-keywordsCh
+	sources := <-sourcesCh
+	if resources.err != nil {
+		return OverviewStats{}, resources.err
 	}
-	result.RecentRuns = recent.Items
-	return result, nil
+	if keywords.err != nil {
+		return OverviewStats{}, keywords.err
+	}
+	if sources.err != nil {
+		return OverviewStats{}, sources.err
+	}
+	return OverviewStats{
+		ResourceCount:       resources.resourceCount,
+		TodayNew:            resources.todayNew,
+		LastSevenDaysNew:    resources.lastSevenDaysNew,
+		KeywordCount:        keywords.keywordCount,
+		EnabledKeywordCount: keywords.enabledKeywordCount,
+		StatusCounts:        resources.statusCounts,
+		TopSources:          sources.topSources,
+	}, nil
+}
+
+// OverviewActivity loads the dashboard fields that change while a collection
+// is running. It deliberately bypasses the snapshot cache used by the service.
+func (s *Store) OverviewActivity(ctx context.Context) (*CollectionRun, []CollectionRun, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil, fmt.Errorf("storage is disabled")
+	}
+
+	type activeResult struct {
+		active *CollectionRun
+		err    error
+	}
+	type recentResult struct {
+		recent []CollectionRun
+		err    error
+	}
+	activeCh := make(chan activeResult, 1)
+	recentCh := make(chan recentResult, 1)
+
+	go func() {
+		active, err := scanRun(s.pool.QueryRow(ctx, runSelect+`
+			WHERE cr.status IN ('pending','running')`+runGroup+`
+			ORDER BY cr.created_at ASC, cr.id ASC LIMIT 1`))
+		if errors.Is(err, pgx.ErrNoRows) {
+			activeCh <- activeResult{}
+			return
+		}
+		if err != nil {
+			activeCh <- activeResult{err: fmt.Errorf("load active collection run: %w", err)}
+			return
+		}
+		activeCh <- activeResult{active: &active}
+	}()
+
+	go func() {
+		rows, err := s.pool.Query(ctx, runSelect+runGroup+`
+			ORDER BY cr.created_at DESC, cr.id DESC LIMIT 5`)
+		if err != nil {
+			recentCh <- recentResult{err: fmt.Errorf("load recent collection runs: %w", err)}
+			return
+		}
+		defer rows.Close()
+		recent := make([]CollectionRun, 0, 5)
+		for rows.Next() {
+			run, scanErr := scanRun(rows)
+			if scanErr != nil {
+				recentCh <- recentResult{err: fmt.Errorf("scan recent collection run: %w", scanErr)}
+				return
+			}
+			recent = append(recent, run)
+		}
+		if err := rows.Err(); err != nil {
+			recentCh <- recentResult{err: fmt.Errorf("iterate recent collection runs: %w", err)}
+			return
+		}
+		recentCh <- recentResult{recent: recent}
+	}()
+
+	active := <-activeCh
+	recent := <-recentCh
+	if active.err != nil {
+		return nil, nil, active.err
+	}
+	if recent.err != nil {
+		return nil, nil, recent.err
+	}
+	return active.active, recent.recent, nil
 }
 
 // Trends returns one point per local calendar day, including days with no data.
@@ -114,17 +267,48 @@ func (s *Store) Trends(ctx context.Context, days int) ([]TrendPoint, error) {
 	now := s.now()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	start := today.AddDate(0, 0, -(days - 1))
-	end := today.AddDate(0, 0, 1)
+	starts := make([]time.Time, days)
+	ends := make([]time.Time, days)
+	for i := 0; i < days; i++ {
+		starts[i] = start.AddDate(0, 0, i)
+		ends[i] = start.AddDate(0, 0, i+1)
+	}
+
 	rows, err := s.pool.Query(ctx, `
-		SELECT days.day,
-			(SELECT count(*) FROM resources r
-				WHERE r.first_seen_at >= days.day AND r.first_seen_at < days.day + interval '1 day'),
-			COALESCE((SELECT sum(i.found_count) FROM collection_run_items i
-				WHERE i.completed_at >= days.day AND i.completed_at < days.day + interval '1 day'), 0),
-			(SELECT count(*) FROM resources r
-				WHERE r.check_status='valid' AND r.first_seen_at < days.day + interval '1 day')
-		FROM generate_series($1::timestamptz, $2::timestamptz - interval '1 day', interval '1 day') AS days(day)
-		ORDER BY days.day`, start, end)
+		WITH days(day, next_day) AS MATERIALIZED (
+			SELECT * FROM unnest($1::timestamptz[], $2::timestamptz[])
+		),
+		resource_daily AS (
+			SELECT d.day,
+				count(r.id) AS new_count,
+				count(r.id) FILTER (WHERE r.check_status = 'valid') AS valid_new_count
+			FROM days d
+			LEFT JOIN resources r
+				ON r.first_seen_at >= d.day AND r.first_seen_at < d.next_day
+			GROUP BY d.day
+		),
+		discovery_daily AS (
+			SELECT d.day, COALESCE(sum(i.found_count), 0)::bigint AS discoveries
+			FROM days d
+			LEFT JOIN collection_run_items i
+				ON i.completed_at >= d.day AND i.completed_at < d.next_day
+			GROUP BY d.day
+		),
+		valid_before AS (
+			SELECT count(*)::bigint AS valid_count
+			FROM resources
+			WHERE check_status = 'valid' AND first_seen_at < $3
+		)
+		SELECT r.day,
+			r.new_count,
+			d.discoveries,
+			(v.valid_count + sum(r.valid_new_count) OVER (
+				ORDER BY r.day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+			))::bigint AS valid_count
+		FROM resource_daily r
+		JOIN discovery_daily d USING (day)
+		CROSS JOIN valid_before v
+		ORDER BY r.day`, starts, ends, start)
 	if err != nil {
 		return nil, fmt.Errorf("load resource trends: %w", err)
 	}

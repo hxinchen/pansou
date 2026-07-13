@@ -2,12 +2,20 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+)
+
+const (
+	runErrorSummaryLimit      = 4096
+	runErrorItemLimit         = 500
+	runErrorDisplayLimit      = 5
+	runMissingErrorDetailText = "failed without error detail"
 )
 
 const runSelect = `
@@ -22,26 +30,24 @@ const runSelect = `
 		COALESCE(sum(i.found_count),0)::int AS found_count,
 		COALESCE(sum(i.new_count),0)::int AS new_count,
 		COALESCE(sum(i.duplicate_count),0)::int AS duplicate_count,
-		cr.source_summary, cr.error_message, cr.created_at, cr.started_at, cr.completed_at
+		left(cr.error_message, 4096), cr.created_at, cr.started_at, cr.completed_at
 	FROM collection_runs cr
 	LEFT JOIN collection_run_items i ON i.run_id=cr.id`
 
-const runGroup = ` GROUP BY cr.id, cr.trigger, cr.status, cr.forced, cr.source_summary,
+const runGroup = ` GROUP BY cr.id, cr.trigger, cr.status, cr.forced,
 	cr.error_message, cr.created_at, cr.started_at, cr.completed_at`
 
 func scanRun(row rowScanner) (CollectionRun, error) {
 	var run CollectionRun
-	var sourceSummary []byte
 	err := row.Scan(
 		&run.ID, &run.Trigger, &run.Status, &run.Forced, &run.TotalItems,
 		&run.PendingItems, &run.RunningItems, &run.CompletedItems, &run.SuccessItems, &run.EmptyItems,
 		&run.FailedItems, &run.FoundCount, &run.NewCount, &run.DuplicateCount,
-		&sourceSummary, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt, &run.CompletedAt,
+		&run.ErrorMessage, &run.CreatedAt, &run.StartedAt, &run.CompletedAt,
 	)
 	if err != nil {
 		return CollectionRun{}, err
 	}
-	run.SourceSummary = decodeMetadata(sourceSummary)
 	return run, nil
 }
 
@@ -66,6 +72,30 @@ func scanRunItem(row rowScanner) (CollectionRunItem, error) {
 	}
 	item.SourceSummary = decodeMetadata(sourceSummary)
 	return item, nil
+}
+
+const runItemSummaryColumns = `
+	i.id, i.run_id, i.keyword_id, i.keyword, i.normalized_keyword, i.keyword_type,
+	i.priority, i.cooldown_seconds, i.status, i.attempts, i.found_count, i.new_count,
+	i.duplicate_count,
+	COALESCE(jsonb_object_length(i.source_summary), 0),
+	COALESCE((SELECT count(*) FROM jsonb_each(i.source_summary) s WHERE s.value->>'status'='success'), 0),
+	COALESCE((SELECT count(*) FROM jsonb_each(i.source_summary) s WHERE s.value->>'status'='success_empty'), 0),
+	COALESCE((SELECT count(*) FROM jsonb_each(i.source_summary) s WHERE s.value->>'status'='failed'), 0),
+	left(i.error_message, 500), i.created_at, i.started_at, i.completed_at,
+	CASE WHEN i.started_at IS NULL THEN 0 ELSE
+		(EXTRACT(EPOCH FROM (COALESCE(i.completed_at, now())-i.started_at))*1000)::bigint END`
+
+func scanRunItemSummary(row rowScanner) (CollectionRunItem, error) {
+	var item CollectionRunItem
+	err := row.Scan(
+		&item.ID, &item.RunID, &item.KeywordID, &item.Keyword, &item.NormalizedKeyword,
+		&item.KeywordType, &item.Priority, &item.CooldownSeconds, &item.Status, &item.Attempts,
+		&item.FoundCount, &item.NewCount, &item.DuplicateCount, &item.SourceTotal,
+		&item.SourceSuccess, &item.SourceEmpty, &item.SourceFailed, &item.ErrorMessage,
+		&item.CreatedAt, &item.StartedAt, &item.CompletedAt, &item.DurationMS,
+	)
+	return item, err
 }
 
 func (s *Store) CreateRun(ctx context.Context, input CreateRunInput) (CollectionRun, error) {
@@ -349,7 +379,7 @@ func (s *Store) CompleteRunItem(ctx context.Context, id int64, input CompleteRun
 	if err := tx.Commit(ctx); err != nil {
 		return CollectionRun{}, fmt.Errorf("commit completed run item: %w", err)
 	}
-	return s.GetRun(ctx, runID)
+	return s.GetRunExecutionContext(ctx, runID)
 }
 
 // CompleteRun records the runner's terminal batch status after every item has finished.
@@ -374,24 +404,20 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, status string, com
 	} else if err != nil {
 		return fmt.Errorf("lock collection run: %w", err)
 	}
-	var unfinished int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM collection_run_items
-		WHERE run_id=$1 AND status IN ('pending','running')`, runID).Scan(&unfinished); err != nil {
+	var unfinished bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM collection_run_items
+		WHERE run_id=$1 AND status IN ('pending','running'))`, runID).Scan(&unfinished); err != nil {
 		return fmt.Errorf("count unfinished run items: %w", err)
 	}
-	if unfinished > 0 {
-		return fmt.Errorf("%w: collection run has %d unfinished items", ErrConflict, unfinished)
+	if unfinished {
+		return fmt.Errorf("%w: collection run has unfinished items", ErrConflict)
 	}
-	if _, err := tx.Exec(ctx, `
-		WITH totals AS (
-			SELECT
-				COALESCE(jsonb_object_agg(normalized_keyword, source_summary), '{}'::jsonb) AS summary,
-				COALESCE(string_agg(NULLIF(error_message,''), '; ' ORDER BY id), '') AS errors
-			FROM collection_run_items WHERE run_id=$1
-		)
-		UPDATE collection_runs r SET status=$2, source_summary=totals.summary,
-			error_message=totals.errors, completed_at=$3
-		FROM totals WHERE r.id=$1`, runID, status, completedAt); err != nil {
+	errorSummary, err := buildRunErrorSummaryTx(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE collection_runs SET status=$2,
+		error_message=$3, completed_at=$4 WHERE id=$1`, runID, status, errorSummary, completedAt); err != nil {
 		return fmt.Errorf("complete collection run: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -401,34 +427,92 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, status string, com
 }
 
 func finalizeRunTx(ctx context.Context, tx pgx.Tx, runID int64, at time.Time) error {
-	_, err := tx.Exec(ctx, `
-		WITH totals AS (
-			SELECT
-				count(*) FILTER (WHERE status IN ('pending','running')) AS unfinished,
-				count(*) FILTER (WHERE status='running') AS running,
-				count(*) FILTER (WHERE status='success') AS succeeded,
-				count(*) FILTER (WHERE status='success_empty') AS empty,
-				COALESCE(sum(found_count),0) AS found,
-				COALESCE(jsonb_object_agg(normalized_keyword, source_summary), '{}'::jsonb) AS summary,
-				COALESCE(string_agg(NULLIF(error_message,''), '; ' ORDER BY id), '') AS errors
-			FROM collection_run_items WHERE run_id=$1
-		)
-		UPDATE collection_runs r SET
-			status=CASE
-				WHEN totals.unfinished>0 AND totals.running>0 THEN 'running'
-				WHEN totals.unfinished>0 THEN 'pending'
-				WHEN totals.found>0 OR totals.succeeded>0 THEN 'success'
-				WHEN totals.empty>0 THEN 'success_empty'
-				ELSE 'failed'
-			END,
-			source_summary=totals.summary,
-			error_message=totals.errors,
-			completed_at=CASE WHEN totals.unfinished=0 THEN $2::timestamptz ELSE NULL::timestamptz END
-		FROM totals WHERE r.id=$1`, runID, at)
+	var hasPending, hasRunning bool
+	if err := tx.QueryRow(ctx, `SELECT
+		EXISTS(SELECT 1 FROM collection_run_items WHERE run_id=$1 AND status='pending'),
+		EXISTS(SELECT 1 FROM collection_run_items WHERE run_id=$1 AND status='running')`, runID).Scan(&hasPending, &hasRunning); err != nil {
+		return fmt.Errorf("read collection run state: %w", err)
+	}
+	if hasPending || hasRunning {
+		status := RunPending
+		if hasRunning {
+			status = RunRunning
+		}
+		if _, err := tx.Exec(ctx, `UPDATE collection_runs SET status=$2, completed_at=NULL WHERE id=$1`, runID, status); err != nil {
+			return fmt.Errorf("update active collection run: %w", err)
+		}
+		return nil
+	}
+
+	var hasSuccess, hasEmpty bool
+	if err := tx.QueryRow(ctx, `SELECT
+		EXISTS(SELECT 1 FROM collection_run_items WHERE run_id=$1 AND (status='success' OR found_count>0)),
+		EXISTS(SELECT 1 FROM collection_run_items WHERE run_id=$1 AND status='success_empty')`, runID).Scan(&hasSuccess, &hasEmpty); err != nil {
+		return fmt.Errorf("read terminal collection run state: %w", err)
+	}
+	status := RunFailed
+	if hasSuccess {
+		status = RunSuccess
+	} else if hasEmpty {
+		status = RunSuccessEmpty
+	}
+	errorSummary, err := buildRunErrorSummaryTx(ctx, tx, runID)
 	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE collection_runs SET status=$2,
+		error_message=$3, completed_at=$4 WHERE id=$1`, runID, status, errorSummary, at); err != nil {
 		return fmt.Errorf("finalize collection run: %w", err)
 	}
 	return nil
+}
+
+func buildRunErrorSummaryTx(ctx context.Context, tx pgx.Tx, runID int64) (string, error) {
+	var total int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM collection_run_items
+		WHERE run_id=$1 AND status='failed'`, runID).Scan(&total); err != nil {
+		return "", fmt.Errorf("count collection run errors: %w", err)
+	}
+	if total == 0 {
+		return "", nil
+	}
+	rows, err := tx.Query(ctx, `SELECT left(error_message, $2) FROM collection_run_items
+		WHERE run_id=$1 AND status='failed' ORDER BY id LIMIT $3`, runID, runErrorItemLimit, runErrorDisplayLimit)
+	if err != nil {
+		return "", fmt.Errorf("list collection run errors: %w", err)
+	}
+	defer rows.Close()
+	messages := make([]string, 0, min(total, runErrorDisplayLimit))
+	for rows.Next() {
+		var message string
+		if err := rows.Scan(&message); err != nil {
+			return "", fmt.Errorf("scan collection run error: %w", err)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("iterate collection run errors: %w", err)
+	}
+	return formatRunErrorSummary(messages, total), nil
+}
+
+func formatRunErrorSummary(messages []string, total int) string {
+	displayed := min(len(messages), runErrorDisplayLimit)
+	if total < displayed {
+		displayed = total
+	}
+	parts := make([]string, 0, displayed+1)
+	for _, message := range messages[:displayed] {
+		message = strings.TrimSpace(message)
+		if message == "" {
+			message = runMissingErrorDetailText
+		}
+		parts = append(parts, truncateRunSourceText(message, runErrorItemLimit))
+	}
+	if total > displayed {
+		parts = append(parts, fmt.Sprintf("... and %d more", total-displayed))
+	}
+	return truncateRunSourceText(strings.Join(parts, "; "), runErrorSummaryLimit)
 }
 
 func (s *Store) GetRun(ctx context.Context, id int64) (CollectionRun, error) {
@@ -448,6 +532,181 @@ func (s *Store) GetRun(ctx context.Context, id int64) (CollectionRun, error) {
 	}
 	run.Items = items
 	return run, nil
+}
+
+// GetRunSummary returns batch counters and at most the currently running item.
+func (s *Store) GetRunSummary(ctx context.Context, id int64) (CollectionRun, error) {
+	if s == nil || s.pool == nil {
+		return CollectionRun{}, fmt.Errorf("storage is disabled")
+	}
+	run, err := scanRun(s.pool.QueryRow(ctx, runSelect+" WHERE cr.id=$1"+runGroup, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CollectionRun{}, ErrNotFound
+	}
+	if err != nil {
+		return CollectionRun{}, fmt.Errorf("get collection run summary: %w", err)
+	}
+	item, err := scanRunItemSummary(s.pool.QueryRow(ctx, "SELECT "+runItemSummaryColumns+` FROM collection_run_items i
+		WHERE i.run_id=$1 AND i.status='running' ORDER BY i.id LIMIT 1`, id))
+	if err == nil {
+		run.CurrentItem = &item
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return CollectionRun{}, fmt.Errorf("get current collection run item: %w", err)
+	}
+	return run, nil
+}
+
+// GetRunExecutionContext loads only immutable/small batch fields required by
+// a claimed keyword. It deliberately avoids aggregating every item in the run.
+func (s *Store) GetRunExecutionContext(ctx context.Context, id int64) (CollectionRun, error) {
+	if s == nil || s.pool == nil {
+		return CollectionRun{}, fmt.Errorf("storage is disabled")
+	}
+	var run CollectionRun
+	err := s.pool.QueryRow(ctx, `SELECT id, trigger, status, forced, left(error_message, 4096),
+		created_at, started_at, completed_at FROM collection_runs WHERE id=$1`, id).Scan(
+		&run.ID, &run.Trigger, &run.Status, &run.Forced, &run.ErrorMessage,
+		&run.CreatedAt, &run.StartedAt, &run.CompletedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CollectionRun{}, ErrNotFound
+	}
+	if err != nil {
+		return CollectionRun{}, fmt.Errorf("get collection run execution context: %w", err)
+	}
+	return run, nil
+}
+
+func (s *Store) ListRunItems(ctx context.Context, runID int64, filter RunItemFilter) (RunItemPage, error) {
+	if s == nil || s.pool == nil {
+		return RunItemPage{}, fmt.Errorf("storage is disabled")
+	}
+	page, pageSize := normalizePage(filter.Page, filter.PageSize, 30, 100)
+	conditions := []string{"i.run_id=$1"}
+	args := []any{runID}
+	add := func(value any) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	if query := strings.TrimSpace(filter.Query); query != "" {
+		conditions = append(conditions, "(i.keyword ILIKE "+add("%"+query+"%")+" OR i.normalized_keyword ILIKE "+fmt.Sprintf("$%d", len(args))+")")
+	}
+	if statuses := normalizeStringList(filter.Statuses); len(statuses) > 0 {
+		for _, status := range statuses {
+			if status != RunPending && status != RunRunning && !terminalRunStatus(status) {
+				return RunItemPage{}, fmt.Errorf("%w: collection run item status", ErrInvalid)
+			}
+		}
+		conditions = append(conditions, "i.status=ANY("+add(statuses)+"::text[])")
+	}
+	where := strings.Join(conditions, " AND ")
+	var total int64
+	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM collection_run_items i WHERE "+where, args...).Scan(&total); err != nil {
+		return RunItemPage{}, fmt.Errorf("count collection run items: %w", err)
+	}
+	if total == 0 {
+		var exists bool
+		if err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM collection_runs WHERE id=$1)", runID).Scan(&exists); err != nil {
+			return RunItemPage{}, fmt.Errorf("check collection run: %w", err)
+		}
+		if !exists {
+			return RunItemPage{}, ErrNotFound
+		}
+	}
+	queryArgs := append(append([]any(nil), args...), pageSize, (page-1)*pageSize)
+	rows, err := s.pool.Query(ctx, "SELECT "+runItemSummaryColumns+" FROM collection_run_items i WHERE "+where+
+		" ORDER BY i.priority DESC, i.id"+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
+	if err != nil {
+		return RunItemPage{}, fmt.Errorf("list collection run items: %w", err)
+	}
+	defer rows.Close()
+	items := make([]CollectionRunItem, 0, pageSize)
+	for rows.Next() {
+		item, scanErr := scanRunItemSummary(rows)
+		if scanErr != nil {
+			return RunItemPage{}, fmt.Errorf("scan collection run item summary: %w", scanErr)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return RunItemPage{}, fmt.Errorf("iterate collection run items: %w", err)
+	}
+	return RunItemPage{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func (s *Store) ListRunItemSources(ctx context.Context, runID, itemID int64, filter RunSourceFilter) (RunSourcePage, error) {
+	if s == nil || s.pool == nil {
+		return RunSourcePage{}, fmt.Errorf("storage is disabled")
+	}
+	page, pageSize := normalizePage(filter.Page, filter.PageSize, 50, 100)
+	conditions := []string{"i.run_id=$1", "i.id=$2"}
+	args := []any{runID, itemID}
+	add := func(value any) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	if types := normalizeStringList(filter.Types); len(types) > 0 {
+		conditions = append(conditions, "entry.value->>'type'=ANY("+add(types)+"::text[])")
+	}
+	if statuses := normalizeStringList(filter.Statuses); len(statuses) > 0 {
+		conditions = append(conditions, "entry.value->>'status'=ANY("+add(statuses)+"::text[])")
+	}
+	where := strings.Join(conditions, " AND ")
+	var exists bool
+	if err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM collection_run_items WHERE run_id=$1 AND id=$2)", runID, itemID).Scan(&exists); err != nil {
+		return RunSourcePage{}, fmt.Errorf("check collection run item: %w", err)
+	}
+	if !exists {
+		return RunSourcePage{}, ErrNotFound
+	}
+	from := "collection_run_items i CROSS JOIN LATERAL jsonb_each(i.source_summary) entry"
+	var total int64
+	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM "+from+" WHERE "+where, args...).Scan(&total); err != nil {
+		return RunSourcePage{}, fmt.Errorf("count collection run item sources: %w", err)
+	}
+	queryArgs := append(append([]any(nil), args...), pageSize, (page-1)*pageSize)
+	rows, err := s.pool.Query(ctx, "SELECT entry.key, entry.value FROM "+from+" WHERE "+where+
+		" ORDER BY COALESCE(entry.value->>'type',''), COALESCE(entry.value->>'key',entry.key), entry.key"+
+		fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
+	if err != nil {
+		return RunSourcePage{}, fmt.Errorf("list collection run item sources: %w", err)
+	}
+	defer rows.Close()
+	items := make([]RunSource, 0, pageSize)
+	for rows.Next() {
+		var mapKey string
+		var raw []byte
+		if err := rows.Scan(&mapKey, &raw); err != nil {
+			return RunSourcePage{}, fmt.Errorf("scan collection run source: %w", err)
+		}
+		var item RunSource
+		if err := json.Unmarshal(raw, &item); err != nil {
+			return RunSourcePage{}, fmt.Errorf("decode collection run source: %w", err)
+		}
+		if item.Key == "" {
+			item.Key = mapKey
+		}
+		item.Key = truncateRunSourceText(item.Key, 300)
+		item.Type = truncateRunSourceText(item.Type, 100)
+		item.Status = truncateRunSourceText(item.Status, 100)
+		item.Error = truncateRunSourceText(item.Error, 1000)
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return RunSourcePage{}, fmt.Errorf("iterate collection run item sources: %w", err)
+	}
+	return RunSourcePage{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func truncateRunSourceText(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "..."
 }
 
 func (s *Store) listRunItems(ctx context.Context, runID int64) ([]CollectionRunItem, error) {
@@ -509,12 +768,23 @@ func (s *Store) ListRuns(ctx context.Context, filter RunFilter) (RunPage, error)
 		if scanErr != nil {
 			return RunPage{}, fmt.Errorf("scan collection run: %w", scanErr)
 		}
-		runs = append(runs, run)
+		runs = append(runs, compactRunListItem(run))
 	}
 	if err := rows.Err(); err != nil {
 		return RunPage{}, fmt.Errorf("iterate collection runs: %w", err)
 	}
 	return RunPage{Items: runs, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+// compactRunListItem keeps the collection-run list a statistics-only payload.
+// Error summaries and nested detail belong to GetRunSummary/ListRunItems and
+// can otherwise make a page exceed its response-size budget with multibyte
+// error text.
+func compactRunListItem(run CollectionRun) CollectionRun {
+	run.ErrorMessage = ""
+	run.CurrentItem = nil
+	run.Items = nil
+	return run
 }
 
 // RecoverRunningItems makes interrupted work claimable again after a restart.

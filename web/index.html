@@ -135,6 +135,7 @@
           <strong id="current-view-label">数据概览</strong>
         </div>
         <div class="topbar-actions">
+          <span id="overview-refresh-status" class="refresh-status" aria-live="polite" hidden></span>
           <span id="last-updated" class="last-updated" aria-live="polite"></span>
           <button class="icon-button" type="button" data-action="refresh-view" aria-label="刷新当前页面" title="刷新">
             <i data-lucide="refresh-cw" aria-hidden="true"></i>
@@ -532,6 +533,12 @@
             <p>启动任务后可在此查看进度</p>
           </div>
           <nav id="runs-pagination" class="pagination" aria-label="任务分页"></nav>
+        </section>
+
+        <section id="view-run-detail" class="view" data-page="run-detail" aria-labelledby="run-page-title" hidden>
+          <div class="page-heading with-actions"><div><p class="eyebrow">RUN DETAIL</p><h1 id="run-page-title">任务详情</h1></div><a class="button secondary" href="#runs" data-view="runs"><i data-lucide="arrow-left"></i><span>返回任务列表</span></a></div>
+          <div id="run-page-alert" class="inline-alert error" hidden></div><div id="run-page-summary"></div>
+          <section class="panel run-items-panel"><div class="panel-heading run-items-toolbar"><div><p class="panel-kicker">KEYWORDS</p><h2>关键词执行项</h2></div><div class="run-item-filters"><label class="search-field"><i data-lucide="search"></i><input id="run-item-search" type="search" placeholder="搜索关键词"></label><label class="select-field"><select id="run-item-status"><option value="">全部状态</option><option value="pending">等待中</option><option value="running">运行中</option><option value="success">成功</option><option value="success_empty">无结果</option><option value="failed">失败</option></select><i data-lucide="chevron-down"></i></label></div></div><div id="run-page-items" class="run-page-items"></div><div id="run-items-sentinel" class="infinite-sentinel"></div></section>
         </section>
 
         <section id="view-users" class="view" data-page="users" aria-labelledby="users-title" hidden>
@@ -991,19 +998,6 @@
         <button id="run-submit" class="button primary" type="submit"><i data-lucide="play" aria-hidden="true"></i><span>启动任务</span></button>
       </footer>
     </form>
-  </dialog>
-
-  <dialog id="run-detail-dialog" class="dialog wide-dialog" aria-labelledby="run-detail-title">
-    <div class="dialog-shell">
-      <header class="dialog-header">
-        <div>
-          <p class="eyebrow">RUN DETAIL</p>
-          <h2 id="run-detail-title">任务详情</h2>
-        </div>
-        <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
-      </header>
-      <div id="run-detail" class="dialog-body"></div>
-    </div>
   </dialog>
 
   <dialog id="keyword-sync-detail-dialog" class="dialog wide-dialog keyword-sync-detail-dialog" aria-labelledby="keyword-sync-detail-title">

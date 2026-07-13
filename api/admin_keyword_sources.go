@@ -133,6 +133,7 @@ func (h *AdminHandler) registerKeywordAPISourceRoutes(group *gin.RouterGroup) {
 	group.POST("/keyword-api-sources/:id/copy", h.copyKeywordAPISource)
 	group.GET("/keyword-api-sync-runs", h.listKeywordAPISyncRuns)
 	group.GET("/keyword-api-sync-runs/:id", h.getKeywordAPISyncRun)
+	group.GET("/keyword-api-sync-runs/:id/iterations", h.listKeywordAPISyncRunIterations)
 }
 
 func (h *AdminHandler) listKeywordAPISources(c *gin.Context) {
@@ -314,12 +315,61 @@ func (h *AdminHandler) testKeywordAPISource(c *gin.Context) {
 		respondKeywordAPISourceError(c, err, config)
 		return
 	}
+	candidates, candidatesTotal := keywordAPITestCandidates(result.Candidates)
+	extraction := keywordAPITestExtraction(result.Extraction)
 	c.JSON(http.StatusOK, model.NewSuccessResponse(gin.H{
 		"status_code": result.StatusCode, "duration_ms": result.Duration.Milliseconds(), "response_size": result.SizeBytes,
-		"content_type": result.ContentType, "response": result.JSON, "json": result.JSON,
-		"candidates": result.Candidates, "extraction": result.Extraction,
+		"content_type": result.ContentType, "candidates": candidates, "candidates_total": candidatesTotal,
+		"candidates_truncated": candidatesTotal > len(candidates), "extraction": extraction,
 		"iteration_value": iterationValue,
 	}))
+}
+
+func keywordAPITestCandidates(values []keywordsource.FieldCandidate) ([]keywordsource.FieldCandidate, int) {
+	const maxCandidates = 100
+	count := len(values)
+	if len(values) > maxCandidates {
+		values = values[:maxCandidates]
+	}
+	result := make([]keywordsource.FieldCandidate, len(values))
+	for index, candidate := range values {
+		candidate.Path = truncateRunText(candidate.Path, 300)
+		candidate.Samples = append([]string(nil), candidate.Samples...)
+		for sampleIndex := range candidate.Samples {
+			candidate.Samples[sampleIndex] = truncateRunText(candidate.Samples[sampleIndex], 160)
+		}
+		result[index] = candidate
+	}
+	return result, count
+}
+
+func keywordAPITestExtraction(value *keywordsource.ExtractionResult) *keywordsource.ExtractionResult {
+	if value == nil {
+		return nil
+	}
+	const maxValues = 20
+	result := *value
+	result.Path = truncateRunText(result.Path, 300)
+	result.Values = append([]keywordsource.KeywordValue(nil), value.Values...)
+	if len(result.Values) > maxValues {
+		result.Values = result.Values[:maxValues]
+	}
+	for index := range result.Values {
+		result.Values[index].Value = truncateRunText(result.Values[index].Value, 200)
+		result.Values[index].Normalized = truncateRunText(result.Values[index].Normalized, 200)
+	}
+	return &result
+}
+
+func truncateRunText(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "..."
 }
 
 func redactKeywordSourceListURL(raw string) string {
@@ -395,12 +445,29 @@ func (h *AdminHandler) getKeywordAPISyncRun(c *gin.Context) {
 	if !ok {
 		return
 	}
-	run, err := h.store.GetKeywordAPISyncRun(c.Request.Context(), id)
+	run, err := h.store.GetKeywordAPISyncRunSummary(c.Request.Context(), id)
 	if err != nil {
 		respondAdminError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, model.NewSuccessResponse(run))
+}
+
+func (h *AdminHandler) listKeywordAPISyncRunIterations(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	page, err := h.store.ListKeywordAPISyncRunIterations(c.Request.Context(), id,
+		queryInt(c, "page", 1), queryInt(c, "page_size", 50))
+	if err != nil {
+		respondAdminError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, model.NewSuccessResponse(page))
 }
 
 func bindKeywordAPISyncTrigger(c *gin.Context) (string, bool) {

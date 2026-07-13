@@ -152,20 +152,22 @@ func (r *CollectionRepository) ClaimPending(ctx context.Context) (*collection.Cl
 	if err != nil || item == nil {
 		return nil, err
 	}
-	run, err := r.Store.GetRun(ctx, item.RunID)
+	run, err := r.Store.GetRunExecutionContext(ctx, item.RunID)
 	if err != nil {
 		return nil, err
 	}
 	batch := toCollectionBatch(run)
-	var claimed collection.RunItem
-	for _, candidate := range batch.Items {
-		if candidate.ID == item.ID {
-			claimed = candidate
-			break
-		}
+	keywordID := int64(0)
+	if item.KeywordID != nil {
+		keywordID = *item.KeywordID
 	}
-	if claimed.ID == 0 {
-		return nil, fmt.Errorf("claimed collection item %d missing from run %d", item.ID, item.RunID)
+	claimed := collection.RunItem{
+		ID: item.ID, BatchID: item.RunID, Status: collection.RunStatus(item.Status),
+		Keyword: collection.Keyword{
+			ID: keywordID, Value: item.Keyword, Normalized: item.NormalizedKeyword,
+			KeywordType: item.KeywordType, Priority: item.Priority,
+			Cooldown: secondsDuration(item.CooldownSeconds),
+		},
 	}
 	startedAt := time.Now().UTC()
 	if item.StartedAt != nil {

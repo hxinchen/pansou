@@ -33,23 +33,37 @@ var (
 
 // Resource is one unique share URL and its accumulated discovery metadata.
 type Resource struct {
-	ID             int64             `json:"id"`
-	NormalizedURL  string            `json:"normalized_url"`
-	URL            string            `json:"url"`
-	Password       string            `json:"password,omitempty"`
-	Platform       string            `json:"platform,omitempty"`
-	Title          string            `json:"title,omitempty"`
-	Content        string            `json:"content,omitempty"`
-	LinkDatetime   *time.Time        `json:"link_datetime,omitempty"`
-	CheckStatus    string            `json:"check_status"`
-	LastCheckedAt  *time.Time        `json:"last_checked_at,omitempty"`
-	FirstSeenAt    time.Time         `json:"first_seen_at"`
-	LastSeenAt     time.Time         `json:"last_seen_at"`
-	DiscoveryCount int64             `json:"discovery_count"`
-	CreatedAt      time.Time         `json:"created_at"`
-	UpdatedAt      time.Time         `json:"updated_at"`
-	Sources        []ResourceSource  `json:"sources,omitempty"`
-	Keywords       []ResourceKeyword `json:"keywords,omitempty"`
+	ID             int64                   `json:"id"`
+	NormalizedURL  string                  `json:"normalized_url"`
+	URL            string                  `json:"url"`
+	Password       string                  `json:"password,omitempty"`
+	Platform       string                  `json:"platform,omitempty"`
+	Title          string                  `json:"title,omitempty"`
+	Content        string                  `json:"content,omitempty"`
+	LinkDatetime   *time.Time              `json:"link_datetime,omitempty"`
+	CheckStatus    string                  `json:"check_status"`
+	LastCheckedAt  *time.Time              `json:"last_checked_at,omitempty"`
+	FirstSeenAt    time.Time               `json:"first_seen_at"`
+	LastSeenAt     time.Time               `json:"last_seen_at"`
+	DiscoveryCount int64                   `json:"discovery_count"`
+	CreatedAt      time.Time               `json:"created_at"`
+	UpdatedAt      time.Time               `json:"updated_at"`
+	SourceCount    int64                   `json:"source_count"`
+	KeywordCount   int64                   `json:"keyword_count"`
+	SourcePreview  []ResourceSourcePreview `json:"source_preview,omitempty"`
+	Sources        []ResourceSource        `json:"sources,omitempty"`
+	Keywords       []ResourceKeyword       `json:"keywords,omitempty"`
+}
+
+type ResourceSourcePreview struct {
+	ID             int64     `json:"id"`
+	ResourceID     int64     `json:"resource_id"`
+	SourceType     string    `json:"source_type"`
+	SourceKey      string    `json:"source_key"`
+	SourceIdentity string    `json:"source_identity"`
+	Title          string    `json:"title,omitempty"`
+	LastSeenAt     time.Time `json:"last_seen_at"`
+	DiscoveryCount int64     `json:"discovery_count"`
 }
 
 type ResourceSource struct {
@@ -130,6 +144,25 @@ type ResourcePage struct {
 	Total    int64      `json:"total"`
 	Page     int        `json:"page"`
 	PageSize int        `json:"page_size"`
+}
+
+type ResourceAssociationFilter struct {
+	Page     int
+	PageSize int
+}
+
+type ResourceSourcePage struct {
+	Items    []ResourceSource `json:"items"`
+	Total    int64            `json:"total"`
+	Page     int              `json:"page"`
+	PageSize int              `json:"page_size"`
+}
+
+type ResourceKeywordPage struct {
+	Items    []ResourceKeyword `json:"items"`
+	Total    int64             `json:"total"`
+	Page     int               `json:"page"`
+	PageSize int               `json:"page_size"`
 }
 
 type UpsertResult struct {
@@ -220,11 +253,11 @@ type CollectionRun struct {
 	FoundCount     int                 `json:"found_count"`
 	NewCount       int                 `json:"new_count"`
 	DuplicateCount int                 `json:"duplicate_count"`
-	SourceSummary  map[string]any      `json:"source_summary,omitempty"`
 	ErrorMessage   string              `json:"error_message,omitempty"`
 	CreatedAt      time.Time           `json:"created_at"`
 	StartedAt      *time.Time          `json:"started_at,omitempty"`
 	CompletedAt    *time.Time          `json:"completed_at,omitempty"`
+	CurrentItem    *CollectionRunItem  `json:"current_item,omitempty"`
 	Items          []CollectionRunItem `json:"items,omitempty"`
 }
 
@@ -242,6 +275,10 @@ type CollectionRunItem struct {
 	FoundCount        int            `json:"found_count"`
 	NewCount          int            `json:"new_count"`
 	DuplicateCount    int            `json:"duplicate_count"`
+	SourceTotal       int            `json:"source_total"`
+	SourceSuccess     int            `json:"source_success"`
+	SourceEmpty       int            `json:"source_empty"`
+	SourceFailed      int            `json:"source_failed"`
 	SourceSummary     map[string]any `json:"source_summary,omitempty"`
 	ErrorMessage      string         `json:"error_message,omitempty"`
 	CreatedAt         time.Time      `json:"created_at"`
@@ -290,6 +327,46 @@ type RunPage struct {
 	Total    int64           `json:"total"`
 	Page     int             `json:"page"`
 	PageSize int             `json:"page_size"`
+}
+
+type RunItemFilter struct {
+	Query    string
+	Statuses []string
+	Page     int
+	PageSize int
+}
+
+type RunItemPage struct {
+	Items    []CollectionRunItem `json:"items"`
+	Total    int64               `json:"total"`
+	Page     int                 `json:"page"`
+	PageSize int                 `json:"page_size"`
+}
+
+type RunSourceFilter struct {
+	Types    []string
+	Statuses []string
+	Page     int
+	PageSize int
+}
+
+type RunSource struct {
+	Key            string `json:"key"`
+	Type           string `json:"type"`
+	Status         string `json:"status"`
+	Attempts       int    `json:"attempts"`
+	ResultCount    int    `json:"result_count"`
+	NewCount       int    `json:"new_count"`
+	DuplicateCount int    `json:"duplicate_count"`
+	DurationMS     int64  `json:"duration_ms"`
+	Error          string `json:"error,omitempty"`
+}
+
+type RunSourcePage struct {
+	Items    []RunSource `json:"items"`
+	Total    int64       `json:"total"`
+	Page     int         `json:"page"`
+	PageSize int         `json:"page_size"`
 }
 
 type StatusCount struct {

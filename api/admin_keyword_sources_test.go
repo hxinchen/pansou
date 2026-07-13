@@ -171,11 +171,43 @@ func TestRegisterKeywordAPISourceRoutesIncludesSyncRunHistory(t *testing.T) {
 	for _, route := range []string{
 		"GET /api/admin/keyword-api-sync-runs",
 		"GET /api/admin/keyword-api-sync-runs/:id",
+		"GET /api/admin/keyword-api-sync-runs/:id/iterations",
 		"POST /api/admin/keyword-api-sources/:id/sync",
 	} {
 		if !routes[route] {
 			t.Fatalf("route %q is not registered: %#v", route, routes)
 		}
+	}
+}
+
+func TestKeywordAPITestPreviewIsBounded(t *testing.T) {
+	candidates := make([]keywordsource.FieldCandidate, 125)
+	for index := range candidates {
+		candidates[index] = keywordsource.FieldCandidate{
+			Path: strings.Repeat("p", 400), Samples: []string{
+				strings.Repeat("s", 300), strings.Repeat("t", 300), strings.Repeat("u", 300),
+			},
+		}
+	}
+	preview, total := keywordAPITestCandidates(candidates)
+	if total != 125 || len(preview) != 100 || len([]rune(preview[0].Path)) > 303 || len([]rune(preview[0].Samples[0])) > 163 {
+		t.Fatalf("candidate preview total=%d len=%d first=%#v", total, len(preview), preview[0])
+	}
+	values := make([]keywordsource.KeywordValue, 30)
+	for index := range values {
+		values[index] = keywordsource.KeywordValue{Value: strings.Repeat("v", 300), Normalized: strings.Repeat("n", 300)}
+	}
+	extraction := keywordAPITestExtraction(&keywordsource.ExtractionResult{RawCount: 40, UniqueCount: 30, Values: values})
+	if extraction.RawCount != 40 || extraction.UniqueCount != 30 || len(extraction.Values) != 20 ||
+		len([]rune(extraction.Values[0].Value)) > 203 {
+		t.Fatalf("extraction preview = %#v", extraction)
+	}
+	encoded, err := json.Marshal(gin.H{"candidates": preview, "extraction": extraction})
+	if err != nil {
+		t.Fatalf("marshal API test preview: %v", err)
+	}
+	if len(encoded) >= 256*1024 {
+		t.Fatalf("API test preview = %d bytes, want < 256 KiB", len(encoded))
 	}
 }
 

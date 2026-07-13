@@ -28,11 +28,17 @@
   var PAGE_SIZE = 20;
   var ACTIVE_STATUSES = ['pending', 'running'];
   var ACTIVE_KEYWORD_SYNC_STATUSES = ['queued', 'running'];
+  var OVERVIEW_DAYS = 7;
+  var OVERVIEW_ACTIVE_REFRESH_MS = 5000;
+  var OVERVIEW_IDLE_REFRESH_MS = 30000;
+  var OVERVIEW_FAST_REFRESH_MS = 2000;
+  var OVERVIEW_FAST_REFRESH_LIMIT = 3;
   var viewLabels = {
     overview: '数据概览',
     resources: '资源库',
     keywords: '关键词',
     runs: '采集任务',
+    'run-detail': '任务详情',
     users: '用户管理',
     usage: 'API 监控',
     sources: '搜索来源'
@@ -46,19 +52,22 @@
     loaded: {},
     charts: {},
     overview: null,
+    overviewTrends: [],
+    overviewRefresh: { timer: null, controller: null, serial: 0, fastRetryCount: 0 },
     resources: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
     keywords: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, selected: new Set(), query: {}, tab: 'list' },
     keywordSources: { items: [], loaded: false, editing: null, testResponse: null, selectedPath: '', testedSignature: '', originalSignature: '', requestSerial: 0, pollTimer: null, editorModes: { query: 'kv', header: 'kv', form: 'kv' } },
-    keywordSyncRuns: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, loaded: false, requestSerial: 0, detailID: null, detailPollTimer: null },
+    keywordSyncRuns: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, loaded: false, requestSerial: 0, detailID: null, detailPollTimer: null, detailController: null, iterationController: null, iterations: [], iterationPage: 1, iterationPages: 1 },
     runs: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
     users: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
     usage: { overview: null, trends: [], logs: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, range: '7d', query: {} },
     sources: { catalog: [], config: null, credentials: [], tab: 'admin', configTab: 'tg', dirty: false, sharedTotal: 0, pluginSearch: '', credentialEditing: null, credentialEditMode: 'login', loginFlow: null, loginFlowTimer: null, credentialQuery: {} },
-    runPicker: { items: [], selected: new Set(), search: '' },
-    currentRunDetail: null,
+    runPicker: { items: [], selected: new Set(), search: '', page: 1, pages: 1, total: 0, loading: false, controller: null, searchTimer: null },
+    runDetail: { id: null, summary: null, items: [], page: 1, pages: 1, loadedPages: 0, total: 0, loading: false, query: {}, controller: null, itemsController: null, pollController: null, sourceControllers: {}, observer: null },
     pollTimer: null,
     detailPollTimer: null,
     requestSerial: { resources: 0, keywords: 0, runs: 0, users: 0, usage: 0, usageLogs: 0, sources: 0 },
+    requestControllers: {},
     confirmCallback: null
   };
 
@@ -360,6 +369,25 @@
     return payload === null ? {} : payload;
   }
 
+  function replaceRequestController(scope) {
+    if (state.requestControllers[scope]) state.requestControllers[scope].abort();
+    var controller = new AbortController();
+    state.requestControllers[scope] = controller;
+    return controller;
+  }
+
+  function finishRequestController(scope, controller) {
+    if (state.requestControllers[scope] === controller) state.requestControllers[scope] = null;
+  }
+
+  function cancelViewRequests(view) {
+    var scopes = view === 'keywords' ? ['keywords', 'keywordSyncRuns'] : (view === 'usage' ? ['usage', 'usageLogs'] : [view]);
+    scopes.forEach(function (scope) {
+      if (state.requestControllers[scope]) state.requestControllers[scope].abort();
+      state.requestControllers[scope] = null;
+    });
+  }
+
   async function apiFallback(requests) {
     var lastError = null;
     for (var i = 0; i < requests.length; i += 1) {
@@ -432,6 +460,7 @@
   }
 
   function showLogin(message) {
+    stopOverviewRefresh(true);
     byId('app-shell').hidden = true;
     byId('login-view').hidden = false;
     var error = byId('login-error');
@@ -548,10 +577,17 @@
   }
 
   function navigate(view, force) {
+    var runMatch = String(view || '').match(/^runs\/(\d+)$/);
+    if (runMatch) { state.runDetail.id = runMatch[1]; view = 'run-detail'; }
     if (!viewLabels[view]) view = 'overview';
     if (!force && state.view === view && state.loaded[view]) return;
+    var previousView = state.view;
+    if (previousView === 'overview' && view !== 'overview') stopOverviewRefresh(true);
+    if (previousView === 'run-detail' && view !== 'run-detail') cancelRunDetailRequests();
+    if (previousView !== view && previousView !== 'run-detail') cancelViewRequests(previousView);
     state.view = view;
-    if (location.hash !== '#' + view) history.replaceState(null, '', '#' + view);
+    var targetHash = view === 'run-detail' ? '#runs/' + state.runDetail.id : '#' + view;
+    if (location.hash !== targetHash) history.replaceState(null, '', targetHash);
 
     document.querySelectorAll('.view').forEach(function (section) {
       var active = section.dataset.page === view;
@@ -567,7 +603,7 @@
     closeMenu();
     stopDetailPolling();
     if (view !== 'keywords') stopKeywordSourcePolling();
-    loadView(view, force);
+    loadView(view, force || (view === 'overview' && previousView !== 'overview'));
     byId('main-content').focus({ preventScroll: true });
     window.setTimeout(resizeCharts, 50);
   }
@@ -581,28 +617,124 @@
       return loadKeywords(force);
     }
     if (view === 'runs') return loadRuns({ force: force });
+    if (view === 'run-detail') return loadRunPage(state.runDetail.id);
     if (view === 'users') return loadUsers(force);
     if (view === 'usage') return loadUsage(force);
     if (view === 'sources') return loadSources(force);
   }
 
   function refreshCurrentView() {
-    state.loaded[state.view] = false;
+    if (state.view !== 'overview') state.loaded[state.view] = false;
     var button = document.querySelector('[data-action="refresh-view"] svg');
     if (button) button.classList.add('spin');
-    Promise.resolve(loadView(state.view, true)).finally(function () {
+    var request = state.view === 'overview'
+      ? loadOverview(true, { forceRefresh: true })
+      : loadView(state.view, true);
+    Promise.resolve(request).finally(function () {
       if (button) button.classList.remove('spin');
       checkHealth();
     });
   }
 
-  function updateTimestamp() {
+  function updateTimestamp(value) {
+    var date = arguments.length ? toDate(value) : new Date();
+    if (!date) {
+      byId('last-updated').textContent = '更新时间未知';
+      return;
+    }
     byId('last-updated').textContent = '更新于 ' + new Intl.DateTimeFormat('zh-CN', {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
       hour12: false
-    }).format(new Date());
+    }).format(date);
+  }
+
+  function clearOverviewRefreshTimer() {
+    if (!state.overviewRefresh.timer) return;
+    window.clearTimeout(state.overviewRefresh.timer);
+    state.overviewRefresh.timer = null;
+  }
+
+  function setOverviewRefreshStatus(refreshing) {
+    var element = byId('overview-refresh-status');
+    if (!element) return;
+    var visible = Boolean(refreshing && state.view === 'overview' && state.overview);
+    element.hidden = !visible;
+    element.innerHTML = visible ? icon('loader-circle', 'spin') + '<span>正在更新</span>' : '';
+    if (visible) refreshIcons(element);
+  }
+
+  function stopOverviewRefresh(abortRequest) {
+    clearOverviewRefreshTimer();
+    if (abortRequest && state.overviewRefresh.controller) {
+      state.overviewRefresh.serial += 1;
+      state.overviewRefresh.controller.abort();
+      state.overviewRefresh.controller = null;
+    }
+    setOverviewRefreshStatus(false);
+  }
+
+  function overviewCanRefresh() {
+    return Boolean(state.token && state.view === 'overview' && document.visibilityState === 'visible');
+  }
+
+  function overviewGeneratedAt(data) {
+    return pick(data, ['generated_at', 'generatedAt'], null);
+  }
+
+  function overviewHasActiveRun(data) {
+    var run = pick(data, ['active_run', 'active_batch', 'current_run', 'current_batch'], null);
+    var status = String(pick(run, ['status', 'state'], '')).toLowerCase();
+    return ACTIVE_STATUSES.indexOf(status) !== -1;
+  }
+
+  function formatOverviewClock(value) {
+    var date = toDate(value);
+    if (!date) return '未知时间';
+    return new Intl.DateTimeFormat('zh-CN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).format(date);
+  }
+
+  function updateOverviewFreshness(data, error) {
+    var generatedAt = overviewGeneratedAt(data);
+    var cacheLabel = formatOverviewClock(generatedAt);
+    if (error) {
+      showAlert('overview-alert', '数据暂未更新，当前显示 ' + cacheLabel + ' 缓存。' + (error.message || '刷新失败'), 'warning');
+      return;
+    }
+    if (boolValue(pick(data, ['stale'], false), false)) {
+      var message = '数据暂未更新，当前显示 ' + cacheLabel + ' 缓存';
+      if (boolValue(pick(data, ['refreshing'], false), false)) message += '，后台正在刷新';
+      showAlert('overview-alert', message, 'warning');
+      return;
+    }
+    showAlert('overview-alert', '');
+  }
+
+  function scheduleOverviewRefresh(data) {
+    clearOverviewRefreshTimer();
+    if (!overviewCanRefresh()) return;
+
+    var stale = boolValue(pick(data, ['stale'], false), false);
+    var refreshing = boolValue(pick(data, ['refreshing'], false), false);
+    var delay;
+    if (stale && refreshing && state.overviewRefresh.fastRetryCount < OVERVIEW_FAST_REFRESH_LIMIT) {
+      state.overviewRefresh.fastRetryCount += 1;
+      delay = OVERVIEW_FAST_REFRESH_MS;
+    } else {
+      if (!stale || !refreshing) state.overviewRefresh.fastRetryCount = 0;
+      delay = overviewHasActiveRun(data) ? OVERVIEW_ACTIVE_REFRESH_MS : OVERVIEW_IDLE_REFRESH_MS;
+    }
+
+    state.overviewRefresh.timer = window.setTimeout(function () {
+      state.overviewRefresh.timer = null;
+      loadOverview(true, { background: true });
+    }, delay);
   }
 
   function openMenu() {
@@ -716,9 +848,16 @@
         }
       });
       dialog.addEventListener('close', function () {
-        if (dialog.id === 'run-detail-dialog') stopDetailPolling();
+        if (dialog.id === 'resource-dialog') cancelResourceDetailRequests(dialog);
+        if (dialog.id === 'run-dialog') {
+          if (state.runPicker.controller) state.runPicker.controller.abort();
+          clearTimeout(state.runPicker.searchTimer);
+          state.runPicker.controller = null;
+          state.runPicker.loading = false;
+        }
         if (dialog.id === 'keyword-sync-detail-dialog') {
           stopKeywordSyncDetailPolling();
+          cancelKeywordSyncDetailRequests();
           state.keywordSyncRuns.detailID = null;
         }
       });
@@ -743,33 +882,88 @@
     if (callback) callback(result);
   }
 
-  async function loadOverview(force) {
-    if (state.loaded.overview && !force) return;
-    state.loaded.overview = true;
-    showAlert('overview-alert', '');
-    byId('stat-grid').innerHTML = '<article class="stat-card skeleton-card"></article>'.repeat(4);
-    byId('recent-runs-body').innerHTML = '<tr class="table-loading"><td colspan="7"><span>' + icon('loader-circle', 'spin') + '正在加载</span></td></tr>';
-    refreshIcons();
+  async function loadOverview(force, options) {
+    options = options || {};
+    if (state.loaded.overview && !force) {
+      scheduleOverviewRefresh(state.overview || {});
+      return;
+    }
+    if (!overviewCanRefresh()) {
+      stopOverviewRefresh(true);
+      return;
+    }
 
-    var overviewResult;
-    var trendsResult;
+    clearOverviewRefreshTimer();
+    if (options.forceRefresh) state.overviewRefresh.fastRetryCount = 0;
+
+    var hasExistingData = Boolean(state.overview);
+    if (!hasExistingData) {
+      showAlert('overview-alert', '');
+      byId('stat-grid').innerHTML = '<article class="stat-card skeleton-card"></article>'.repeat(4);
+      byId('recent-runs-body').innerHTML = '<tr class="table-loading"><td colspan="7"><span>' + icon('loader-circle', 'spin') + '正在加载</span></td></tr>';
+      refreshIcons();
+    } else {
+      setOverviewRefreshStatus(true);
+    }
+
+    if (state.overviewRefresh.controller) state.overviewRefresh.controller.abort();
+    var controller = new AbortController();
+    var serial = state.overviewRefresh.serial + 1;
+    state.overviewRefresh.serial = serial;
+    state.overviewRefresh.controller = controller;
+
     try {
-      var settled = await Promise.allSettled([
-        apiRequest(API.overview),
-        apiRequest(API.trends, { query: { days: 7 } })
-      ]);
-      if (settled[0].status === 'rejected') throw settled[0].reason;
-      overviewResult = settled[0].value || {};
-      trendsResult = settled[1].status === 'fulfilled'
-        ? settled[1].value
-        : pick(overviewResult, ['trends', 'trend', 'daily_stats'], []);
+      var overviewResult = await apiRequest(API.overview, {
+        query: { days: OVERVIEW_DAYS, force: options.forceRefresh ? 1 : undefined },
+        signal: controller.signal
+      });
+      if (serial !== state.overviewRefresh.serial) return;
+
+      overviewResult = overviewResult || {};
+      var trendsResult = pick(overviewResult, ['trends', 'trend', 'daily_stats'], null);
+      var trendError = null;
+      if (trendsResult === null) {
+        try {
+          trendsResult = await apiRequest(API.trends, {
+            query: { days: OVERVIEW_DAYS },
+            signal: controller.signal
+          });
+        } catch (error) {
+          if (error && error.name === 'AbortError') throw error;
+          trendError = error;
+          trendsResult = state.overviewTrends;
+        }
+      }
+      if (serial !== state.overviewRefresh.serial) return;
+
       state.overview = overviewResult;
-      renderOverview(overviewResult, trendsResult);
-      updateTimestamp();
+      state.overviewTrends = trendsResult || [];
+      state.loaded.overview = true;
+      renderOverview(overviewResult, state.overviewTrends);
+      updateTimestamp(overviewGeneratedAt(overviewResult));
+      updateOverviewFreshness(overviewResult);
+      if (trendError && !boolValue(pick(overviewResult, ['stale'], false), false)) {
+        showAlert('overview-alert', '概览已更新，但趋势数据加载失败：' + (trendError.message || '请求失败'), 'warning');
+      }
+      scheduleOverviewRefresh(overviewResult);
     } catch (error) {
-      state.loaded.overview = false;
-      showAlert('overview-alert', error.message || '概览数据加载失败');
-      renderOverview({}, []);
+      if (serial !== state.overviewRefresh.serial || (error && error.name === 'AbortError')) return;
+      if (state.overview) {
+        state.loaded.overview = true;
+        updateOverviewFreshness(state.overview, error);
+        scheduleOverviewRefresh(state.overview);
+      } else {
+        state.loaded.overview = false;
+        showAlert('overview-alert', error.message || '概览数据加载失败');
+        renderOverview({}, []);
+        updateTimestamp(null);
+        scheduleOverviewRefresh({});
+      }
+    } finally {
+      if (serial === state.overviewRefresh.serial) {
+        state.overviewRefresh.controller = null;
+        setOverviewRefreshStatus(false);
+      }
     }
   }
 
@@ -1028,9 +1222,10 @@
       page: state.resources.page,
       page_size: state.resources.pageSize
     });
+    var controller = replaceRequestController('resources');
     try {
-      var data = await apiRequest(API.resources, { query: query });
-      if (serial !== state.requestSerial.resources) return;
+      var data = await apiRequest(API.resources, { query: query, signal: controller.signal });
+      if (state.requestControllers.resources !== controller || serial !== state.requestSerial.resources) return;
       var items = arrayFrom(data, ['resources', 'items', 'results']);
       var meta = paginationMeta(data, items, state.resources.page, state.resources.pageSize);
       state.resources.items = items;
@@ -1043,11 +1238,11 @@
       state.loaded.resources = false;
       byId('resources-body').innerHTML = '';
       showAlert('resources-alert', error.message || '资源加载失败');
-    }
+    } finally { finishRequestController('resources', controller); }
   }
 
   function resourceSources(resource) {
-    var sources = arrayFrom(pick(resource, ['sources', 'resource_sources'], []), ['items', 'sources']);
+    var sources = arrayFrom(pick(resource, ['source_preview', 'sources', 'resource_sources'], []), ['items', 'sources']);
     if (!sources.length) {
       var source = pick(resource, ['source', 'source_key', 'source_type'], '');
       if (source) sources = [{ source: source, source_type: pick(resource, ['source_type'], '') }];
@@ -1059,8 +1254,9 @@
     var type = String(pick(source, ['source_type', 'type'], '')).toLowerCase();
     var name = pick(source, ['source_key', 'source', 'name', 'channel', 'plugin'], type || '未知');
     if (!type && String(name).indexOf(':') > -1) type = String(name).split(':')[0];
-    var display = sourceTypeLabels[type] || name;
-    if (name && name !== type && sourceTypeLabels[type]) display += ' · ' + name;
+    var displayName = String(name).replace(/^(plugin|tg|telegram|external):/i, '');
+    var display = sourceTypeLabels[type] || displayName;
+    if (displayName && displayName !== type && sourceTypeLabels[type]) display += ' · ' + displayName;
     return '<span class="source-badge ' + escapeHTML(type) + '" title="' + escapeHTML(name) + '">' + escapeHTML(display) + '</span>';
   }
 
@@ -1083,13 +1279,14 @@
       var diskType = String(pick(resource, ['disk_type', 'platform', 'cloud_type', 'type'], 'others')).toLowerCase();
       var status = normalizedStatus(resource);
       var sources = resourceSources(resource);
+      var sourceTotal = numberValue(pick(resource, ['source_count'], sources.length), sources.length);
       var discoveryCount = numberValue(pick(resource, ['discovery_count', 'found_count', 'discover_count'], 1));
       var lastSeen = pick(resource, ['last_seen_at', 'last_discovered_at', 'updated_at', 'discovered_at'], null);
       return '<tr>' +
         '<td><div class="resource-cell"><div class="resource-title" title="' + escapeHTML(title) + '">' + escapeHTML(title) + '</div><div class="resource-link" title="' + escapeHTML(url) + '">' + escapeHTML(url) + '</div></div></td>' +
         '<td><span class="type-badge">' + escapeHTML(diskLabels[diskType] || diskType) + '</span></td>' +
         '<td>' + statusBadge(status) + '</td>' +
-        '<td><div class="source-stack">' + sources.slice(0, 2).map(sourceBadge).join('') + (sources.length > 2 ? '<span class="muted">+' + (sources.length - 2) + '</span>' : '') + '</div></td>' +
+        '<td><div class="source-stack">' + sources.slice(0, 2).map(sourceBadge).join('') + (sourceTotal > sources.length ? '<span class="muted">+' + (sourceTotal - sources.length) + '</span>' : '') + '</div></td>' +
         '<td>' + formatNumber(discoveryCount) + '</td>' +
         '<td title="' + escapeHTML(formatDate(lastSeen, true)) + '">' + escapeHTML(relativeTime(lastSeen)) + '</td>' +
         '<td><div class="row-actions">' +
@@ -1132,16 +1329,37 @@
   async function openResourceDetail(id) {
     var dialog = byId('resource-dialog');
     var container = byId('resource-detail');
-    dialog.showModal();
+    cancelResourceDetailRequests(dialog);
+    var controller = new AbortController();
+    dialog._requestController = controller;
+    dialog.dataset.resourceId = String(id);
+    if (!dialog.open) dialog.showModal();
     container.innerHTML = '<div class="table-loading"><span>' + icon('loader-circle', 'spin') + '正在加载</span></div>';
     refreshIcons(container);
     try {
-      var data = await apiRequest(API.resources + '/' + encodeURIComponent(id));
+      var data = await apiRequest(API.resources + '/' + encodeURIComponent(id), { signal: controller.signal });
+      if (dialog._requestController !== controller || !dialog.open || dialog.dataset.resourceId !== String(id)) return;
       var resource = pick(data, ['resource'], data);
       renderResourceDetail(resource);
     } catch (error) {
-      container.innerHTML = '<div class="inline-alert error">' + escapeHTML(error.message || '资源详情加载失败') + '</div>';
+      if (error.name !== 'AbortError') container.innerHTML = '<div class="inline-alert error">' + escapeHTML(error.message || '资源详情加载失败') + '</div>';
+    } finally {
+      if (dialog._requestController === controller) dialog._requestController = null;
     }
+  }
+
+  function cancelResourceDetailRequests(dialog) {
+    dialog = dialog || byId('resource-dialog');
+    if (!dialog) return;
+    if (dialog._requestController) {
+      dialog._requestController.abort();
+      dialog._requestController = null;
+    }
+    dialog.querySelectorAll('[data-resource-related]').forEach(function (details) {
+      if (details._controller) details._controller.abort();
+      details._controller = null;
+      details.dataset.loading = 'false';
+    });
   }
 
   function renderResourceDetail(resource) {
@@ -1151,8 +1369,9 @@
     var normalizedURL = pick(resource, ['normalized_url'], url);
     var password = pick(resource, ['password', 'extraction_code', 'code'], '');
     var diskType = String(pick(resource, ['disk_type', 'platform', 'cloud_type', 'type'], 'others')).toLowerCase();
-    var sources = resourceSources(resource);
-    var keywords = arrayFrom(pick(resource, ['keywords', 'resource_keywords'], []), ['items', 'keywords']);
+    var resourceID = pick(resource, ['id', 'resource_id'], '');
+    var sourceCount = numberValue(pick(resource, ['source_count'], 0));
+    var keywordCount = numberValue(pick(resource, ['keyword_count'], 0));
     var externalURL = safeExternalURL(url);
     var linkHTML = '<div class="link-box">' +
       (externalURL ? '<a href="' + escapeHTML(externalURL) + '" target="_blank" rel="noopener noreferrer">' + escapeHTML(url) + '</a>' : '<span class="resource-link">' + escapeHTML(url) + '</span>') +
@@ -1177,41 +1396,40 @@
         '<div class="detail-pair"><dt>发现次数</dt><dd>' + formatNumber(pick(resource, ['discovery_count', 'found_count', 'discover_count'], 1)) + '</dd></div>' +
         '<div class="detail-pair"><dt>最近检测</dt><dd>' + escapeHTML(formatDate(pick(resource, ['checked_at', 'last_checked_at'], null), true)) + '</dd></div>' +
       '</dl></section>' +
-      '<section class="detail-section"><h3>关联关键词</h3><div class="source-stack">' +
-        (keywords.length ? keywords.map(function (keyword) {
-          return '<span class="type-badge">' + escapeHTML(typeof keyword === 'string' ? keyword : pick(keyword, ['keyword', 'name'], '')) + '</span>';
-        }).join('') : '<span class="muted">无关联关键词</span>') +
-      '</div></section>' +
-      '<section class="detail-section"><h3>来源明细</h3><div class="source-list">' +
-        (sources.length ? sources.map(function (source) {
-          return '<article class="source-item"><strong>' + escapeHTML(pick(source, ['source_key', 'source', 'name', 'channel', 'plugin'], '未知来源')) + '</strong>' +
-            sourceBadge(source) +
-            '<small class="full-row">发现于 ' + escapeHTML(formatDate(pick(source, ['discovered_at', 'created_at', 'first_seen_at'], null), true)) + '</small>' +
-          '</article>';
-        }).join('') : '<span class="muted">暂无来源记录</span>') +
-      '</div></section>';
+      '<details class="detail-section lazy-detail" data-resource-related="keywords" data-resource-id="' + escapeHTML(resourceID) + '"><summary><h3>关联关键词</h3><span class="muted">' + formatNumber(keywordCount) + ' 项 · 展开加载</span></summary><div data-resource-related-content="keywords"></div></details>' +
+      '<details class="detail-section lazy-detail" data-resource-related="sources" data-resource-id="' + escapeHTML(resourceID) + '"><summary><h3>来源明细</h3><span class="muted">' + formatNumber(sourceCount) + ' 项 · 展开加载</span></summary><div data-resource-related-content="sources"></div></details>';
     refreshIcons(byId('resource-detail'));
   }
 
-  async function loadKeywords(force, options) {
-    options = options || {};
-    if (state.loaded.keywords && !force && !options.picker) return state.keywords.items;
-    if (!options.picker) {
-      state.loaded.keywords = true;
-      var serial = ++state.requestSerial.keywords;
-      showAlert('keywords-alert', '');
-      byId('keywords-empty').hidden = true;
-      byId('keywords-pagination').innerHTML = '';
-      tableLoading('keywords-body', 8);
-    }
-    var query = options.picker
-      ? { page: 1, page_size: 1000, enabled: true }
-      : Object.assign({}, state.keywords.query, { page: state.keywords.page, page_size: state.keywords.pageSize });
+  async function loadResourceRelated(details) {
+    if (details.dataset.loaded === 'true' || details.dataset.loading === 'true') return;
+    var type = details.dataset.resourceRelated, id = details.dataset.resourceId, target = details.querySelector('[data-resource-related-content]');
+    var page = numberValue(details.dataset.nextPage, 1); details.dataset.loading = 'true';
+    var controller = new AbortController(); details._controller = controller; if (page === 1) target.innerHTML = '<div class="table-loading"><span>' + icon('loader-circle','spin') + '正在加载</span></div>';
     try {
-      var data = await apiRequest(API.keywords, { query: query });
+      var data = await apiRequest(API.resources + '/' + encodeURIComponent(id) + '/' + type, { query: { page: page, page_size: 50 }, signal: controller.signal });
+      if (details._controller !== controller || !details.isConnected || !details.closest('dialog').open) return;
+      var items = arrayFrom(data, [type, 'items']), meta = paginationMeta(data, items, page, 50); details._items = (details._items || []).concat(items); details.dataset.nextPage = String(page + 1); details.dataset.loaded = page >= meta.pages ? 'true' : 'false';
+      if (type === 'keywords') target.innerHTML = '<div class="source-stack">' + (details._items.length ? details._items.map(function(k){return '<span class="type-badge">'+escapeHTML(typeof k==='string'?k:pick(k,['keyword','name'],'—'))+'</span>';}).join('') : '<span class="muted">无关联关键词</span>') + '</div>';
+      else target.innerHTML = '<div class="source-list">' + (details._items.length ? details._items.map(function(s){return '<article class="source-item"><strong>'+escapeHTML(pick(s,['source_key','source','name','channel','plugin'],'未知来源'))+'</strong>'+sourceBadge(s)+'<small class="full-row">发现于 '+escapeHTML(formatDate(pick(s,['discovered_at','created_at','first_seen_at'],null),true))+'</small></article>';}).join('') : '<span class="muted">暂无来源记录</span>') + '</div>';
+      if (page < meta.pages) target.innerHTML += '<button class="button secondary" type="button" data-action="load-more-resource-related">加载更多（' + details._items.length + ' / ' + meta.total + '）</button>'; refreshIcons(target);
+    } catch(error){if(error.name!=='AbortError')target.innerHTML+='<div class="inline-alert error">'+escapeHTML(error.message||'加载失败')+'</div>';} finally { if (details._controller === controller) { details._controller = null; details.dataset.loading='false'; } }
+  }
+
+  async function loadKeywords(force) {
+    if (state.loaded.keywords && !force) return state.keywords.items;
+    state.loaded.keywords = true;
+    var serial = ++state.requestSerial.keywords;
+    showAlert('keywords-alert', '');
+    byId('keywords-empty').hidden = true;
+    byId('keywords-pagination').innerHTML = '';
+    tableLoading('keywords-body', 8);
+    var query = Object.assign({}, state.keywords.query, { page: state.keywords.page, page_size: state.keywords.pageSize });
+    var controller = replaceRequestController('keywords');
+    try {
+      var data = await apiRequest(API.keywords, { query: query, signal: controller.signal });
       var items = arrayFrom(data, ['keywords', 'items', 'results']);
-      if (options.picker) return items;
-      if (serial !== state.requestSerial.keywords) return [];
+      if (state.requestControllers.keywords !== controller || serial !== state.requestSerial.keywords) return [];
       var meta = paginationMeta(data, items, state.keywords.page, state.keywords.pageSize);
       state.keywords.items = items;
       Object.assign(state.keywords, meta);
@@ -1223,13 +1441,13 @@
       updateTimestamp();
       return items;
     } catch (error) {
-      if (options.picker) throw error;
+      if (error.name === 'AbortError') return [];
       if (serial !== state.requestSerial.keywords) return [];
       state.loaded.keywords = false;
       byId('keywords-body').innerHTML = '';
       showAlert('keywords-alert', error.message || '关键词加载失败');
       return [];
-    }
+    } finally { finishRequestController('keywords', controller); }
   }
 
   function renderKeywords() {
@@ -1674,9 +1892,10 @@
       page: state.keywordSyncRuns.page,
       page_size: state.keywordSyncRuns.pageSize
     });
+    var controller = replaceRequestController('keywordSyncRuns');
     try {
-      var data = await apiRequest(API.keywordAPISyncRuns, { query: query });
-      if (serial !== state.keywordSyncRuns.requestSerial) return;
+      var data = await apiRequest(API.keywordAPISyncRuns, { query: query, signal: controller.signal });
+      if (state.requestControllers.keywordSyncRuns !== controller || serial !== state.keywordSyncRuns.requestSerial) return;
       var items = arrayFrom(data, ['items', 'runs', 'results']);
       var meta = paginationMeta(data, items, state.keywordSyncRuns.page, state.keywordSyncRuns.pageSize);
       state.keywordSyncRuns.items = items;
@@ -1686,6 +1905,7 @@
       updateTimestamp();
       configureKeywordSourcePolling();
     } catch (error) {
+      if (error.name === 'AbortError') return;
       if (serial !== state.keywordSyncRuns.requestSerial) return;
       state.keywordSyncRuns.loaded = false;
       if (!options.silent) {
@@ -1694,7 +1914,7 @@
         showAlert('keyword-sync-history-alert', error.message || '同步记录加载失败');
         stopKeywordSourcePolling();
       } else configureKeywordSourcePolling();
-    }
+    } finally { finishRequestController('keywordSyncRuns', controller); }
   }
 
   function renderKeywordSyncRuns() {
@@ -2235,31 +2455,15 @@
     } catch (error) { toast(error.message || 'API 来源详情加载失败', 'error'); }
   }
 
-  function JSONPathJoin(parent, key) {
-    return parent ? parent + '.' + key : key;
-  }
-
-  function renderJSONTreeNode(value, path, label, depth) {
-    var type = Array.isArray(value) ? 'array' : (value === null ? 'null' : typeof value);
-    var selectable = path ? ' data-action="select-json-path" data-path="' + escapeHTML(path) + '"' : '';
-    if (Array.isArray(value)) {
-      var sample = value.length ? value[0] : null;
-      var wildcardPath = path + '[]';
-      return '<div class="json-tree-node" style="--depth:' + depth + '"><button type="button" class="json-tree-key"' + selectable + '><span>' + escapeHTML(label) + '</span><em>[' + value.length + ']</em></button>' + (value.length ? renderJSONTreeNode(sample, wildcardPath, '[]', depth + 1) : '') + '</div>';
-    }
-    if (value && typeof value === 'object') {
-      return '<div class="json-tree-node" style="--depth:' + depth + '"><button type="button" class="json-tree-key"' + selectable + '><span>' + escapeHTML(label) + '</span><em>{}</em></button><div class="json-tree-children">' + Object.keys(value).map(function (key) { return renderJSONTreeNode(value[key], JSONPathJoin(path, key), key, depth + 1); }).join('') + '</div></div>';
-    }
-    return '<div class="json-tree-leaf" style="--depth:' + depth + '"><button type="button" data-action="select-json-path" data-path="' + escapeHTML(path) + '"><span>' + escapeHTML(label) + '</span><code>' + escapeHTML(JSON.stringify(value)) + '</code><em>' + type + '</em></button></div>';
-  }
-
   function renderKeywordAPITest(result) {
-    var response = pick(result, ['response', 'json', 'body'], result);
-    state.keywordSources.testResponse = response;
+    var candidates = arrayFrom(result, ['candidates', 'fields', 'paths']);
+    var extraction = pick(result, ['extraction'], null);
+    var candidatesTotal = numberValue(pick(result, ['candidates_total'], candidates.length), candidates.length);
+    state.keywordSources.testResponse = { candidates: candidates, extraction: extraction };
     var status = numberValue(pick(result, ['status_code', 'status'], 200), 200);
     var iterationValue = pick(result, ['iteration_value'], null);
-    byId('api-test-meta').innerHTML = '<span class="http-status ' + (status >= 200 && status < 300 ? 'status-ok' : 'status-error') + '">' + status + '</span><span>' + numberValue(pick(result, ['duration_ms', 'elapsed_ms'], 0)) + ' ms</span><span>' + formatNumber(pick(result, ['response_size', 'size_bytes'], JSON.stringify(response).length)) + ' B</span>' + (iterationValue !== null && iterationValue !== undefined ? '<span class="api-test-iteration">首轮参数 <strong>' + escapeHTML(iterationValue) + '</strong></span>' : '');
-    byId('api-json-tree').innerHTML = renderJSONTreeNode(response, '', '$', 0);
+    byId('api-test-meta').innerHTML = '<span class="http-status ' + (status >= 200 && status < 300 ? 'status-ok' : 'status-error') + '">' + status + '</span><span>' + numberValue(pick(result, ['duration_ms', 'elapsed_ms'], 0)) + ' ms</span><span>' + formatBytes(pick(result, ['response_size', 'size_bytes'], 0)) + '</span><span>字段 ' + formatNumber(candidates.length) + (candidatesTotal > candidates.length ? ' / ' + formatNumber(candidatesTotal) : '') + '</span>' + (iterationValue !== null && iterationValue !== undefined ? '<span class="api-test-iteration">首轮参数 <strong>' + escapeHTML(iterationValue) + '</strong></span>' : '');
+    byId('api-json-tree').innerHTML = candidates.length ? candidates.map(function(c){var path=typeof c==='string'?c:pick(c,['path','json_path'],'');var samples=arrayFrom(pick(c,['samples','values'],[]),['items']).slice(0,3);return '<div class="json-tree-leaf" style="--depth:0"><button type="button" data-action="select-json-path" data-path="'+escapeHTML(path)+'"><span>'+escapeHTML(path||'$')+'</span><code>'+escapeHTML(samples.join(' · ')||'暂无样例')+'</code><em>'+formatNumber(pick(c,['count','total'],samples.length))+' 项</em></button></div>';}).join('') : '<div class="api-inspector-empty">未发现可提取字段</div>';
     refreshIcons(byId('keyword-api-fields'));
     updateKeywordAPIExtractPreview();
   }
@@ -2298,28 +2502,6 @@
     } finally { setButtonLoading(button, false); }
   }
 
-  function extractJSONPath(root, path) {
-    if (!path) return [];
-    var nodes = [root];
-    path.split('.').forEach(function (segment) {
-      var match = segment.match(/^([^\[\]]+)?(?:\[(\d*)\])?$/);
-      if (!match) { nodes = []; return; }
-      var key = match[1];
-      var arrayToken = match[2];
-      var next = [];
-      nodes.forEach(function (node) {
-        var value = key ? (node && typeof node === 'object' ? node[key] : undefined) : node;
-        if (arrayToken !== undefined) {
-          if (!Array.isArray(value)) return;
-          if (arrayToken === '') next = next.concat(value);
-          else if (value[Number(arrayToken)] !== undefined) next.push(value[Number(arrayToken)]);
-        } else if (value !== undefined) next.push(value);
-      });
-      nodes = next;
-    });
-    return nodes.reduce(function (result, value) { return result.concat(Array.isArray(value) ? value : [value]); }, []);
-  }
-
   function updateKeywordAPIExtractPreview() {
     var target = byId('api-extract-preview');
     var path = byId('api-response-path').value.trim();
@@ -2327,12 +2509,15 @@
       target.innerHTML = '<strong>提取预览</strong><p>选择路径后显示匹配值。</p>';
       return;
     }
-    var raw = extractJSONPath(state.keywordSources.testResponse, path);
-    var scalars = raw.filter(function (value) { return value === null || ['string', 'number', 'boolean'].indexOf(typeof value) >= 0; }).map(function (value) { return String(value === null ? '' : value).trim(); }).filter(Boolean);
-    var seen = new Set();
-    var unique = scalars.filter(function (value) { var key = value.toLowerCase(); if (seen.has(key)) return false; seen.add(key); return true; });
-    var objectCount = raw.length - scalars.length;
-    target.innerHTML = '<div class="api-preview-heading"><strong>提取预览</strong><span>原始 ' + raw.length + ' · 去重 ' + unique.length + '</span></div>' + (objectCount ? '<p class="form-error">包含 ' + objectCount + ' 个对象节点，请继续选择子字段。</p>' : '') + '<div class="api-preview-values">' + unique.slice(0, 30).map(function (value) { return '<span>' + escapeHTML(value) + '</span>'; }).join('') + (unique.length > 30 ? '<em>另有 ' + (unique.length - 30) + ' 项</em>' : '') + '</div>';
+    var candidate = arrayFrom(state.keywordSources.testResponse, ['candidates']).find(function(c){return String(typeof c==='string'?c:pick(c,['path','json_path'],''))===path;});
+    if (candidate) { var samples=arrayFrom(pick(candidate,['samples','values'],[]),['items']); target.innerHTML='<div class="api-preview-heading"><strong>提取预览</strong><span>共 '+formatNumber(pick(candidate,['count','total'],samples.length))+' 项</span></div><div class="api-preview-values">'+samples.slice(0,30).map(function(v){return '<span>'+escapeHTML(v)+'</span>';}).join('')+'</div>'; return; }
+    var extraction = pick(state.keywordSources.testResponse, ['extraction'], null);
+    if (extraction && String(pick(extraction, ['path'], '')) === path) {
+      var values = arrayFrom(extraction, ['values']).map(function (value) { return typeof value === 'object' ? pick(value, ['value', 'normalized'], '') : value; }).filter(function (value) { return value !== ''; });
+      target.innerHTML = '<div class="api-preview-heading"><strong>提取预览</strong><span>原始 ' + formatNumber(pick(extraction, ['raw_count'], values.length)) + ' · 去重 ' + formatNumber(pick(extraction, ['unique_count'], values.length)) + '</span></div><div class="api-preview-values">' + values.slice(0, 20).map(function (value) { return '<span>' + escapeHTML(value) + '</span>'; }).join('') + '</div>';
+      return;
+    }
+    target.innerHTML = '<strong>提取预览</strong><p>当前路径不在本次候选中，请重新测试以更新统计和样例。</p>';
   }
 
   function selectKeywordAPIPath(path) {
@@ -2363,6 +2548,9 @@
   async function openKeywordSyncRunDetail(id, silent) {
     var dialog = byId('keyword-sync-detail-dialog');
     var container = byId('keyword-sync-detail');
+    if (state.keywordSyncRuns.detailController) state.keywordSyncRuns.detailController.abort();
+    var controller = new AbortController();
+    state.keywordSyncRuns.detailController = controller;
     state.keywordSyncRuns.detailID = String(id);
     if (!silent) {
       if (!dialog.open) dialog.showModal();
@@ -2370,15 +2558,73 @@
       refreshIcons(container);
     }
     try {
-      var data = await apiRequest(API.keywordAPISyncRuns + '/' + encodeURIComponent(id));
-      if (state.keywordSyncRuns.detailID !== String(id)) return;
+      var data = await apiRequest(API.keywordAPISyncRuns + '/' + encodeURIComponent(id), { signal: controller.signal });
+      if (state.keywordSyncRuns.detailController !== controller || state.keywordSyncRuns.detailID !== String(id) || !dialog.open) return;
       var run = pick(data, ['run', 'item'], data);
+      state.keywordSyncRuns.currentDetail = run;
       renderKeywordSyncRunDetail(run);
+      if (!silent || !state.keywordSyncRuns.iterations.length) await loadKeywordSyncIterations(true, pick(run, ['request_summary'], {}));
+      else await refreshKeywordSyncIterationTail(pick(run, ['request_summary'], {}));
       if (ACTIVE_KEYWORD_SYNC_STATUSES.indexOf(keywordSyncRunStatus(run)) >= 0) startKeywordSyncDetailPolling();
       else stopKeywordSyncDetailPolling();
     } catch (error) {
-      if (!silent) container.innerHTML = '<div class="inline-alert error">' + escapeHTML(error.message || '同步详情加载失败') + '</div>';
+      if (error.name !== 'AbortError' && !silent) container.innerHTML = '<div class="inline-alert error">' + escapeHTML(error.message || '同步详情加载失败') + '</div>';
+    } finally {
+      if (state.keywordSyncRuns.detailController === controller) state.keywordSyncRuns.detailController = null;
     }
+  }
+
+  async function loadKeywordSyncIterations(reset, summary) {
+    if (state.keywordSyncRuns.iterationController) {
+      if (!reset) return;
+      state.keywordSyncRuns.iterationController.abort();
+    }
+    if (reset) { state.keywordSyncRuns.iterations = []; state.keywordSyncRuns.iterationPage = 1; state.keywordSyncRuns.iterationPages = 1; }
+    var page = state.keywordSyncRuns.iterationPage;
+    if (!reset && page > state.keywordSyncRuns.iterationPages) return;
+    var id = state.keywordSyncRuns.detailID;
+    var controller = new AbortController();
+    state.keywordSyncRuns.iterationController = controller;
+    try {
+      var data = await apiRequest(API.keywordAPISyncRuns + '/' + encodeURIComponent(id) + '/iterations', { query: { page: page, page_size: 50 }, signal: controller.signal });
+      if (state.keywordSyncRuns.iterationController !== controller || state.keywordSyncRuns.detailID !== id || !byId('keyword-sync-detail-dialog').open) return;
+      var items = arrayFrom(data, ['iterations','items']), meta = paginationMeta(data, items, page, 50); state.keywordSyncRuns.iterations = state.keywordSyncRuns.iterations.concat(items); state.keywordSyncRuns.iterationPages = meta.pages; state.keywordSyncRuns.iterationPage = page + 1;
+      renderKeywordSyncIterations(summary);
+    } catch(error){if(error.name!=='AbortError')toast(error.message||'迭代记录加载失败','error');}
+    finally { if (state.keywordSyncRuns.iterationController === controller) state.keywordSyncRuns.iterationController = null; }
+  }
+
+  function renderKeywordSyncIterations(summary) {
+    var body = byId('keyword-sync-iterations-body');
+    if (body) body.innerHTML = state.keywordSyncRuns.iterations.length ? state.keywordSyncRuns.iterations.map(function(i){return renderKeywordSyncIteration(i, summary || {});}).join('') : '<tr class="table-empty"><td colspan="7">暂无逐轮记录</td></tr>';
+    var more = byId('keyword-sync-iterations-more');
+    if (more) more.hidden = state.keywordSyncRuns.iterationPage > state.keywordSyncRuns.iterationPages;
+  }
+
+  async function refreshKeywordSyncIterationTail(summary) {
+    if (state.keywordSyncRuns.iterationController || !state.keywordSyncRuns.detailID) return;
+    var id = state.keywordSyncRuns.detailID;
+    var page = Math.max(1, state.keywordSyncRuns.iterationPage - 1);
+    var controller = new AbortController();
+    state.keywordSyncRuns.iterationController = controller;
+    try {
+      var data = await apiRequest(API.keywordAPISyncRuns + '/' + encodeURIComponent(id) + '/iterations', { query: { page: page, page_size: 50 }, signal: controller.signal });
+      if (state.keywordSyncRuns.iterationController !== controller || state.keywordSyncRuns.detailID !== id || !byId('keyword-sync-detail-dialog').open) return;
+      var items = arrayFrom(data, ['iterations','items']), meta = paginationMeta(data, items, page, 50);
+      var offset = (page - 1) * 50;
+      state.keywordSyncRuns.iterations = state.keywordSyncRuns.iterations.slice(0, offset).concat(items);
+      state.keywordSyncRuns.iterationPages = meta.pages;
+      state.keywordSyncRuns.iterationPage = page + 1;
+      renderKeywordSyncIterations(summary);
+    } catch (error) { if (error.name !== 'AbortError') toast(error.message || '迭代记录刷新失败', 'error'); }
+    finally { if (state.keywordSyncRuns.iterationController === controller) state.keywordSyncRuns.iterationController = null; }
+  }
+
+  function cancelKeywordSyncDetailRequests() {
+    if (state.keywordSyncRuns.detailController) state.keywordSyncRuns.detailController.abort();
+    if (state.keywordSyncRuns.iterationController) state.keywordSyncRuns.iterationController.abort();
+    state.keywordSyncRuns.detailController = null;
+    state.keywordSyncRuns.iterationController = null;
   }
 
   function keywordSyncRequestSummaryMarkup(summary) {
@@ -2439,9 +2685,8 @@
     var progress = keywordSyncRunProgress(run);
     var result = keywordSyncRunResult(run);
     var summary = pick(run, ['request_summary'], {});
-    var iterations = arrayFrom(pick(run, ['iterations'], []), ['items']);
     var progressLabel = progress.legacy ? '历史汇总' : (progress.unlimited ? '第 ' + progress.completed + ' 轮 / 无上限' : progress.completed + ' / ' + progress.total + ' 轮');
-    var recordsTotal = numberValue(pick(run, ['iteration_records_total'], iterations.length), iterations.length);
+    var recordsTotal = numberValue(pick(run, ['iteration_records_total'], 0), 0);
     byId('keyword-sync-detail-title').textContent = (sourceName || '已删除来源') + ' · RUN #' + id;
     byId('keyword-sync-detail').innerHTML =
       '<section class="detail-section keyword-sync-run-hero">' +
@@ -2460,10 +2705,7 @@
       '</dl></section>' +
       '<section class="detail-section"><h3>脱敏请求摘要</h3>' + keywordSyncRequestSummaryMarkup(summary) + '</section>' +
       '<section class="detail-section"><div class="sync-iterations-heading"><h3>迭代执行记录</h3><span>共 ' + formatNumber(recordsTotal) + ' 轮记录</span></div>' +
-        (boolValue(pick(run, ['iterations_truncated'], false), false) ? '<div class="inline-alert info">详情最多展示 100 轮；完整汇总已保留在运行记录中。</div>' : '') +
-        '<div class="table-wrap keyword-sync-iterations-wrap"><table class="keyword-sync-iterations-table"><thead><tr><th>轮次 / 参数</th><th>状态</th><th>HTTP</th><th>耗时 / 响应</th><th>提取</th><th>关键词</th><th>样例 / 错误</th></tr></thead><tbody>' +
-          (iterations.length ? iterations.map(function (iteration) { return renderKeywordSyncIteration(iteration, summary); }).join('') : '<tr class="table-empty"><td colspan="7">暂无逐轮记录</td></tr>') +
-        '</tbody></table></div>' +
+        '<div class="table-wrap keyword-sync-iterations-wrap"><table class="keyword-sync-iterations-table"><thead><tr><th>轮次 / 参数</th><th>状态</th><th>HTTP</th><th>耗时 / 响应</th><th>提取</th><th>关键词</th><th>样例 / 错误</th></tr></thead><tbody id="keyword-sync-iterations-body"><tr class="table-empty"><td colspan="7">正在加载…</td></tr></tbody></table></div><button id="keyword-sync-iterations-more" class="button secondary" type="button" data-action="load-more-sync-iterations" hidden>加载更多</button>' +
       '</section>';
     refreshIcons(byId('keyword-sync-detail'));
   }
@@ -2520,9 +2762,10 @@
     }
     var serial = ++state.requestSerial.runs;
     var query = Object.assign({}, state.runs.query, { page: state.runs.page, page_size: state.runs.pageSize });
+    var controller = replaceRequestController('runs');
     try {
-      var data = await apiRequest(API.runs, { query: query });
-      if (serial !== state.requestSerial.runs) return;
+      var data = await apiRequest(API.runs, { query: query, signal: controller.signal });
+      if (state.requestControllers.runs !== controller || serial !== state.requestSerial.runs) return;
       var items = arrayFrom(data, ['runs', 'collection_runs', 'items', 'results']);
       var meta = paginationMeta(data, items, state.runs.page, state.runs.pageSize);
       state.runs.items = items;
@@ -2531,6 +2774,7 @@
       updateTimestamp();
       configureRunPolling();
     } catch (error) {
+      if (error.name === 'AbortError') return;
       if (serial !== state.requestSerial.runs) return;
       if (!options.silent) {
         state.loaded.runs = false;
@@ -2538,7 +2782,7 @@
         showAlert('runs-alert', error.message || '任务加载失败');
       }
       stopRunPolling();
-    }
+    } finally { finishRequestController('runs', controller); }
   }
 
   function renderRuns() {
@@ -2625,25 +2869,35 @@
     byId('run-form-error').hidden = true;
     byId('run-keyword-search').value = '';
     byId('run-form').elements.force.checked = Boolean(forced);
-    state.runPicker.search = '';
+    state.runPicker.search = ''; state.runPicker.page = 1; state.runPicker.pages = 1; state.runPicker.items = [];
     state.runPicker.selected = new Set((preselected || []).map(String));
     list.innerHTML = '<div class="table-loading"><span>' + icon('loader-circle', 'spin') + '正在加载</span></div>';
     dialog.showModal();
     refreshIcons(list);
     try {
-      state.runPicker.items = await loadKeywords(true, { picker: true });
+      await loadRunPickerKeywords(true);
       renderRunKeywordPicker();
     } catch (error) {
       list.innerHTML = '<div class="inline-alert error" style="margin:12px">' + escapeHTML(error.message || '关键词加载失败') + '</div>';
     }
   }
 
+  async function loadRunPickerKeywords(reset) {
+    if (reset) {
+      if (state.runPicker.controller) state.runPicker.controller.abort();
+      state.runPicker.page = 1; state.runPicker.pages = 1; state.runPicker.items = []; state.runPicker.loading = false;
+    } else if (state.runPicker.loading) return;
+    if (!reset && state.runPicker.page > state.runPicker.pages) return;
+    var search = state.runPicker.search, page = state.runPicker.page;
+    var controller = new AbortController(); state.runPicker.controller = controller; state.runPicker.loading = true;
+    try { var data = await apiRequest(API.keywords, { query: { q: search, enabled: true, page: page, page_size: 50 }, signal: controller.signal }); if (state.runPicker.controller !== controller || state.runPicker.search !== search) return; var items = arrayFrom(data,['keywords','items','results']), meta = paginationMeta(data,items,page,50); state.runPicker.items = reset ? items : state.runPicker.items.concat(items); state.runPicker.pages = meta.pages; state.runPicker.total = meta.total; state.runPicker.page = page + 1; }
+    catch (error) { if (error.name !== 'AbortError') throw error; }
+    finally { if (state.runPicker.controller === controller) { state.runPicker.controller = null; state.runPicker.loading = false; } }
+  }
+
   function renderRunKeywordPicker() {
     var list = byId('run-keyword-list');
-    var search = state.runPicker.search.toLowerCase();
-    var items = state.runPicker.items.filter(function (keyword) {
-      return String(pick(keyword, ['keyword', 'name'], '')).toLowerCase().includes(search);
-    });
+    var items = state.runPicker.items;
     if (!items.length) {
       list.innerHTML = '<div class="table-empty" style="padding:50px 12px;text-align:center">没有匹配的关键词</div>';
     } else {
@@ -2657,7 +2911,7 @@
           '<span class="picker-copy"><strong>' + escapeHTML(name) + '</strong><small>' + escapeHTML(keywordTypeLabels[pick(keyword, ['keyword_type', 'type'], 'general')] || pick(keyword, ['keyword_type', 'type'], 'general')) + ' · ' + (enabled ? '已启用' : '已停用') + '</small></span>' +
           (enabled ? '' : '<span class="type-badge">不可用</span>') +
         '</label>';
-      }).join('');
+      }).join('') + (state.runPicker.page <= state.runPicker.pages ? '<button class="button secondary wide" type="button" data-action="load-more-run-keywords">加载更多（' + items.length + ' / ' + state.runPicker.total + '）</button>' : '');
     }
     byId('run-selected-label').textContent = '已选 ' + state.runPicker.selected.size + ' 项';
   }
@@ -2712,77 +2966,130 @@
     createRun(ids, force);
   }
 
-  async function openRunDetail(id, silent) {
-    var dialog = byId('run-detail-dialog');
-    var container = byId('run-detail');
-    state.currentRunDetail = String(id);
-    if (!silent) {
-      dialog.showModal();
-      container.innerHTML = '<div class="table-loading"><span>' + icon('loader-circle', 'spin') + '正在加载</span></div>';
-      refreshIcons(container);
-    }
+  function openRunDetail(id) {
+    navigate('runs/' + id, true);
+  }
+
+  function cancelRunSourceRequests() {
+    Object.keys(state.runDetail.sourceControllers).forEach(function (key) { state.runDetail.sourceControllers[key].abort(); });
+    state.runDetail.sourceControllers = {};
+  }
+
+  function cancelRunDetailRequests() {
+    stopDetailPolling();
+    if (state.runDetail.controller) state.runDetail.controller.abort();
+    if (state.runDetail.itemsController) state.runDetail.itemsController.abort();
+    cancelRunSourceRequests();
+    if (state.runDetail.observer) state.runDetail.observer.disconnect();
+    state.runDetail.controller = null;
+    state.runDetail.itemsController = null;
+    state.runDetail.observer = null;
+    state.runDetail.loading = false;
+  }
+
+  async function loadRunPage(id) {
+    if (!id) return;
+    cancelRunDetailRequests();
+    state.runDetail.id = String(id);
+    var controller = new AbortController(); state.runDetail.controller = controller;
+    showAlert('run-page-alert', ''); byId('run-page-summary').innerHTML = '<div class="table-loading"><span>' + icon('loader-circle', 'spin') + '正在加载</span></div>'; byId('run-page-items').innerHTML = '';
     try {
-      var data = await apiRequest(API.runs + '/' + encodeURIComponent(id));
-      if (state.currentRunDetail !== String(id)) return;
-      var run = pick(data, ['run', 'collection_run'], data);
-      renderRunDetail(run);
-      if (ACTIVE_STATUSES.includes(normalizedStatus(run))) startDetailPolling(id);
-      else stopDetailPolling();
-    } catch (error) {
-      if (!silent) container.innerHTML = '<div class="inline-alert error">' + escapeHTML(error.message || '任务详情加载失败') + '</div>';
-    }
+      var data = await apiRequest(API.runs + '/' + encodeURIComponent(id), { signal: controller.signal });
+      if (state.runDetail.controller !== controller || state.view !== 'run-detail' || state.runDetail.id !== String(id)) return;
+      state.runDetail.summary = pick(data, ['run', 'collection_run'], data); renderRunPageSummary(state.runDetail.summary); await loadRunItems(true); setupRunItemObserver();
+      if (ACTIVE_STATUSES.includes(normalizedStatus(state.runDetail.summary))) startDetailPolling(id);
+    } catch (error) { if (error.name !== 'AbortError') showAlert('run-page-alert', error.message || '任务详情加载失败'); }
   }
 
-  function renderRunDetail(run) {
-    var id = pick(run, ['id', 'run_id', 'batch_id'], '—');
-    var status = normalizedStatus(run);
-    var progress = runProgress(run);
-    var trigger = pick(run, ['trigger', 'trigger_type'], 'scheduled');
-    var items = arrayFrom(pick(run, ['items', 'run_items', 'keywords'], []), ['items', 'run_items']);
-    byId('run-detail-title').textContent = '批次 #' + id;
-    byId('run-detail').innerHTML =
-      '<section class="detail-section">' +
-        '<div class="panel-heading"><div><div class="source-stack">' + statusBadge(status) + '<span class="type-badge">' + escapeHTML(triggerLabels[trigger] || trigger) + '</span>' + (boolValue(pick(run, ['force', 'forced'], false)) ? '<span class="type-badge">强制</span>' : '') + '</div></div><span class="batch-id">BATCH / ' + escapeHTML(id) + '</span></div>' +
-        '<div class="batch-progress-label"><span>' + progress.completed + ' / ' + progress.total + ' 关键词</span><span>' + progress.percent + '%</span></div>' +
-        '<div class="progress-track"><div class="progress-bar" style="width:' + progress.percent + '%"></div></div>' +
-        '<div class="batch-metrics">' +
-          '<div><strong>' + formatNumber(pick(run, ['new_count', 'created_count', 'added_count'], 0)) + '</strong><span>新增资源</span></div>' +
-          '<div><strong>' + formatNumber(pick(run, ['duplicate_count', 'duplicates'], 0)) + '</strong><span>重复资源</span></div>' +
-          '<div><strong>' + escapeHTML(durationFrom(run)) + '</strong><span>耗时</span></div>' +
-        '</div>' +
-      '</section>' +
-      '<section class="detail-section"><h3>执行信息</h3><dl class="detail-grid">' +
-        '<div class="detail-pair"><dt>创建时间</dt><dd>' + escapeHTML(formatDate(pick(run, ['created_at'], null), true)) + '</dd></div>' +
-        '<div class="detail-pair"><dt>开始时间</dt><dd>' + escapeHTML(formatDate(pick(run, ['started_at', 'start_time'], null), true)) + '</dd></div>' +
-        '<div class="detail-pair"><dt>完成时间</dt><dd>' + escapeHTML(formatDate(pick(run, ['finished_at', 'completed_at', 'ended_at'], null), true)) + '</dd></div>' +
-        '<div class="detail-pair"><dt>错误信息</dt><dd class="danger-text">' + escapeHTML(pick(run, ['error', 'error_message'], '无')) + '</dd></div>' +
-      '</dl></section>' +
-      '<section class="detail-section"><h3>关键词执行项</h3><div class="run-item-list">' +
-        (items.length ? items.map(renderRunItem).join('') : '<span class="muted">暂无执行项明细</span>') +
-      '</div></section>';
-    refreshIcons(byId('run-detail'));
+  function renderRunPageSummary(run) {
+    var id = pick(run, ['id', 'run_id', 'batch_id'], state.runDetail.id), progress = runProgress(run);
+    byId('run-page-title').textContent = '批次 #' + id;
+    byId('run-page-summary').innerHTML = '<section class="panel run-summary-card"><div class="panel-heading"><div class="source-stack">' + statusBadge(normalizedStatus(run)) + '<span class="type-badge">' + escapeHTML(triggerLabels[pick(run, ['trigger', 'trigger_type'], 'scheduled')] || '任务') + '</span></div><span class="batch-id">BATCH / ' + escapeHTML(id) + '</span></div><div class="batch-progress-label"><span>' + progress.completed + ' / ' + progress.total + ' 关键词</span><span>' + progress.percent + '%</span></div><div class="progress-track"><div class="progress-bar" style="width:' + progress.percent + '%"></div></div><div class="batch-metrics"><div><strong>' + formatNumber(pick(run, ['new_count', 'created_count'], 0)) + '</strong><span>新增资源</span></div><div><strong>' + formatNumber(pick(run, ['duplicate_count'], 0)) + '</strong><span>重复资源</span></div><div><strong>' + escapeHTML(durationFrom(run)) + '</strong><span>耗时</span></div></div></section>';
   }
 
-  function renderRunItem(item) {
+  async function loadRunItems(reset) {
+    if (reset) {
+      if (state.runDetail.itemsController) state.runDetail.itemsController.abort();
+      cancelRunSourceRequests();
+      state.runDetail.page = 1; state.runDetail.pages = 1; state.runDetail.loadedPages = 0; state.runDetail.items = []; state.runDetail.loading = false;
+    } else if (state.runDetail.loading) return;
+    if (!reset && state.runDetail.page > state.runDetail.pages) return;
+    var runID = state.runDetail.id;
+    var page = state.runDetail.page;
+    var controller = new AbortController();
+    state.runDetail.itemsController = controller;
+    state.runDetail.loading = true; byId('run-items-sentinel').innerHTML = icon('loader-circle', 'spin') + ' 加载中';
+    try {
+      var data = await apiRequest(API.runs + '/' + encodeURIComponent(runID) + '/items', { query: Object.assign({ page: page, page_size: 30 }, state.runDetail.query), signal: controller.signal });
+      if (state.runDetail.itemsController !== controller || state.view !== 'run-detail' || state.runDetail.id !== runID) return;
+      var items = arrayFrom(data, ['items', 'run_items', 'keywords']), meta = paginationMeta(data, items, page, 30);
+      state.runDetail.items = reset ? items : state.runDetail.items.concat(items); state.runDetail.pages = meta.pages; state.runDetail.loadedPages = Math.max(state.runDetail.loadedPages, page); state.runDetail.total = meta.total; state.runDetail.page = page + 1; renderRunPageItems();
+    } catch (error) { if (error.name !== 'AbortError') showAlert('run-page-alert', error.message || '执行项加载失败'); }
+    finally { if (state.runDetail.itemsController === controller) { state.runDetail.itemsController = null; state.runDetail.loading = false; byId('run-items-sentinel').textContent = state.runDetail.page <= state.runDetail.pages ? '继续向下滚动加载' : '已加载全部 ' + state.runDetail.total + ' 项'; } }
+  }
+
+  async function refreshLoadedRunItems() {
+    if (state.view !== 'run-detail' || !state.runDetail.id) return;
+    if (state.runDetail.itemsController) state.runDetail.itemsController.abort();
+    cancelRunSourceRequests();
+    var runID = state.runDetail.id;
+    var requestedPages = Math.max(1, state.runDetail.loadedPages);
+    var controller = new AbortController();
+    state.runDetail.itemsController = controller;
+    state.runDetail.loading = true;
+    try {
+      var first = await apiRequest(API.runs + '/' + encodeURIComponent(runID) + '/items', { query: Object.assign({ page: 1, page_size: 30 }, state.runDetail.query), signal: controller.signal });
+      var firstItems = arrayFrom(first, ['items', 'run_items', 'keywords']);
+      var firstMeta = paginationMeta(first, firstItems, 1, 30);
+      var pageCount = Math.min(requestedPages, firstMeta.pages);
+      var responses = [first];
+      if (pageCount > 1) responses = responses.concat(await Promise.all(Array.from({ length: pageCount - 1 }, function (_, index) {
+        return apiRequest(API.runs + '/' + encodeURIComponent(runID) + '/items', { query: Object.assign({ page: index + 2, page_size: 30 }, state.runDetail.query), signal: controller.signal });
+      })));
+      if (state.runDetail.itemsController !== controller || state.view !== 'run-detail' || state.runDetail.id !== runID) return;
+      var refreshed = [];
+      responses.forEach(function (data) { refreshed = refreshed.concat(arrayFrom(data, ['items', 'run_items', 'keywords'])); });
+      var meta = paginationMeta(responses[0] || {}, refreshed, 1, 30);
+      state.runDetail.items = refreshed; state.runDetail.total = meta.total; state.runDetail.pages = meta.pages; state.runDetail.loadedPages = pageCount; state.runDetail.page = pageCount + 1;
+      renderRunPageItems();
+    } catch (error) { if (error.name !== 'AbortError') showAlert('run-page-alert', error.message || '执行项刷新失败'); }
+    finally { if (state.runDetail.itemsController === controller) { state.runDetail.itemsController = null; state.runDetail.loading = false; byId('run-items-sentinel').textContent = state.runDetail.page <= state.runDetail.pages ? '继续向下滚动加载' : '已加载全部 ' + state.runDetail.total + ' 项'; } }
+  }
+
+  function sourceCount(item, key) {
+    var counts = pick(item, ['source_counts'], {});
+    var fields = key === 'success' ? ['source_success', 'success_count', 'source_success_count'] : (key === 'empty' ? ['source_empty', 'empty_count', 'source_empty_count', 'success_empty_count'] : ['source_failed', 'failed_count', 'source_failed_count']);
+    return numberValue(pick(item, fields, pick(counts, key === 'empty' ? ['empty', 'success_empty'] : [key], 0)));
+  }
+
+  function runKeywordLabel(item) {
     var keyword = pick(item, ['keyword', 'keyword_name', 'name'], '');
     if (keyword && typeof keyword === 'object') keyword = pick(keyword, ['keyword', 'name'], '');
-    var summary = pick(item, ['source_summary', 'sources'], {});
-    var chips = [];
-    if (summary && typeof summary === 'object' && !Array.isArray(summary)) {
-      Object.keys(summary).forEach(function (key) {
-        var value = summary[key];
-        var text = typeof value === 'object' ? JSON.stringify(value) : String(value);
-        chips.push('<span class="summary-chip">' + escapeHTML(key) + ': ' + escapeHTML(text) + '</span>');
-      });
-    }
-    return '<article class="run-item">' +
-      '<strong>' + escapeHTML(keyword || '未命名关键词') + '</strong>' +
-      statusBadge(normalizedStatus(item)) +
-      '<small>新增 ' + formatNumber(pick(item, ['new_count', 'created_count', 'added_count'], 0)) + ' · 重复 ' + formatNumber(pick(item, ['duplicate_count', 'duplicates'], 0)) + ' · ' + escapeHTML(durationFrom(item)) + '</small>' +
-      (pick(item, ['error', 'error_message'], '') ? '<small class="danger-text">' + escapeHTML(pick(item, ['error', 'error_message'], '')) + '</small>' : '') +
-      (chips.length ? '<div class="summary-chips full-row">' + chips.join('') + '</div>' : '') +
-    '</article>';
+    return keyword || '未命名关键词';
   }
+
+  function renderRunPageItems() {
+    byId('run-page-items').innerHTML = state.runDetail.items.map(function (item) {
+      var id = pick(item, ['id', 'item_id'], ''), kw = runKeywordLabel(item);
+      return '<details class="run-keyword-card" data-item-id="' + escapeHTML(id) + '"><summary><span class="run-keyword-main"><strong>' + escapeHTML(kw) + '</strong><span class="metric-tags"><span class="metric-tag success">' + icon('circle-check') + sourceCount(item,'success') + ' 成功</span><span class="metric-tag empty">' + icon('circle-minus') + sourceCount(item,'empty') + ' 无结果</span><span class="metric-tag failed">' + icon('circle-x') + sourceCount(item,'failed') + ' 失败</span><span class="metric-tag">' + icon('clock-3') + escapeHTML(durationFrom(item)) + '</span></span></span>' + statusBadge(normalizedStatus(item)) + icon('chevron-down','detail-chevron') + '</summary><div class="run-source-content" data-source-content="' + escapeHTML(id) + '"><span class="muted">展开后加载来源明细</span></div></details>';
+    }).join('') || '<div class="table-empty">暂无执行项</div>'; refreshIcons(byId('run-page-items'));
+  }
+
+  async function loadRunItemSources(itemID) {
+    var target = document.querySelector('[data-source-content="' + CSS.escape(String(itemID)) + '"]'); if (!target || target.dataset.loaded === 'true' || target.dataset.loading === 'true') return;
+    var runID = state.runDetail.id;
+    var controller = new AbortController(); state.runDetail.sourceControllers[itemID] = controller; target.dataset.loading = 'true'; if (!target._items || !target._items.length) target.innerHTML = '<span class="muted">加载来源中…</span>';
+    try {
+      var page = numberValue(target.dataset.nextPage, 1), data = await apiRequest(API.runs + '/' + encodeURIComponent(runID) + '/items/' + encodeURIComponent(itemID) + '/sources', { query: { page: page, page_size: 50 }, signal: controller.signal });
+      if (state.runDetail.sourceControllers[itemID] !== controller || state.view !== 'run-detail' || state.runDetail.id !== runID || !target.isConnected) return;
+      var sources = arrayFrom(data, ['sources','items']), meta = paginationMeta(data, sources, page, 50); target._items = (target._items || []).concat(sources); target.dataset.nextPage = String(page + 1);
+      var groups = {plugin:[],tg:[],external:[]}; target._items.forEach(function(s){var t=String(pick(s,['source_type','type'],'external')).toLowerCase();groups[t==='plugin'?'plugin':(t==='tg'||t==='telegram'?'tg':'external')].push(s);});
+      target.innerHTML = (Object.keys(groups).filter(function(k){return groups[k].length;}).map(function(k){return '<section class="source-group"><h4>'+({plugin:'插件',tg:'Telegram',external:'外部来源'}[k])+' <span>'+groups[k].length+'</span></h4>'+groups[k].map(renderRunSource).join('')+'</section>';}).join('') || '<span class="muted">暂无来源明细</span>') + (page < meta.pages ? '<button class="button secondary source-load-more" type="button" data-action="load-more-run-sources" data-item-id="'+escapeHTML(itemID)+'">加载更多来源</button>' : ''); target.dataset.loaded = page >= meta.pages ? 'true' : 'false'; refreshIcons(target);
+    } catch(error){if(error.name!=='AbortError')target.innerHTML='<span class="danger-text">'+escapeHTML(error.message||'来源加载失败')+'</span>';}
+    finally { if (state.runDetail.sourceControllers[itemID] === controller) { delete state.runDetail.sourceControllers[itemID]; target.dataset.loading = 'false'; } }
+  }
+  function renderRunSource(s){var st=normalizedStatus(s);if(st==='empty')st='success_empty';var key=pick(s,['name','source_name','channel','plugin','key','source_key'],'未知来源'),name=String(key).replace(/^(plugin|tg|telegram|external):/i,''),err=pick(s,['error','error_message'],''),statusIcon=st==='failed'?'circle-x':(st==='success_empty'?'circle-minus':(st==='success'?'circle-check':'circle-help'));return '<details class="run-source-row"><summary><span class="source-name-tag">'+escapeHTML(name)+'</span><span class="metric-tag '+escapeHTML(st)+'">'+icon(statusIcon)+escapeHTML(statusLabels[st]||st)+'</span><span class="metric-tag">'+icon('clock-3')+escapeHTML(durationFrom(s))+'</span><span class="metric-tag">'+formatNumber(pick(s,['result_count'],0))+' 结果</span><span class="metric-tag">+'+formatNumber(pick(s,['new_count'],0))+' 新增</span>'+icon('chevron-down','detail-chevron')+'</summary><p class="'+(err?'danger-text':'muted')+'">'+escapeHTML(err||('尝试 '+formatNumber(pick(s,['attempts','attempt_count'],1))+' 次 · 重复 '+formatNumber(pick(s,['duplicate_count'],0))))+'</p></details>';}
+  function setupRunItemObserver(){if(state.runDetail.observer)state.runDetail.observer.disconnect();state.runDetail.observer=new IntersectionObserver(function(es){if(es.some(function(e){return e.isIntersecting;}))loadRunItems(false);},{rootMargin:'300px'});state.runDetail.observer.observe(byId('run-items-sentinel'));}
 
   function showPermissionState(scope, forbidden) {
     var permission = byId(scope + '-forbidden');
@@ -2811,9 +3118,10 @@
       page: state.users.page,
       page_size: state.users.pageSize
     });
+    var controller = replaceRequestController('users');
     try {
-      var data = await apiRequest(API.users, { query: query });
-      if (serial !== state.requestSerial.users) return;
+      var data = await apiRequest(API.users, { query: query, signal: controller.signal });
+      if (state.requestControllers.users !== controller || serial !== state.requestSerial.users) return;
       var items = arrayFrom(data, ['users', 'items', 'results']);
       var meta = paginationMeta(data, items, state.users.page, state.users.pageSize);
       state.users.items = items;
@@ -2822,6 +3130,7 @@
       updateUsageUserFilter(items);
       updateTimestamp();
     } catch (error) {
+      if (error.name === 'AbortError') return;
       if (serial !== state.requestSerial.users) return;
       state.loaded.users = false;
       byId('users-body').innerHTML = '';
@@ -2830,7 +3139,7 @@
       } else {
         showAlert('users-alert', error.message || '用户加载失败');
       }
-    }
+    } finally { finishRequestController('users', controller); }
   }
 
   function userStatus(user) {
@@ -3147,18 +3456,22 @@
     byId('usage-stat-grid').innerHTML = '<article class="stat-card skeleton-card"></article>'.repeat(6);
     tableLoading('usage-logs-body', 9);
     var range = state.usage.range;
+    if (state.requestControllers.usageLogs) state.requestControllers.usageLogs.abort();
+    state.requestControllers.usageLogs = null;
+    var controller = replaceRequestController('usage');
     try {
       var settled = await Promise.all([
-        apiRequest(API.usageOverview, { query: { range: range } }),
-        apiRequest(API.usageTrends, { query: { range: range } })
+        apiRequest(API.usageOverview, { query: { range: range }, signal: controller.signal }),
+        apiRequest(API.usageTrends, { query: { range: range }, signal: controller.signal })
       ]);
-      if (serial !== state.requestSerial.usage) return;
+      if (state.requestControllers.usage !== controller || serial !== state.requestSerial.usage) return;
       state.usage.overview = settled[0] || {};
       state.usage.trends = arrayFrom(settled[1], ['trends', 'items', 'points']);
       renderUsageOverview();
       await loadUsageLogs(true);
       updateTimestamp();
     } catch (error) {
+      if (error.name === 'AbortError') return;
       if (serial !== state.requestSerial.usage) return;
       state.loaded.usage = false;
       if (error instanceof APIError && error.status === 403) {
@@ -3166,7 +3479,7 @@
       } else {
         showAlert('usage-alert', error.message || 'API 监控数据加载失败');
       }
-    }
+    } finally { finishRequestController('usage', controller); }
   }
 
   function percentValue(value) {
@@ -3305,9 +3618,10 @@
       page: state.usage.page,
       page_size: state.usage.pageSize
     });
+    var controller = replaceRequestController('usageLogs');
     try {
-      var data = await apiRequest(API.usageLogs, { query: query });
-      if (serial !== state.requestSerial.usageLogs) return;
+      var data = await apiRequest(API.usageLogs, { query: query, signal: controller.signal });
+      if (state.requestControllers.usageLogs !== controller || serial !== state.requestSerial.usageLogs) return;
       var items = arrayFrom(data, ['logs', 'items', 'results']);
       var meta = paginationMeta(data, items, state.usage.page, state.usage.pageSize);
       state.usage.logs = items;
@@ -3317,11 +3631,12 @@
       state.usage.pages = meta.pages;
       renderUsageLogs();
     } catch (error) {
+      if (error.name === 'AbortError') return;
       if (serial !== state.requestSerial.usageLogs) return;
       byId('usage-logs-body').innerHTML = '';
       if (error instanceof APIError && error.status === 403) showPermissionState('usage', true);
       else showAlert('usage-alert', error.message || '调用日志加载失败');
-    }
+    } finally { finishRequestController('usageLogs', controller); }
   }
 
   function renderUsageLogs() {
@@ -3990,8 +4305,27 @@
   function startDetailPolling(id) {
     if (state.detailPollTimer) return;
     state.detailPollTimer = window.setInterval(function () {
-      if (document.visibilityState === 'visible' && byId('run-detail-dialog').open) openRunDetail(id, true);
+      if (document.visibilityState === 'visible' && state.view === 'run-detail') refreshRunPageSummary(id);
     }, 4000);
+  }
+
+  async function refreshRunPageSummary(id) {
+    if (state.runDetail.pollController) return;
+    var controller = new AbortController();
+    state.runDetail.pollController = controller;
+    try {
+      var previousStatus = normalizedStatus(state.runDetail.summary || {});
+      var data = await apiRequest(API.runs + '/' + encodeURIComponent(id), { signal: controller.signal });
+      if (state.runDetail.pollController !== controller || state.view !== 'run-detail' || state.runDetail.id !== String(id)) return;
+      state.runDetail.summary = pick(data, ['run','collection_run'], data);
+      renderRunPageSummary(state.runDetail.summary);
+      var currentStatus = normalizedStatus(state.runDetail.summary);
+      if (!ACTIVE_STATUSES.includes(currentStatus)) {
+        stopDetailPolling();
+        if (ACTIVE_STATUSES.includes(previousStatus)) await refreshLoadedRunItems();
+      }
+    } catch (error) {}
+    finally { if (state.runDetail.pollController === controller) state.runDetail.pollController = null; }
   }
 
   function stopDetailPolling() {
@@ -3999,7 +4333,8 @@
       clearInterval(state.detailPollTimer);
       state.detailPollTimer = null;
     }
-    if (!byId('run-detail-dialog').open) state.currentRunDetail = null;
+    if (state.runDetail.pollController) state.runDetail.pollController.abort();
+    state.runDetail.pollController = null;
   }
 
   function handleActionClick(event) {
@@ -4042,6 +4377,9 @@
       readResourceFilters();
     } else if (action === 'copy-resource') copyText(actionElement.dataset.url, '链接');
     else if (action === 'view-resource') openResourceDetail(actionElement.dataset.id);
+    else if (action === 'load-more-resource-related') loadResourceRelated(actionElement.closest('[data-resource-related]'));
+    else if (action === 'load-more-run-keywords') loadRunPickerKeywords(false).then(renderRunKeywordPicker);
+    else if (action === 'load-more-run-sources') loadRunItemSources(actionElement.dataset.itemId);
     else if (action === 'new-keyword') openKeywordDialog(null, state.keywords.tab === 'api' ? 'api' : 'manual');
     else if (action === 'edit-keyword') {
       var keyword = state.keywords.items.find(function (item) {
@@ -4060,6 +4398,7 @@
     else if (action === 'sync-keyword-api') syncKeywordAPISource(actionElement.dataset.id);
     else if (action === 'view-keyword-sync-history') viewKeywordSyncHistory(actionElement.dataset.id);
     else if (action === 'view-keyword-sync-run') openKeywordSyncRunDetail(actionElement.dataset.id);
+    else if (action === 'load-more-sync-iterations') loadKeywordSyncIterations(false, pick(state.keywordSyncRuns.currentDetail, ['request_summary'], {}));
     else if (action === 'reset-keyword-sync-filters') resetKeywordSyncFilters();
     else if (action === 'copy-keyword-api') copyKeywordAPISource(actionElement.dataset.id, actionElement);
     else if (action === 'delete-keyword-api') deleteKeywordAPISource(actionElement.dataset.id);
@@ -4074,7 +4413,7 @@
       var everySelected = enabledIds.length > 0 && enabledIds.every(function (id) { return state.runPicker.selected.has(id); });
       state.runPicker.selected = everySelected ? new Set() : new Set(enabledIds);
       renderRunKeywordPicker();
-    } else if (action === 'view-run') openRunDetail(actionElement.dataset.id);
+    } else if (action === 'view-run') { event.preventDefault(); openRunDetail(actionElement.dataset.id); }
     else if (action === 'new-user') openUserDialog(null);
     else if (action === 'edit-user') {
       var user = findUser(actionElement.dataset.id);
@@ -4224,16 +4563,23 @@
     });
     byId('run-keyword-search').addEventListener('input', function (event) {
       state.runPicker.search = event.target.value.trim();
-      renderRunKeywordPicker();
+      clearTimeout(state.runPicker.searchTimer); state.runPicker.searchTimer = window.setTimeout(function(){loadRunPickerKeywords(true).then(renderRunKeywordPicker).catch(function(error){if(error.name!=='AbortError')toast(error.message||'关键词加载失败','error');});},300);
     });
+    byId('run-keyword-list').addEventListener('scroll', function(event){if(event.target.scrollTop+event.target.clientHeight>=event.target.scrollHeight-100)loadRunPickerKeywords(false).then(renderRunKeywordPicker);});
+    byId('run-item-search').addEventListener('input', debounce(function (event) { state.runDetail.query.q = event.target.value.trim(); loadRunItems(true); }, 300));
+    byId('run-item-status').addEventListener('change', function (event) { state.runDetail.query.status = event.target.value; loadRunItems(true); });
+    byId('run-page-items').addEventListener('toggle', function (event) { if (event.target.matches('.run-keyword-card') && event.target.open) loadRunItemSources(event.target.dataset.itemId); }, true);
+    byId('resource-detail').addEventListener('toggle', function (event) { if (event.target.matches('[data-resource-related]') && event.target.open) loadResourceRelated(event.target); }, true);
     window.addEventListener('hashchange', function () { navigate(location.hash.slice(1) || 'overview'); });
     window.addEventListener('resize', debounce(resizeCharts, 120));
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState !== 'visible') {
+        stopOverviewRefresh(true);
         stopKeywordSourcePolling();
         stopKeywordSyncDetailPolling();
         return;
       }
+      if (state.view === 'overview') loadOverview(true, { background: true });
       if (document.visibilityState === 'visible' && state.view === 'runs') loadRuns({ silent: true, force: true });
       if (document.visibilityState === 'visible' && state.view === 'keywords' && state.keywords.tab === 'api' && keywordSourcesHaveActiveRun()) loadKeywordSources(true, { silent: true });
       if (document.visibilityState === 'visible' && state.view === 'keywords' && state.keywords.tab === 'history' && keywordSyncHistoryHasActiveRun()) loadKeywordSyncRuns({ force: true, silent: true });

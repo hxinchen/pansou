@@ -151,6 +151,9 @@ func SetupRouter(searchService service.SearchProvider, options ...RouterDependen
 	adminHandler := NewAdminHandler(dependencies.Store, dependencies.Runner, dependencies.SourceRuntime)
 	adminHandler.credentials = dependencies.Credentials
 	adminHandler.keywordSources = dependencies.KeywordSources
+	if adminHandler.overviewCache != nil {
+		adminHandler.overviewCache.warmup()
+	}
 	adminHandler.Register(adminAPI)
 	var adminSourceManager *sourceconfig.Manager
 	if dependencies.SourceRuntime != nil {

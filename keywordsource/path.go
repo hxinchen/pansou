@@ -232,7 +232,7 @@ type candidateAccumulator struct {
 // path picker. Samples are capped to three distinct values per path.
 func DiscoverFields(document any) []FieldCandidate {
 	accumulators := make(map[string]*candidateAccumulator)
-	walkCandidates(document, "", 0, accumulators)
+	walkCandidates(document, "", accumulators)
 	paths := make([]string, 0, len(accumulators))
 	for path := range accumulators {
 		if path != "" {
@@ -252,10 +252,7 @@ func DiscoverFields(document any) []FieldCandidate {
 	return result
 }
 
-func walkCandidates(node any, path string, depth int, result map[string]*candidateAccumulator) {
-	if depth > 24 || len(result) >= 512 {
-		return
-	}
+func walkCandidates(node any, path string, result map[string]*candidateAccumulator) {
 	switch value := node.(type) {
 	case map[string]any:
 		keys := make([]string, 0, len(value))
@@ -268,12 +265,12 @@ func walkCandidates(node any, path string, depth int, result map[string]*candida
 			if path != "" {
 				childPath = path + "." + key
 			}
-			walkCandidates(value[key], childPath, depth+1, result)
+			walkCandidates(value[key], childPath, result)
 		}
 	case []any:
 		arrayPath := path + "[]"
 		for _, item := range value {
-			walkCandidates(item, arrayPath, depth+1, result)
+			walkCandidates(item, arrayPath, result)
 		}
 	case nil:
 		return

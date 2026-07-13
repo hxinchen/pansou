@@ -53,6 +53,15 @@ func TestPostgresKeywordAPISyncRunLifecycle(t *testing.T) {
 	if err != nil || len(detail.Iterations) != 3 {
 		t.Fatalf("queued detail = %+v err=%v", detail, err)
 	}
+	summary, err := store.GetKeywordAPISyncRunSummary(ctx, run.ID)
+	if err != nil || len(summary.Iterations) != 0 || summary.IterationRecordsTotal != 3 || !summary.IterationsTruncated {
+		t.Fatalf("queued summary = %+v err=%v", summary, err)
+	}
+	iterationPage, err := store.ListKeywordAPISyncRunIterations(ctx, run.ID, 2, 2)
+	if err != nil || iterationPage.Total != 3 || iterationPage.Page != 2 || len(iterationPage.Items) != 1 ||
+		iterationPage.Items[0].Sequence != 3 {
+		t.Fatalf("iteration page = %+v err=%v", iterationPage, err)
+	}
 	for index, iteration := range detail.Iterations {
 		if iteration.Sequence != index+1 || iteration.IterationValue != int64(index*20) || iteration.Status != KeywordAPISyncIterationStatusQueued {
 			t.Fatalf("precreated iteration %d = %+v", index, iteration)

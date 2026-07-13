@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -68,6 +69,16 @@ func TestPostgresStorageLifecycle(t *testing.T) {
 		SELECT 1 FROM schema_migrations WHERE version=1)`).Scan(&migrated); err != nil || !migrated {
 		t.Fatalf("migration ledger: migrated=%v err=%v", migrated, err)
 	}
+	if err := store.pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM schema_migrations WHERE version=10)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("detail pagination migration: migrated=%v err=%v", migrated, err)
+	}
+	var legacyRunSummaryColumn bool
+	if err := store.pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema=current_schema() AND table_name='collection_runs' AND column_name='source_summary')`).Scan(&legacyRunSummaryColumn); err != nil || legacyRunSummaryColumn {
+		t.Fatalf("legacy batch source_summary present=%v err=%v", legacyRunSummaryColumn, err)
+	}
 
 	alphaCooldown := int64(3600)
 	alpha, err := store.CreateKeyword(ctx, CreateKeywordInput{Keyword: "Alpha", Priority: 10, CooldownSeconds: &alphaCooldown})
@@ -83,10 +94,12 @@ func TestPostgresStorageLifecycle(t *testing.T) {
 	}
 
 	inputs := []ResourceInput{
-		{URL: "https://pan.example/share/item?pwd=111&utm_source=one", Title: "alpha title", DiscoveredAt: now,
-			Source: ResourceSourceInput{SourceType: "tg", SourceKey: "channel-a", SourceIdentity: "message-a"}, Keyword: "Alpha"},
+		{URL: "https://pan.example/share/item?pwd=111&utm_source=one", Title: "alpha title", Content: "resource list private content", DiscoveredAt: now,
+			Source: ResourceSourceInput{SourceType: "tg", SourceKey: "channel-a", SourceIdentity: "message-a",
+				Content: "source list private content", Metadata: map[string]any{"token": "private"}}, Keyword: "Alpha"},
 		{URL: "https://PAN.example/share/item?pwd=222&utm_source=two", Title: "a more complete alpha title", DiscoveredAt: now.Add(time.Minute),
-			Source: ResourceSourceInput{SourceType: "plugin", SourceKey: "pansearch", SourceIdentity: "result-a"}, Keyword: "Beta"},
+			Source: ResourceSourceInput{SourceType: "plugin", SourceKey: "pansearch", SourceIdentity: "result-a",
+				Content: "second source private content", Metadata: map[string]any{"token": "private-two"}}, Keyword: "Beta"},
 	}
 	var wait sync.WaitGroup
 	errorsByUpsert := make(chan error, len(inputs))
@@ -106,12 +119,31 @@ func TestPostgresStorageLifecycle(t *testing.T) {
 			t.Fatalf("concurrent UpsertResource: %v", err)
 		}
 	}
-	page, err := store.ListResources(ctx, ResourceFilter{IncludeInvalid: true})
+	page, err := store.ListResourceSummaries(ctx, ResourceFilter{IncludeInvalid: true})
 	if err != nil {
 		t.Fatalf("ListResources: %v", err)
 	}
-	if page.Total != 1 || page.Items[0].DiscoveryCount != 2 || len(page.Items[0].Sources) != 2 {
-		t.Fatalf("concurrent upsert result = total:%d discoveries:%d sources:%d", page.Total, page.Items[0].DiscoveryCount, len(page.Items[0].Sources))
+	if page.Total != 1 || page.Items[0].DiscoveryCount != 2 || page.Items[0].SourceCount != 2 ||
+		page.Items[0].KeywordCount != 2 || len(page.Items[0].SourcePreview) != 2 ||
+		len(page.Items[0].Sources) != 0 || len(page.Items[0].Keywords) != 0 ||
+		page.Items[0].Password != "" || page.Items[0].Content != "" {
+		t.Fatalf("concurrent upsert summary = %+v", page.Items[0])
+	}
+	resourceSources, err := store.ListResourceSources(ctx, page.Items[0].ID, ResourceAssociationFilter{PageSize: 1})
+	if err != nil || resourceSources.Total != 2 || len(resourceSources.Items) != 1 {
+		t.Fatalf("resource sources page = %+v err=%v", resourceSources, err)
+	}
+	if resourceSources.Items[0].Content != "" || resourceSources.Items[0].SourceMetadata != nil {
+		t.Fatalf("resource source page leaked large fields: %+v", resourceSources.Items[0])
+	}
+	fullPage, err := store.ListResources(ctx, ResourceFilter{IncludeInvalid: true})
+	if err != nil || len(fullPage.Items) != 1 || fullPage.Items[0].Password == "" ||
+		fullPage.Items[0].Content == "" || len(fullPage.Items[0].Sources) != 2 {
+		t.Fatalf("full resource search shape = %+v err=%v", fullPage, err)
+	}
+	resourceKeywords, err := store.ListResourceKeywords(ctx, page.Items[0].ID, ResourceAssociationFilter{PageSize: 1})
+	if err != nil || resourceKeywords.Total != 2 || len(resourceKeywords.Items) != 1 {
+		t.Fatalf("resource keywords page = %+v err=%v", resourceKeywords, err)
 	}
 
 	eventAt := now.AddDate(-1, 0, 0)
@@ -160,13 +192,29 @@ func TestPostgresStorageLifecycle(t *testing.T) {
 	exactNext := now.Add(3 * time.Hour)
 	if _, err := store.CompleteRunItem(ctx, first.ID, CompleteRunItemInput{
 		Status: RunSuccess, FoundCount: 3, NewCount: 2, DuplicateCount: 1,
-		CompletedAt: now.Add(time.Minute), NextEligibleAt: &exactNext,
+		CompletedAt: now.Add(time.Minute), NextEligibleAt: &exactNext, SourceSummary: map[string]any{
+			"pansearch": map[string]any{"key": "pansearch", "type": "plugin", "status": "success", "attempts": 1,
+				"result_count": 3, "new_count": 2, "duplicate_count": 1, "duration_ms": 120},
+			"channel-a": map[string]any{"key": "channel-a", "type": "tg", "status": "success_empty", "attempts": 1,
+				"result_count": 0, "new_count": 0, "duplicate_count": 0, "duration_ms": 80},
+		},
 	}); err != nil {
 		t.Fatalf("CompleteRunItem(first): %v", err)
 	}
 	updatedAlpha, err := store.GetKeyword(ctx, alpha.ID)
 	if err != nil || updatedAlpha.NextEligibleAt == nil || !updatedAlpha.NextEligibleAt.Equal(exactNext) {
 		t.Fatalf("exact cooldown = %v err=%v, want %v", updatedAlpha.NextEligibleAt, err, exactNext)
+	}
+	runItems, err := store.ListRunItems(ctx, run.ID, RunItemFilter{Query: "Alpha", PageSize: 30})
+	if err != nil || runItems.Total != 1 || len(runItems.Items) != 1 || runItems.Items[0].SourceTotal != 2 ||
+		runItems.Items[0].SourceSuccess != 1 || runItems.Items[0].SourceEmpty != 1 || runItems.Items[0].SourceFailed != 0 ||
+		runItems.Items[0].SourceSummary != nil {
+		t.Fatalf("run items page = %+v err=%v", runItems, err)
+	}
+	runSources, err := store.ListRunItemSources(ctx, run.ID, first.ID, RunSourceFilter{Types: []string{"plugin"}, PageSize: 50})
+	if err != nil || runSources.Total != 1 || len(runSources.Items) != 1 || runSources.Items[0].Key != "pansearch" ||
+		runSources.Items[0].DurationMS != 120 {
+		t.Fatalf("run sources page = %+v err=%v", runSources, err)
 	}
 	if err := store.MarkRunItemRunning(ctx, run.ID, second.ID, now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("MarkRunItemRunning(second): %v", err)
@@ -196,5 +244,48 @@ func TestPostgresStorageLifecycle(t *testing.T) {
 	trends, err := store.Trends(ctx, 7)
 	if err != nil || len(trends) != 7 || trends[len(trends)-1].Discoveries != 3 {
 		t.Fatalf("Trends = %+v err=%v", trends, err)
+	}
+}
+
+func TestPostgresRunErrorSummaryCountsOnlyFailedItems(t *testing.T) {
+	now := time.Date(2026, time.July, 14, 12, 0, 0, 0, time.UTC)
+	store := newPostgresTestStore(t, now)
+	ctx := context.Background()
+	keywords := make([]RunKeywordInput, 8)
+	for index := range keywords {
+		keywords[index] = RunKeywordInput{Keyword: fmt.Sprintf("failure-summary-%d", index+1)}
+	}
+	run, err := store.CreateRun(ctx, CreateRunInput{Trigger: "manual", Force: true, Keywords: keywords})
+	if err != nil || len(run.Items) != len(keywords) {
+		t.Fatalf("CreateRun: items=%d err=%v", len(run.Items), err)
+	}
+	for index, item := range run.Items {
+		startedAt := now.Add(time.Duration(index) * time.Second)
+		if err := store.MarkRunItemRunning(ctx, run.ID, item.ID, startedAt); err != nil {
+			t.Fatalf("MarkRunItemRunning(%d): %v", index, err)
+		}
+		status := RunFailed
+		message := fmt.Sprintf("failed item %d", index+1)
+		if index == 0 {
+			message = ""
+		}
+		if index == len(run.Items)-1 {
+			status = RunSuccess
+			message = "successful item warning must not count"
+		}
+		if _, err := store.CompleteRunItem(ctx, item.ID, CompleteRunItemInput{
+			Status: status, ErrorMessage: message, CompletedAt: startedAt.Add(time.Second),
+		}); err != nil {
+			t.Fatalf("CompleteRunItem(%d): %v", index, err)
+		}
+	}
+	summary, err := store.GetRunSummary(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRunSummary: %v", err)
+	}
+	if !strings.Contains(summary.ErrorMessage, runMissingErrorDetailText) ||
+		!strings.Contains(summary.ErrorMessage, "... and 2 more") ||
+		strings.Contains(summary.ErrorMessage, "successful item warning") {
+		t.Fatalf("error summary = %q", summary.ErrorMessage)
 	}
 }

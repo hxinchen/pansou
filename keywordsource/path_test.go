@@ -3,6 +3,7 @@ package keywordsource
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -130,5 +131,43 @@ func TestDiscoverFields(t *testing.T) {
 	}
 	if candidates[2].Count != 3 || !reflect.DeepEqual(candidates[2].Samples, []string{"one", "two"}) {
 		t.Fatalf("keyword candidate = %#v", candidates[2])
+	}
+}
+
+func TestDiscoverFieldsCountsAllPathsAndLaterRepeatedValues(t *testing.T) {
+	t.Parallel()
+	first := make(map[string]any, 600)
+	for index := 0; index < 600; index++ {
+		first[fmt.Sprintf("field_%03d", index)] = fmt.Sprintf("value-%d", index)
+	}
+	document := []any{first, map[string]any{"field_000": "later-value"}}
+	candidates := DiscoverFields(document)
+	if len(candidates) != 600 {
+		t.Fatalf("candidate count = %d, want 600", len(candidates))
+	}
+	var repeated *FieldCandidate
+	for index := range candidates {
+		if candidates[index].Path == "[].field_000" {
+			repeated = &candidates[index]
+			break
+		}
+	}
+	if repeated == nil {
+		t.Fatal("repeated candidate is missing")
+	}
+	if repeated.Count != 2 || !reflect.DeepEqual(repeated.Samples, []string{"value-0", "later-value"}) {
+		t.Fatalf("repeated candidate = %#v", repeated)
+	}
+}
+
+func TestDiscoverFieldsTraversesDeepBoundedJSON(t *testing.T) {
+	t.Parallel()
+	var document any = "value"
+	for depth := 0; depth < 30; depth++ {
+		document = map[string]any{"nested": document}
+	}
+	candidates := DiscoverFields(document)
+	if len(candidates) != 1 || candidates[0].Count != 1 {
+		t.Fatalf("deep candidates = %#v", candidates)
 	}
 }

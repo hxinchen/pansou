@@ -21,6 +21,11 @@ const resourceColumns = `
 	link_datetime, check_status, last_checked_at, first_seen_at, last_seen_at,
 	discovery_count, created_at, updated_at`
 
+const resourceListColumns = `
+	r.id, r.normalized_url, r.url, r.platform, left(r.title, 500),
+	r.link_datetime, r.check_status, r.last_checked_at, r.first_seen_at, r.last_seen_at,
+	r.discovery_count, r.created_at, r.updated_at`
+
 func scanResource(row rowScanner) (Resource, error) {
 	var resource Resource
 	err := row.Scan(
@@ -28,6 +33,17 @@ func scanResource(row rowScanner) (Resource, error) {
 		&resource.Platform, &resource.Title, &resource.Content, &resource.LinkDatetime,
 		&resource.CheckStatus, &resource.LastCheckedAt, &resource.FirstSeenAt,
 		&resource.LastSeenAt, &resource.DiscoveryCount, &resource.CreatedAt, &resource.UpdatedAt,
+	)
+	return resource, err
+}
+
+func scanResourceListItem(row rowScanner) (Resource, error) {
+	var resource Resource
+	err := row.Scan(
+		&resource.ID, &resource.NormalizedURL, &resource.URL, &resource.Platform,
+		&resource.Title, &resource.LinkDatetime, &resource.CheckStatus,
+		&resource.LastCheckedAt, &resource.FirstSeenAt, &resource.LastSeenAt,
+		&resource.DiscoveryCount, &resource.CreatedAt, &resource.UpdatedAt,
 	)
 	return resource, err
 }
@@ -334,6 +350,15 @@ func (s *Store) SearchResources(ctx context.Context, filter ResourceFilter) (Res
 }
 
 func (s *Store) ListResources(ctx context.Context, filter ResourceFilter) (ResourcePage, error) {
+	return s.listResources(ctx, filter, false)
+}
+
+// ListResourceSummaries returns the lightweight shape used by the admin list.
+func (s *Store) ListResourceSummaries(ctx context.Context, filter ResourceFilter) (ResourcePage, error) {
+	return s.listResources(ctx, filter, true)
+}
+
+func (s *Store) listResources(ctx context.Context, filter ResourceFilter, summaryOnly bool) (ResourcePage, error) {
 	if s == nil || s.pool == nil {
 		return ResourcePage{}, fmt.Errorf("storage is disabled")
 	}
@@ -355,14 +380,24 @@ func (s *Store) ListResources(ctx context.Context, filter ResourceFilter) (Resou
 		sortClause = "r.last_seen_at ASC, r.id ASC"
 	}
 	queryArgs := append(append([]any(nil), args...), pageSize, (page-1)*pageSize)
-	rows, err := s.pool.Query(ctx, "SELECT "+resourceColumns+" FROM resources r WHERE "+where+" ORDER BY "+sortClause+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
+	columns := resourceColumns
+	if summaryOnly {
+		columns = resourceListColumns
+	}
+	rows, err := s.pool.Query(ctx, "SELECT "+columns+" FROM resources r WHERE "+where+" ORDER BY "+sortClause+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
 	if err != nil {
 		return ResourcePage{}, fmt.Errorf("list resources: %w", err)
 	}
 	defer rows.Close()
 	resources := make([]Resource, 0, pageSize)
 	for rows.Next() {
-		resource, scanErr := scanResource(rows)
+		var resource Resource
+		var scanErr error
+		if summaryOnly {
+			resource, scanErr = scanResourceListItem(rows)
+		} else {
+			resource, scanErr = scanResource(rows)
+		}
 		if scanErr != nil {
 			return ResourcePage{}, fmt.Errorf("scan resource: %w", scanErr)
 		}
@@ -371,7 +406,11 @@ func (s *Store) ListResources(ctx context.Context, filter ResourceFilter) (Resou
 	if err := rows.Err(); err != nil {
 		return ResourcePage{}, fmt.Errorf("iterate resources: %w", err)
 	}
-	if err := s.loadResourceAssociations(ctx, resources); err != nil {
+	if summaryOnly {
+		if err := s.loadResourceAssociationSummaries(ctx, resources); err != nil {
+			return ResourcePage{}, err
+		}
+	} else if err := s.loadResourceAssociations(ctx, resources); err != nil {
 		return ResourcePage{}, err
 	}
 	return ResourcePage{Items: resources, Total: total, Page: page, PageSize: pageSize}, nil
@@ -447,10 +486,176 @@ func (s *Store) GetResource(ctx context.Context, id int64) (Resource, error) {
 		return Resource{}, fmt.Errorf("get resource: %w", err)
 	}
 	resources := []Resource{resource}
-	if err := s.loadResourceAssociations(ctx, resources); err != nil {
+	if err := s.loadResourceAssociationSummaries(ctx, resources); err != nil {
 		return Resource{}, err
 	}
 	return resources[0], nil
+}
+
+func (s *Store) loadResourceAssociationSummaries(ctx context.Context, resources []Resource) error {
+	if len(resources) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(resources))
+	byID := make(map[int64]*Resource, len(resources))
+	for index := range resources {
+		ids[index] = resources[index].ID
+		byID[resources[index].ID] = &resources[index]
+	}
+	rows, err := s.pool.Query(ctx, `SELECT ids.id,
+		(SELECT count(*) FROM resource_sources rs WHERE rs.resource_id=ids.id),
+		(SELECT count(*) FROM resource_keywords rk WHERE rk.resource_id=ids.id)
+		FROM unnest($1::bigint[]) AS ids(id)`, ids)
+	if err != nil {
+		return fmt.Errorf("load resource association counts: %w", err)
+	}
+	for rows.Next() {
+		var id, sourceCount, keywordCount int64
+		if err := rows.Scan(&id, &sourceCount, &keywordCount); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan resource association counts: %w", err)
+		}
+		if resource := byID[id]; resource != nil {
+			resource.SourceCount = sourceCount
+			resource.KeywordCount = keywordCount
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate resource association counts: %w", err)
+	}
+	rows.Close()
+
+	rows, err = s.pool.Query(ctx, `SELECT preview.id, preview.resource_id, preview.source_type,
+		preview.source_key, preview.source_identity, left(preview.title, 300), preview.last_seen_at,
+		preview.discovery_count
+		FROM unnest($1::bigint[]) AS ids(id)
+		CROSS JOIN LATERAL (
+			SELECT * FROM resource_sources rs WHERE rs.resource_id=ids.id
+			ORDER BY rs.last_seen_at DESC, rs.id DESC LIMIT 2
+		) preview
+		ORDER BY preview.resource_id, preview.last_seen_at DESC, preview.id DESC`, ids)
+	if err != nil {
+		return fmt.Errorf("load resource source previews: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var source ResourceSourcePreview
+		if err := rows.Scan(&source.ID, &source.ResourceID, &source.SourceType, &source.SourceKey,
+			&source.SourceIdentity, &source.Title, &source.LastSeenAt, &source.DiscoveryCount); err != nil {
+			return fmt.Errorf("scan resource source preview: %w", err)
+		}
+		if resource := byID[source.ResourceID]; resource != nil {
+			resource.SourcePreview = append(resource.SourcePreview, source)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate resource source previews: %w", err)
+	}
+	return nil
+}
+
+func scanResourceSource(row rowScanner) (ResourceSource, error) {
+	var source ResourceSource
+	var metadata []byte
+	err := row.Scan(&source.ID, &source.ResourceID, &source.SourceType, &source.SourceKey,
+		&source.SourceIdentity, &source.MessageID, &source.UniqueID, &source.Title, &source.Content,
+		&source.DiscoveredAt, &source.FirstSeenAt, &source.LastSeenAt, &source.DiscoveryCount, &metadata)
+	if err != nil {
+		return ResourceSource{}, err
+	}
+	source.SourceMetadata = decodeMetadata(metadata)
+	return source, nil
+}
+
+func scanResourceSourceListItem(row rowScanner) (ResourceSource, error) {
+	var source ResourceSource
+	err := row.Scan(&source.ID, &source.ResourceID, &source.SourceType, &source.SourceKey,
+		&source.SourceIdentity, &source.MessageID, &source.UniqueID, &source.Title,
+		&source.DiscoveredAt, &source.FirstSeenAt, &source.LastSeenAt, &source.DiscoveryCount)
+	return source, err
+}
+
+func (s *Store) ListResourceSources(ctx context.Context, resourceID int64, filter ResourceAssociationFilter) (ResourceSourcePage, error) {
+	if s == nil || s.pool == nil {
+		return ResourceSourcePage{}, fmt.Errorf("storage is disabled")
+	}
+	page, pageSize := normalizePage(filter.Page, filter.PageSize, 50, 100)
+	var total int64
+	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM resource_sources WHERE resource_id=$1", resourceID).Scan(&total); err != nil {
+		return ResourceSourcePage{}, fmt.Errorf("count resource sources: %w", err)
+	}
+	if total == 0 {
+		var exists bool
+		if err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM resources WHERE id=$1)", resourceID).Scan(&exists); err != nil {
+			return ResourceSourcePage{}, fmt.Errorf("check resource: %w", err)
+		}
+		if !exists {
+			return ResourceSourcePage{}, ErrNotFound
+		}
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id, resource_id, source_type, source_key,
+		source_identity, message_id, unique_id, left(title, 500), discovered_at,
+		first_seen_at, last_seen_at, discovery_count
+		FROM resource_sources WHERE resource_id=$1
+		ORDER BY last_seen_at DESC, id DESC LIMIT $2 OFFSET $3`, resourceID, pageSize, (page-1)*pageSize)
+	if err != nil {
+		return ResourceSourcePage{}, fmt.Errorf("list resource sources: %w", err)
+	}
+	defer rows.Close()
+	items := make([]ResourceSource, 0, pageSize)
+	for rows.Next() {
+		item, scanErr := scanResourceSourceListItem(rows)
+		if scanErr != nil {
+			return ResourceSourcePage{}, fmt.Errorf("scan resource source: %w", scanErr)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return ResourceSourcePage{}, fmt.Errorf("iterate resource sources: %w", err)
+	}
+	return ResourceSourcePage{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func (s *Store) ListResourceKeywords(ctx context.Context, resourceID int64, filter ResourceAssociationFilter) (ResourceKeywordPage, error) {
+	if s == nil || s.pool == nil {
+		return ResourceKeywordPage{}, fmt.Errorf("storage is disabled")
+	}
+	page, pageSize := normalizePage(filter.Page, filter.PageSize, 50, 100)
+	var total int64
+	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM resource_keywords WHERE resource_id=$1", resourceID).Scan(&total); err != nil {
+		return ResourceKeywordPage{}, fmt.Errorf("count resource keywords: %w", err)
+	}
+	if total == 0 {
+		var exists bool
+		if err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM resources WHERE id=$1)", resourceID).Scan(&exists); err != nil {
+			return ResourceKeywordPage{}, fmt.Errorf("check resource: %w", err)
+		}
+		if !exists {
+			return ResourceKeywordPage{}, ErrNotFound
+		}
+	}
+	rows, err := s.pool.Query(ctx, `SELECT resource_id, keyword_id, keyword,
+		normalized_keyword, keyword_type, first_seen_at, last_seen_at, discovery_count
+		FROM resource_keywords WHERE resource_id=$1
+		ORDER BY last_seen_at DESC, normalized_keyword LIMIT $2 OFFSET $3`, resourceID, pageSize, (page-1)*pageSize)
+	if err != nil {
+		return ResourceKeywordPage{}, fmt.Errorf("list resource keywords: %w", err)
+	}
+	defer rows.Close()
+	items := make([]ResourceKeyword, 0, pageSize)
+	for rows.Next() {
+		var item ResourceKeyword
+		if err := rows.Scan(&item.ResourceID, &item.KeywordID, &item.Keyword, &item.NormalizedKeyword,
+			&item.KeywordType, &item.FirstSeenAt, &item.LastSeenAt, &item.DiscoveryCount); err != nil {
+			return ResourceKeywordPage{}, fmt.Errorf("scan resource keyword: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return ResourceKeywordPage{}, fmt.Errorf("iterate resource keywords: %w", err)
+	}
+	return ResourceKeywordPage{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
 }
 
 func (s *Store) loadResourceAssociations(ctx context.Context, resources []Resource) error {
