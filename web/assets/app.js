@@ -61,7 +61,7 @@
     runs: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
     users: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
     usage: { overview: null, trends: [], logs: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, range: '7d', query: {} },
-    sources: { catalog: [], config: null, credentials: [], tab: 'admin', configTab: 'tg', dirty: false, sharedTotal: 0, pluginSearch: '', credentialEditing: null, credentialEditMode: 'login', loginFlow: null, loginFlowTimer: null, credentialQuery: {} },
+    sources: { catalog: [], config: null, credentials: [], adminCredentials: [], tab: 'admin', configTab: 'tg', dirty: false, saving: false, sharedTotal: 0, pluginSearch: '', credentialEditing: null, credentialEditMode: 'login', loginFlow: null, loginFlowTimer: null, credentialQuery: {} },
     runPicker: { items: [], selected: new Set(), search: '', page: 1, pages: 1, total: 0, loading: false, controller: null, searchTimer: null },
     runDetail: { id: null, summary: null, items: [], page: 1, pages: 1, loadedPages: 0, total: 0, loading: false, query: {}, controller: null, itemsController: null, pollController: null, sourceControllers: {}, observer: null },
     pollTimer: null,
@@ -3726,22 +3726,28 @@
       refreshIcons(target);
     }
     try {
-      var result = await apiRequest(requestedTab === 'admin' ? API.credentials : API.userCredentials, {
+      var credentialAPI = requestedTab === 'admin' ? API.credentials : API.userCredentials;
+      var hasAdminFilters = requestedTab === 'admin' && Boolean(state.sources.credentialQuery.plugin_key || state.sources.credentialQuery.status);
+      var summaryRequest = hasAdminFilters ? apiRequest(API.credentials, { query: { page_size: 100 } }) : null;
+      var result = await apiRequest(credentialAPI, {
         query: {
           plugin_key: state.sources.credentialQuery.plugin_key || '',
           status: state.sources.credentialQuery.status || '',
           page_size: 100
         }
       });
+      var summaryResult = summaryRequest ? await summaryRequest : result;
       if (requestID !== state.requestSerial.sources || requestedTab !== state.sources.tab) return;
       state.sources.credentials = arrayFrom(result, ['items', 'credentials']);
       if (requestedTab === 'admin') {
+        state.sources.adminCredentials = arrayFrom(summaryResult, ['items', 'credentials']);
         state.sources.sharedTotal = state.sources.credentials.filter(function (item) {
           return item.scope === 'public_shared' && item.status === 'active' && pick(item, ['owner_enabled', 'enabled'], true) !== false && !item.admin_suspended_at;
         }).length;
         byId('source-shared-total').textContent = String(state.sources.sharedTotal);
       }
       renderSourceCredentials();
+      renderSourcePlugins(state.sources.config);
     } catch (error) {
       if (requestID !== state.requestSerial.sources || requestedTab !== state.sources.tab) return;
       state.sources.credentials = [];
@@ -3820,7 +3826,16 @@
       var blocked = Array.isArray(config.blocked_pan_types) ? config.blocked_pan_types.join('\n') : String(config.blocked_pan_types || '');
       fields.push('<label class="plugin-config-field"><span>屏蔽网盘类型</span><textarea class="source-input" rows="2" data-source-plugin-config="' + escapeHTML(key) + '" data-config-key="blocked_pan_types" placeholder="baidu, aliyun">' + escapeHTML(blocked) + '</textarea><small>支持逗号或换行分隔，留空表示不过滤。</small></label>');
     }
-    return fields.length ? '<div class="plugin-config-fields">' + fields.join('') + '</div>' : '';
+    return fields.length ? '<details class="plugin-config-disclosure"><summary>' + icon('settings-2') + '<span>运行参数</span><small>' + fields.length + ' 项</small>' + icon('chevron-down') + '</summary><div class="plugin-config-fields">' + fields.join('') + '</div></details>' : '';
+  }
+
+  function sourcePluginCredentialStats(pluginKey) {
+    var credentials = state.sources.adminCredentials || [];
+    var matching = credentials.filter(function (item) { return String(item.plugin_key) === String(pluginKey); });
+    var active = matching.filter(function (item) {
+      return item.status === 'active' && pick(item, ['owner_enabled', 'enabled'], true) !== false && !item.admin_suspended_at;
+    }).length;
+    return { total: matching.length, active: active };
   }
 
   function renderSourcePlugins(config) {
@@ -3843,16 +3858,44 @@
       var key = descriptor.key || descriptor.name;
       return !query || String(key).toLowerCase().indexOf(query) >= 0 || String(descriptor.display_name || '').toLowerCase().indexOf(query) >= 0;
     });
-    var summary = '<div class="selection-tools plugin-count-summary"><span>显示 ' + visible.length + ' / ' + catalog.length + ' 个插件</span><strong>已启用 ' + enabledCount + ' 个</strong></div>';
+    var target = byId('source-plugins');
+    var scrollTop = target ? target.scrollTop : 0;
+    var activePluginKey = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.sourcePlugin : '';
+    var openConfigKeys = new Set(Array.from(document.querySelectorAll('#source-plugins .plugin-config-disclosure[open]')).map(function (node) { return node.dataset.pluginKey; }));
+    var summary = '<div class="selection-tools plugin-count-summary" role="status" aria-live="polite"><span>显示 ' + visible.length + ' / ' + catalog.length + ' 个插件</span><strong>已启用 ' + enabledCount + ' 个</strong></div>';
     var cards = visible.map(function (descriptor) {
       var key = descriptor.key || descriptor.name;
       var settings = plugins[key] || {};
+      var enabled = boolValue(settings.enabled, false);
+      var runtimeEnabled = boolValue(pick(config, ['async_plugins_enabled'], false), false);
       var requirement = descriptor.requires_account ? (descriptor.login_type === 'qr' ? '需要扫码账号' : '需要账号登录') : '无需账号';
       var description = descriptor.description || requirement;
-      return '<article class="source-card plugin-source-card"><div><strong>' + escapeHTML(descriptor.display_name || key) + '</strong><small>' + escapeHTML(description) + '</small><span class="summary-chip">' + escapeHTML(requirement) + '</span></div><span class="type-badge">' + escapeHTML(key) + '</span><label class="switch-row"><input type="checkbox" data-source-plugin="' + escapeHTML(key) + '" ' + (boolValue(settings.enabled, false) ? 'checked' : '') + '><span>启用</span></label>' + pluginConfigFieldHTML(descriptor, settings) + '</article>';
+      var credentialStats = sourcePluginCredentialStats(key);
+      var accountReady = !descriptor.requires_account || credentialStats.active > 0;
+      var running = enabled && runtimeEnabled && accountReady;
+      var statusClass = running ? 'is-running' : (enabled && runtimeEnabled && !accountReady ? 'is-needs-account' : (enabled ? 'is-paused' : 'is-disabled'));
+      var statusIcon = running ? 'circle-check' : (statusClass === 'is-needs-account' ? 'circle-alert' : (enabled ? 'pause-circle' : 'circle-off'));
+      var statusText = running ? '运行中' : (statusClass === 'is-needs-account' ? '等待账号' : (enabled ? '总开关已暂停' : '未启用'));
+      var credentialChip = '';
+      var credentialAction = '';
+      if (descriptor.requires_account) {
+        credentialChip = credentialStats.active
+          ? '<span class="plugin-account-chip is-ready">' + icon('badge-check') + '可用账号 ' + credentialStats.active + '</span>'
+          : '<span class="plugin-account-chip is-missing">' + icon('circle-alert') + (credentialStats.total ? '账号需重新登录' : '账号未配置') + '</span>';
+        credentialAction = '<button class="button secondary plugin-configure-account" type="button" data-action="configure-source-plugin" data-plugin-key="' + escapeHTML(key) + '">' + icon(descriptor.login_type === 'qr' ? 'scan-line' : 'key-round') + '<span>' + (credentialStats.total ? '添加账号' : '配置账号') + '</span></button>';
+      }
+      return '<article class="source-card plugin-source-card ' + statusClass + '" data-plugin-key="' + escapeHTML(key) + '">' +
+        '<div class="plugin-source-main"><div class="plugin-source-title-row"><strong>' + escapeHTML(descriptor.display_name || key) + '</strong><span class="type-badge">' + escapeHTML(key) + '</span></div><small>' + escapeHTML(description) + '</small><div class="plugin-source-chips"><span class="plugin-state-chip">' + icon(statusIcon) + escapeHTML(statusText) + '</span>' + credentialChip + '<span class="summary-chip">' + escapeHTML(requirement) + '</span></div></div>' +
+        '<div class="plugin-card-actions">' + credentialAction + '<label class="switch-row plugin-enable-switch"><input type="checkbox" data-source-plugin="' + escapeHTML(key) + '" aria-label="启用 ' + escapeHTML(descriptor.display_name || key) + ' 插件" ' + (enabled ? 'checked' : '') + '><span>启用</span></label></div>' +
+        pluginConfigFieldHTML(descriptor, settings).replace('class="plugin-config-disclosure"', 'class="plugin-config-disclosure" data-plugin-key="' + escapeHTML(key) + '"' + (openConfigKeys.has(String(key)) ? ' open' : '')) + '</article>';
     }).join('');
-    byId('source-plugins').innerHTML = summary + (cards || '<div class="empty-state compact-empty"><p>没有匹配的内置插件。</p></div>');
-    refreshIcons(byId('source-plugins'));
+    target.innerHTML = summary + (cards || '<div class="empty-state compact-empty"><p>没有匹配的内置插件。</p></div>');
+    target.scrollTop = scrollTop;
+    if (activePluginKey) {
+      var activeToggle = Array.from(target.querySelectorAll('[data-source-plugin]')).find(function (input) { return input.dataset.sourcePlugin === activePluginKey; });
+      if (activeToggle) activeToggle.focus({ preventScroll: true });
+    }
+    refreshIcons(target);
   }
 
   function renderSources() {
@@ -3971,15 +4014,74 @@
     } catch (error) { showAlert('sources-alert', error.message || '配置校验失败'); }
   }
 
-  async function saveSources() {
+  function setSourceEditorBusy(busy) {
+    state.sources.saving = busy;
+    document.querySelectorAll('#view-sources button, #view-sources input, #view-sources textarea, #view-sources select').forEach(function (control) {
+      control.disabled = busy;
+    });
+  }
+
+  async function saveSources(options) {
+    options = options || {};
+    if (state.sources.saving) {
+      toast('来源配置正在保存，请稍候', 'info');
+      return false;
+    }
+    setSourceEditorBusy(true);
     try {
-      var result = await apiRequest(API.sourceConfig, { method: 'PUT', body: { expected_version: state.sources.version, config: collectSourceDraft() } });
+      var draft = options.config || collectSourceDraft();
+      await apiRequest(API.sourceConfig, { method: 'PUT', body: { expected_version: state.sources.version, config: draft } });
       state.loaded.sources = false;
-      toast('来源配置已热更新', 'success');
+      toast(options.successMessage || '来源配置已热更新', 'success');
       await loadSources(true);
+      return true;
     } catch (error) {
       showAlert('sources-alert', error.status === 409 ? '配置已被其他管理员更新，请重新加载后再保存。' : (error.message || '来源配置保存失败，旧配置仍在运行。'));
+      if (options.rollbackOnError) await loadSources(true);
+      return false;
+    } finally {
+      setSourceEditorBusy(false);
     }
+  }
+
+  async function setAllSourcePlugins(enabled) {
+    if (!enabled) {
+      var confirmed = await confirmAction('停用全部插件', '所有内置插件会立即停止参与搜索，已保存的账号和运行参数不会被删除。', '全部停用');
+      if (!confirmed) return;
+    }
+    var draft = collectSourceDraft();
+    draft.async_plugins_enabled = enabled;
+    draft.plugins = draft.plugins || {};
+    (state.sources.catalog || []).forEach(function (descriptor, index) {
+      var key = descriptor.key || descriptor.name;
+      var existing = draft.plugins[key] || {};
+      draft.plugins[key] = Object.assign({}, existing, { enabled: enabled, order: numberValue(existing.order, index) });
+    });
+    state.sources.config = draft;
+    renderSources();
+    await saveSources({ config: draft, successMessage: enabled ? '全部插件已启动' : '全部插件已停用', rollbackOnError: true });
+  }
+
+  async function ensureSourcePluginEnabled(pluginKey) {
+    var draft = collectSourceDraft();
+    var existing = (draft.plugins || {})[pluginKey] || {};
+    if (draft.async_plugins_enabled && boolValue(existing.enabled, false)) return true;
+    draft.plugins = draft.plugins || {};
+    draft.async_plugins_enabled = true;
+    draft.plugins[pluginKey] = Object.assign({}, existing, { enabled: true });
+    state.sources.config = draft;
+    renderSources();
+    return saveSources({ config: draft, successMessage: '插件已启用，可以继续配置账号' });
+  }
+
+  async function configureSourcePlugin(pluginKey) {
+    var descriptor = findPluginDescriptor(pluginKey);
+    if (!descriptor) {
+      toast('未找到该账号型插件', 'error');
+      return;
+    }
+    if (state.sources.tab !== 'admin') switchCredentialTab('admin');
+    openPluginCredentialDialog(null, 'login', pluginKey);
   }
 
   function addSourceChannel() {
@@ -4076,10 +4178,20 @@
       target.innerHTML = accountHelp + '<label class="field"><span>登录账号</span><input name="username" type="text" autocomplete="username" required></label>' +
         '<label class="field"><span>登录密码</span><input name="password" type="password" autocomplete="current-password" required></label>' + metadataField;
     }
+    renderPluginCredentialContext(pluginKey, descriptor);
     refreshIcons(target);
   }
 
-  function openPluginCredentialDialog(credential, mode) {
+  function renderPluginCredentialContext(pluginKey, descriptor) {
+    descriptor = descriptor || findPluginDescriptor(pluginKey);
+    var selectedName = descriptor ? (descriptor.display_name || pluginKey) : pluginKey;
+    var context = byId('plugin-credential-context');
+    if (!context) return;
+    context.innerHTML = '<span class="plugin-credential-context-icon">' + icon(descriptor && descriptor.login_type === 'qr' ? 'scan-line' : 'shield-check') + '</span><div><strong>' + escapeHTML(selectedName) + '</strong><span>' + escapeHTML(descriptor && descriptor.login_type === 'qr' ? '使用客户端扫码授权；提交登录时会自动启用插件运行环境。' : '登录信息由后端加密保存；提交登录时会自动启用插件运行环境。') + '</span></div>';
+    refreshIcons(context);
+  }
+
+  function openPluginCredentialDialog(credential, mode, pluginKey) {
     var descriptors = accountPluginDescriptors();
     if (!descriptors.length) {
       toast('当前没有可配置的账号型插件', 'error');
@@ -4094,6 +4206,8 @@
       var key = descriptor.key || descriptor.name;
       return '<option value="' + escapeHTML(key) + '">' + escapeHTML(descriptor.display_name || key) + '</option>';
     }).join('');
+    var selectedPluginKey = credential ? credential.plugin_key : (pluginKey || descriptors[0].key || descriptors[0].name);
+    form.elements.plugin_key.value = selectedPluginKey;
     if (credential) {
       form.elements.plugin_key.value = credential.plugin_key;
       form.elements.plugin_key.disabled = true;
@@ -4101,11 +4215,13 @@
       form.elements.scope.disabled = true;
       form.elements.display_name.value = credential.display_name || '';
     } else {
-      form.elements.plugin_key.disabled = false;
+      form.elements.plugin_key.disabled = Boolean(pluginKey);
       form.elements.scope.disabled = false;
     }
     form.elements.display_name.disabled = state.sources.credentialEditMode === 'metadata';
-    byId('plugin-credential-dialog-title').textContent = state.sources.credentialEditMode === 'metadata' ? '编辑账号搜索范围' : (credential ? '重新登录插件账号' : '新增插件账号');
+    var selectedDescriptor = findPluginDescriptor(selectedPluginKey);
+    var selectedName = selectedDescriptor ? (selectedDescriptor.display_name || selectedPluginKey) : selectedPluginKey;
+    byId('plugin-credential-dialog-title').textContent = state.sources.credentialEditMode === 'metadata' ? '编辑账号搜索范围' : (credential ? '重新登录插件账号' : (pluginKey ? '配置 ' + selectedName : '新增插件账号'));
     byId('plugin-credential-submit').querySelector('span').textContent = state.sources.credentialEditMode === 'metadata' ? '保存搜索范围' : (credential ? '重新登录' : '登录并保存');
     byId('plugin-credential-form-error').hidden = true;
     renderPluginCredentialLoginFields();
@@ -4143,6 +4259,8 @@
         byId('plugin-credential-dialog').close();
         toast('账号搜索范围已更新', 'success');
         await loadSourceCredentials();
+      } else if (!await ensureSourcePluginEnabled(payload.plugin_key)) {
+        throw new APIError('插件启用失败，请稍后重试', 500, null);
       } else if (descriptor && descriptor.login_type === 'qr') {
         await startPluginQRFlow(payload, editing);
         byId('plugin-credential-dialog').close();
@@ -4431,6 +4549,9 @@
     else if (action === 'add-channel') addSourceChannel();
     else if (action === 'import-source-channels' || action === 'bulk-import-channels' || action === 'bulk-add-channels' || action === 'import-channels') importSourceChannels();
     else if (action === 'remove-channel') removeSourceChannel(numberValue(actionElement.dataset.index, -1));
+    else if (action === 'enable-all-plugins') setAllSourcePlugins(true);
+    else if (action === 'disable-all-plugins') setAllSourcePlugins(false);
+    else if (action === 'configure-source-plugin') configureSourcePlugin(actionElement.dataset.pluginKey);
     else if (action === 'new-plugin-credential') openPluginCredentialDialog(null);
     else if (action === 'relogin-plugin-credential') {
       var sourceCredential = findSourceCredential(actionElement.dataset.id);
@@ -4452,6 +4573,10 @@
   function handleChange(event) {
     var target = event.target;
     if (target.matches('[data-source-plugin]')) {
+      state.sources.config = collectSourceDraft();
+      renderSourcePlugins(state.sources.config);
+    }
+    else if (target.id === 'source-plugin-master') {
       state.sources.config = collectSourceDraft();
       renderSourcePlugins(state.sources.config);
     }

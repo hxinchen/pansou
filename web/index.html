@@ -813,7 +813,7 @@
               <span class="source-group-icon"><i data-lucide="plug" aria-hidden="true"></i></span>
               <h2 id="plugin-sources-title">内置插件</h2>
               <label class="source-master-switch compact-master-switch">
-                <span>插件总开关</span>
+                <span>插件运行总开关</span>
                 <input id="source-plugin-master" type="checkbox" aria-label="启用内置插件">
               </label>
             </header>
@@ -823,8 +823,12 @@
                   <i data-lucide="search" aria-hidden="true"></i>
                   <input id="source-plugin-search" type="search" placeholder="搜索插件名称或标识" aria-label="搜索内置插件">
                 </label>
+                <div class="source-plugin-bulk-actions" aria-label="插件批量操作">
+                  <button id="enable-all-plugins" class="button primary" type="button" data-action="enable-all-plugins"><i data-lucide="play" aria-hidden="true"></i><span>全部启动</span></button>
+                  <button id="disable-all-plugins" class="button secondary" type="button" data-action="disable-all-plugins"><i data-lucide="pause" aria-hidden="true"></i><span>全部停用</span></button>
+                </div>
               </div>
-              <div id="source-plugins" class="source-card-list source-plugin-list" aria-live="polite"></div>
+              <div id="source-plugins" class="source-card-list source-plugin-list"></div>
             </div>
           </section>
 
@@ -1100,13 +1104,14 @@
   </dialog>
 
   <dialog id="plugin-credential-dialog" class="dialog" aria-labelledby="plugin-credential-dialog-title">
-    <form id="plugin-credential-form" class="dialog-shell">
+    <form id="plugin-credential-form" class="dialog-shell plugin-credential-shell">
       <header class="dialog-header">
         <div><p class="eyebrow">PLUGIN ACCOUNT</p><h2 id="plugin-credential-dialog-title">新增插件账号</h2></div>
         <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x"></i></button>
       </header>
       <div class="dialog-body">
         <input name="credential_id" type="hidden">
+        <div id="plugin-credential-context" class="plugin-credential-context"></div>
         <div class="form-grid">
           <label class="field"><span>插件</span><span class="select-field"><select name="plugin_key" required></select><i data-lucide="chevron-down"></i></span></label>
           <label class="field"><span>使用范围</span><span class="select-field"><select name="scope" required><option value="admin_private">管理员私有</option><option value="public_shared">公开共享</option></select><i data-lucide="chevron-down"></i></span></label>

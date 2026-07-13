@@ -3649,11 +3649,207 @@ textarea.plugin-config-input {
 .source-plugin-toolbar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 14px;
   margin-bottom: 12px;
 }
 
 .source-plugin-search-field {
   width: min(100%, 520px);
+  flex: 1 1 320px;
+  margin-bottom: 0;
+}
+
+.source-plugin-bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.source-plugin-bulk-actions .button {
+  min-height: 38px;
+}
+
+.plugin-source-card {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px 18px;
+  padding: 14px 15px;
+  overflow: hidden;
+  border-left-width: 3px;
+}
+
+.plugin-source-card.is-running {
+  border-left-color: var(--green);
+  background: linear-gradient(90deg, rgba(18, 153, 98, 0.045), transparent 28%), var(--surface);
+}
+
+.plugin-source-card.is-needs-account {
+  border-left-color: #df8d24;
+  background: linear-gradient(90deg, rgba(223, 141, 36, 0.055), transparent 28%), var(--surface);
+}
+
+.plugin-source-card.is-paused {
+  border-left-color: #8b95a5;
+}
+
+.plugin-source-card.is-disabled {
+  border-left-color: var(--line-strong);
+  background: #fbfcfd;
+}
+
+.plugin-source-main {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.plugin-source-main > small {
+  max-width: 760px;
+  margin: 0;
+  line-height: 1.55;
+}
+
+.plugin-source-title-row,
+.plugin-source-chips,
+.plugin-card-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.plugin-source-title-row {
+  gap: 8px;
+}
+
+.plugin-source-title-row strong {
+  font-size: 12px;
+}
+
+.plugin-source-chips {
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.plugin-state-chip,
+.plugin-account-chip {
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.plugin-state-chip svg,
+.plugin-account-chip svg {
+  width: 12px;
+  height: 12px;
+}
+
+.is-running .plugin-state-chip,
+.plugin-account-chip.is-ready {
+  border-color: rgba(18, 153, 98, 0.24);
+  background: rgba(18, 153, 98, 0.08);
+  color: #08744a;
+}
+
+.is-needs-account .plugin-state-chip,
+.plugin-account-chip.is-missing {
+  border-color: rgba(223, 141, 36, 0.28);
+  background: rgba(223, 141, 36, 0.09);
+  color: #9a5a0a;
+}
+
+.plugin-card-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.plugin-configure-account {
+  min-height: 36px;
+  padding: 7px 10px;
+  font-size: 10px;
+}
+
+.plugin-enable-switch {
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+}
+
+.plugin-enable-switch input {
+  width: 18px;
+  height: 18px;
+}
+
+.plugin-config-disclosure {
+  grid-column: 1 / -1;
+  min-width: 0;
+  border-top: 1px solid var(--line);
+}
+
+.plugin-config-disclosure > summary {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 2px 0;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.plugin-config-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.plugin-config-disclosure > summary svg {
+  width: 14px;
+  height: 14px;
+}
+
+.plugin-config-disclosure > summary small {
+  margin: 0 0 0 auto;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.plugin-config-disclosure > summary svg:last-child {
+  transition: transform 150ms ease;
+}
+
+.plugin-config-disclosure[open] > summary svg:last-child {
+  transform: rotate(180deg);
+}
+
+.plugin-config-disclosure > summary:focus-visible {
+  outline: 2px solid rgba(23, 105, 224, 0.45);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
+.plugin-config-disclosure .plugin-config-fields {
+  grid-column: auto;
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fafbfc;
 }
 
 .plugin-module-heading .source-master-switch {
@@ -3669,6 +3865,53 @@ textarea.plugin-config-input {
   color: #4d545d;
   font-size: 10px;
   font-weight: 680;
+}
+
+.plugin-credential-shell {
+  width: min(660px, calc(100vw - 32px));
+}
+
+.plugin-credential-context {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 13px 14px;
+  border: 1px solid #cbdcf4;
+  border-radius: 7px;
+  background: linear-gradient(135deg, #f4f8ff, #fafcff);
+}
+
+.plugin-credential-context-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  background: #e8f1ff;
+  color: var(--blue);
+}
+
+.plugin-credential-context-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.plugin-credential-context > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.plugin-credential-context strong {
+  font-size: 12px;
+}
+
+.plugin-credential-context span:last-child {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .credential-panel-header .credential-header-actions {
@@ -3783,6 +4026,56 @@ textarea.plugin-config-input {
   .credential-panel-header .credential-header-actions {
     width: 100%;
     margin-left: 0;
+  }
+
+  .source-plugin-toolbar {
+    align-items: stretch;
+  }
+
+  .source-plugin-search-field {
+    flex-basis: 100%;
+    max-width: none;
+  }
+
+  .source-plugin-bulk-actions {
+    width: 100%;
+  }
+
+  .source-plugin-bulk-actions .button {
+    min-height: 44px;
+    flex: 1;
+  }
+
+  .plugin-source-card {
+    grid-template-columns: 1fr;
+  }
+
+  .plugin-card-actions {
+    justify-content: flex-start;
+  }
+
+  .plugin-configure-account,
+  .plugin-enable-switch {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 380px) {
+  .source-plugin-bulk-actions,
+  .plugin-card-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .source-plugin-bulk-actions .button,
+  .plugin-configure-account,
+  .plugin-enable-switch {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .plugin-credential-shell {
+    width: calc(100vw - 20px);
   }
 }
 
