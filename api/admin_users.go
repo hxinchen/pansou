@@ -48,6 +48,8 @@ func (h *AdminHandler) listUsers(c *gin.Context) {
 		IncludeDeleted: queryBool(c, "include_deleted", false),
 		Page:           queryInt(c, "page", 1),
 		PageSize:       queryInt(c, "page_size", 30),
+		SortBy:         strings.TrimSpace(c.Query("sort_by")),
+		SortDir:        strings.TrimSpace(c.Query("sort_dir")),
 	})
 	if err != nil {
 		respondAdminError(c, err)

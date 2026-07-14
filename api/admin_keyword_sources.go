@@ -145,6 +145,7 @@ func (h *AdminHandler) listKeywordAPISources(c *gin.Context) {
 	filter := storage.KeywordAPISourceFilter{
 		Query: strings.TrimSpace(c.Query("q")), Page: queryInt(c, "page", 1), PageSize: queryInt(c, "page_size", 50),
 		Statuses: queryList(c, "status", "statuses"),
+		SortBy:   strings.TrimSpace(c.Query("sort_by")), SortDir: strings.TrimSpace(c.Query("sort_dir")),
 	}
 	if value := strings.TrimSpace(c.Query("enabled")); value != "" {
 		parsed, err := strconv.ParseBool(value)
@@ -465,8 +466,10 @@ func (h *AdminHandler) listKeywordAPISyncRunIterations(c *gin.Context) {
 	if !ok {
 		return
 	}
-	page, err := h.store.ListKeywordAPISyncRunIterations(c.Request.Context(), id,
-		queryInt(c, "page", 1), queryInt(c, "page_size", 50))
+	page, err := h.store.ListKeywordAPISyncRunIterations(c.Request.Context(), id, storage.KeywordAPISyncIterationFilter{
+		Page: queryInt(c, "page", 1), PageSize: queryInt(c, "page_size", 50),
+		SortBy: strings.TrimSpace(c.Query("sort_by")), SortDir: strings.TrimSpace(c.Query("sort_dir")),
+	})
 	if err != nil {
 		respondAdminError(c, err)
 		return
@@ -495,6 +498,7 @@ func keywordAPISyncRunFilter(c *gin.Context) (storage.KeywordAPISyncRunFilter, e
 	filter := storage.KeywordAPISyncRunFilter{
 		Statuses: queryList(c, "status", "statuses"), Triggers: queryList(c, "trigger", "triggers"),
 		Page: queryInt(c, "page", 1), PageSize: queryInt(c, "page_size", 20),
+		SortBy: strings.TrimSpace(c.Query("sort_by")), SortDir: strings.TrimSpace(c.Query("sort_dir")),
 	}
 	if filter.Page < 1 {
 		filter.Page = 1

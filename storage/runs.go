@@ -755,9 +755,13 @@ func (s *Store) ListRuns(ctx context.Context, filter RunFilter) (RunPage, error)
 	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM collection_runs cr WHERE "+where, args...).Scan(&total); err != nil {
 		return RunPage{}, fmt.Errorf("count collection runs: %w", err)
 	}
+	sortClause, err := buildSortClause(filter.SortBy, filter.SortDir, "cr.created_at DESC, cr.id DESC", collectionRunSortFields)
+	if err != nil {
+		return RunPage{}, err
+	}
 	queryArgs := append(append([]any(nil), args...), pageSize, (page-1)*pageSize)
 	rows, err := s.pool.Query(ctx, runSelect+" WHERE "+where+runGroup+
-		" ORDER BY cr.created_at DESC, cr.id DESC"+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
+		" ORDER BY "+sortClause+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
 	if err != nil {
 		return RunPage{}, fmt.Errorf("list collection runs: %w", err)
 	}

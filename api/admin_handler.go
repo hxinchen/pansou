@@ -151,6 +151,8 @@ func (h *AdminHandler) listResources(c *gin.Context) {
 		Page:           queryInt(c, "page", 1),
 		PageSize:       queryInt(c, "page_size", 50),
 		Sort:           strings.TrimSpace(c.Query("sort")),
+		SortBy:         strings.TrimSpace(c.Query("sort_by")),
+		SortDir:        strings.TrimSpace(c.Query("sort_dir")),
 	}
 	if len(filter.SourceTypes) == 0 {
 		legacySource := strings.TrimSpace(c.Query("source"))
@@ -248,6 +250,8 @@ func (h *AdminHandler) listKeywords(c *gin.Context) {
 		SourceType:  strings.TrimSpace(c.Query("source_type")),
 		Page:        queryInt(c, "page", 1),
 		PageSize:    queryInt(c, "page_size", 50),
+		SortBy:      strings.TrimSpace(c.Query("sort_by")),
+		SortDir:     strings.TrimSpace(c.Query("sort_dir")),
 	}
 	if value, exists := c.GetQuery("enabled"); exists {
 		enabled, err := strconv.ParseBool(value)
@@ -464,6 +468,8 @@ func (h *AdminHandler) listRuns(c *gin.Context) {
 		Statuses: queryList(c, "status", "statuses"),
 		Page:     queryInt(c, "page", 1),
 		PageSize: queryInt(c, "page_size", 30),
+		SortBy:   strings.TrimSpace(c.Query("sort_by")),
+		SortDir:  strings.TrimSpace(c.Query("sort_dir")),
 	}
 	from, err := queryTime(c.Query("from"))
 	if err != nil {

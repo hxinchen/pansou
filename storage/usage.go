@@ -106,10 +106,14 @@ func (s *Store) listAPIRequestLogs(ctx context.Context, filter APIRequestLogFilt
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM api_request_logs l WHERE `+where, args...).Scan(&total); err != nil {
 		return APIRequestLogPage{}, fmt.Errorf("count request logs: %w", err)
 	}
+	sortClause, err := buildSortClause(filter.SortBy, filter.SortDir, "l.created_at DESC, l.id DESC", apiRequestLogSortFields)
+	if err != nil {
+		return APIRequestLogPage{}, err
+	}
 	queryArgs := append(append([]any(nil), args...), pageSize, (page-1)*pageSize)
 	rows, err := s.pool.Query(ctx, `SELECT `+apiRequestLogSelectColumns+`
 		FROM api_request_logs l JOIN users u ON u.id=l.user_id
-		WHERE `+where+` ORDER BY l.created_at DESC, l.id DESC`+
+		WHERE `+where+` ORDER BY `+sortClause+
 		fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
 	if err != nil {
 		return APIRequestLogPage{}, fmt.Errorf("list request logs: %w", err)

@@ -139,9 +139,13 @@ func (s *Store) ListKeywordAPISources(ctx context.Context, filter KeywordAPISour
 	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM keyword_api_sources WHERE "+where, args...).Scan(&total); err != nil {
 		return KeywordAPISourcePage{}, fmt.Errorf("count keyword API sources: %w", err)
 	}
+	sortClause, err := buildSortClause(filter.SortBy, filter.SortDir, "created_at DESC, id DESC", keywordAPISourceSortFields)
+	if err != nil {
+		return KeywordAPISourcePage{}, err
+	}
 	queryArgs := append(append([]any(nil), args...), pageSize, (page-1)*pageSize)
 	rows, err := s.pool.Query(ctx, "SELECT "+keywordAPISourceColumns+" FROM keyword_api_sources WHERE "+where+
-		" ORDER BY created_at DESC, id DESC"+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
+		" ORDER BY "+sortClause+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
 	if err != nil {
 		return KeywordAPISourcePage{}, fmt.Errorf("list keyword API sources: %w", err)
 	}

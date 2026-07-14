@@ -1109,9 +1109,13 @@ func (s *Store) ListKeywordAPISyncRuns(ctx context.Context, filter KeywordAPISyn
 	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM keyword_api_sync_runs WHERE "+where, args...).Scan(&total); err != nil {
 		return KeywordAPISyncRunPage{}, fmt.Errorf("count keyword API sync runs: %w", err)
 	}
+	sortClause, err := buildSortClause(filter.SortBy, filter.SortDir, "created_at DESC, id DESC", keywordAPISyncRunSortFields)
+	if err != nil {
+		return KeywordAPISyncRunPage{}, err
+	}
 	queryArgs := append(append([]any(nil), args...), pageSize, (page-1)*pageSize)
 	rows, err := s.pool.Query(ctx, "SELECT "+keywordAPISyncRunColumns+" FROM keyword_api_sync_runs WHERE "+where+
-		" ORDER BY created_at DESC, id DESC"+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
+		" ORDER BY "+sortClause+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
 	if err != nil {
 		return KeywordAPISyncRunPage{}, fmt.Errorf("list keyword API sync runs: %w", err)
 	}
@@ -1203,11 +1207,11 @@ func (s *Store) GetKeywordAPISyncRunSummary(ctx context.Context, id int64) (Keyw
 	return run, nil
 }
 
-func (s *Store) ListKeywordAPISyncRunIterations(ctx context.Context, runID int64, page, pageSize int) (KeywordAPISyncIterationPage, error) {
+func (s *Store) ListKeywordAPISyncRunIterations(ctx context.Context, runID int64, filter KeywordAPISyncIterationFilter) (KeywordAPISyncIterationPage, error) {
 	if s == nil || s.pool == nil {
 		return KeywordAPISyncIterationPage{}, fmt.Errorf("storage is disabled")
 	}
-	page, pageSize = normalizePage(page, pageSize, 50, 100)
+	page, pageSize := normalizePage(filter.Page, filter.PageSize, 50, 100)
 	var exists bool
 	if err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM keyword_api_sync_runs WHERE id=$1)", runID).Scan(&exists); err != nil {
 		return KeywordAPISyncIterationPage{}, fmt.Errorf("check keyword API sync run: %w", err)
@@ -1219,8 +1223,12 @@ func (s *Store) ListKeywordAPISyncRunIterations(ctx context.Context, runID int64
 	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM keyword_api_sync_iterations WHERE run_id=$1", runID).Scan(&total); err != nil {
 		return KeywordAPISyncIterationPage{}, fmt.Errorf("count keyword API sync iterations: %w", err)
 	}
+	sortClause, err := buildSortClause(filter.SortBy, filter.SortDir, "COALESCE(started_at,created_at) DESC, id DESC", keywordAPISyncIterationSortFields)
+	if err != nil {
+		return KeywordAPISyncIterationPage{}, err
+	}
 	rows, err := s.pool.Query(ctx, `SELECT `+keywordAPISyncIterationColumns+` FROM keyword_api_sync_iterations
-		WHERE run_id=$1 ORDER BY sequence LIMIT $2 OFFSET $3`, runID, pageSize, (page-1)*pageSize)
+		WHERE run_id=$1 ORDER BY `+sortClause+` LIMIT $2 OFFSET $3`, runID, pageSize, (page-1)*pageSize)
 	if err != nil {
 		return KeywordAPISyncIterationPage{}, fmt.Errorf("list keyword API sync iterations: %w", err)
 	}

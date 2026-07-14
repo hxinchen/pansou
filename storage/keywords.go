@@ -163,9 +163,13 @@ func (s *Store) ListKeywords(ctx context.Context, filter KeywordFilter) (Keyword
 	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM keywords WHERE "+where, args...).Scan(&total); err != nil {
 		return KeywordPage{}, fmt.Errorf("count keywords: %w", err)
 	}
+	sortClause, err := buildSortClause(filter.SortBy, filter.SortDir, "priority DESC, created_at ASC, id ASC", keywordSortFields)
+	if err != nil {
+		return KeywordPage{}, err
+	}
 	queryArgs := append(append([]any(nil), args...), pageSize, (page-1)*pageSize)
 	rows, err := s.pool.Query(ctx, "SELECT "+keywordColumns+" FROM keywords WHERE "+where+
-		" ORDER BY priority DESC, created_at ASC, id ASC"+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
+		" ORDER BY "+sortClause+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
 	if err != nil {
 		return KeywordPage{}, fmt.Errorf("list keywords: %w", err)
 	}

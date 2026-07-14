@@ -137,6 +137,8 @@ type ResourceFilter struct {
 	Page           int
 	PageSize       int
 	Sort           string
+	SortBy         string
+	SortDir        string
 }
 
 type ResourcePage struct {
@@ -229,6 +231,8 @@ type KeywordFilter struct {
 	EligibleAt  *time.Time
 	Page        int
 	PageSize    int
+	SortBy      string
+	SortDir     string
 }
 
 type KeywordPage struct {
@@ -320,6 +324,8 @@ type RunFilter struct {
 	To       *time.Time
 	Page     int
 	PageSize int
+	SortBy   string
+	SortDir  string
 }
 
 type RunPage struct {

@@ -6,7 +6,8 @@
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#ffffff">
   <title>PanSou 管理台</title>
-  <link rel="icon" href="data:,">
+  <link rel="icon" type="image/png" sizes="512x512" href="./assets/admin-icon.png">
+  <link rel="apple-touch-icon" href="./assets/admin-icon.png">
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <link rel="stylesheet" href="./assets/styles.css">
 </head>
@@ -14,7 +15,7 @@
   <div id="login-view" class="auth-layout" hidden>
     <main class="login-panel" aria-labelledby="login-title">
       <div class="brand-lockup login-brand">
-        <span class="brand-mark" aria-hidden="true">P</span>
+        <img class="brand-mark" src="./assets/admin-icon.png" alt="">
         <span>
           <strong>PanSou</strong>
           <small>资源管理台</small>
@@ -61,7 +62,7 @@
     <aside id="sidebar" class="sidebar" aria-label="主导航">
       <div class="sidebar-head">
         <div class="brand-lockup">
-          <span class="brand-mark" aria-hidden="true">P</span>
+          <img class="brand-mark" src="./assets/admin-icon.png" alt="">
           <span>
             <strong>PanSou</strong>
             <small>资源管理台</small>
@@ -221,13 +222,13 @@
               <table>
                 <thead>
                   <tr>
-                    <th>批次</th>
-                    <th>触发方式</th>
-                    <th>状态</th>
-                    <th>关键词</th>
-                    <th>新增 / 重复</th>
-                    <th>开始时间</th>
-                    <th>耗时</th>
+                    <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="overviewRuns" data-sort-key="id" data-sort-first="desc"><span>批次</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                    <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="overviewRuns" data-sort-key="trigger" data-sort-first="asc"><span>触发方式</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                    <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="overviewRuns" data-sort-key="status" data-sort-first="asc"><span>状态</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                    <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="overviewRuns" data-sort-key="keyword_count" data-sort-first="desc"><span>关键词</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                    <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="overviewRuns" data-sort-key="new_count" data-sort-first="desc"><span>新增 / 重复</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                    <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="overviewRuns" data-sort-key="started_at" data-sort-first="desc"><span>开始时间</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                    <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="overviewRuns" data-sort-key="duration" data-sort-first="desc"><span>耗时</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
                   </tr>
                 </thead>
                 <tbody id="recent-runs-body"></tbody>
@@ -321,12 +322,12 @@
             <table class="resource-table">
               <thead>
                 <tr>
-                  <th>资源</th>
-                  <th>网盘</th>
-                  <th>检测状态</th>
-                  <th>来源</th>
-                  <th>发现次数</th>
-                  <th>最近发现</th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="resources" data-sort-key="resource" data-sort-first="asc"><span>资源</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="resources" data-sort-key="platform" data-sort-first="asc"><span>网盘</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="resources" data-sort-key="check_status" data-sort-first="asc"><span>检测状态</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="resources" data-sort-key="source_count" data-sort-first="desc"><span>来源</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="resources" data-sort-key="discovery_count" data-sort-first="desc"><span>发现次数</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="resources" data-sort-key="last_seen_at" data-sort-first="desc"><span>最近发现</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
                   <th><span class="sr-only">操作</span></th>
                 </tr>
               </thead>
@@ -410,12 +411,12 @@
               <thead>
                 <tr>
                   <th class="check-cell"><input id="select-all-keywords" type="checkbox" aria-label="选择全部关键词"></th>
-                  <th>关键词</th>
-                  <th>类型 / 来源</th>
-                  <th>优先级</th>
-                  <th>冷却期</th>
-                  <th>下次可执行</th>
-                  <th>状态</th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywords" data-sort-key="keyword" data-sort-first="asc"><span>关键词</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywords" data-sort-key="keyword_type" data-sort-first="asc"><span>类型 / 来源</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywords" data-sort-key="priority" data-sort-first="desc"><span>优先级</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywords" data-sort-key="cooldown_seconds" data-sort-first="desc"><span>冷却期</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywords" data-sort-key="next_eligible_at" data-sort-first="desc"><span>下次可执行</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywords" data-sort-key="enabled" data-sort-first="asc"><span>状态</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
                   <th><span class="sr-only">操作</span></th>
                 </tr>
               </thead>
@@ -440,7 +441,7 @@
             </div>
             <div class="table-wrap keyword-api-table-wrap">
               <table class="keyword-api-table">
-                <thead><tr><th>来源</th><th>请求</th><th>同步周期</th><th>状态 / 进度</th><th>同步结果</th><th><span class="sr-only">操作</span></th></tr></thead>
+                <thead><tr><th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywordSources" data-sort-key="name" data-sort-first="asc"><span>来源</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th><th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywordSources" data-sort-key="request_url" data-sort-first="asc"><span>请求</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th><th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywordSources" data-sort-key="sync_interval_seconds" data-sort-first="desc"><span>同步周期</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th><th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywordSources" data-sort-key="last_status" data-sort-first="asc"><span>状态 / 进度</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th><th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywordSources" data-sort-key="last_item_count" data-sort-first="desc"><span>同步结果</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th><th><span class="sr-only">操作</span></th></tr></thead>
                 <tbody id="keyword-api-body"></tbody>
               </table>
             </div>
@@ -461,7 +462,7 @@
             <div id="keyword-sync-history-alert" class="inline-alert error" role="alert" hidden></div>
             <div class="table-wrap keyword-sync-history-table-wrap">
               <table class="keyword-sync-history-table">
-                <thead><tr><th>来源 / 运行</th><th>状态</th><th>迭代进度</th><th>同步结果</th><th>触发方式</th><th>开始时间 / 耗时</th><th><span class="sr-only">操作</span></th></tr></thead>
+                <thead><tr><th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywordSyncRuns" data-sort-key="source_name" data-sort-first="asc"><span>来源 / 运行</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th><th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywordSyncRuns" data-sort-key="status" data-sort-first="asc"><span>状态</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th><th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywordSyncRuns" data-sort-key="progress" data-sort-first="desc"><span>迭代进度</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th><th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywordSyncRuns" data-sort-key="unique_count" data-sort-first="desc"><span>同步结果</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th><th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywordSyncRuns" data-sort-key="trigger" data-sort-first="asc"><span>触发方式</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th><th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="keywordSyncRuns" data-sort-key="started_at" data-sort-first="desc"><span>开始时间 / 耗时</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th><th><span class="sr-only">操作</span></th></tr></thead>
                 <tbody id="keyword-sync-history-body"></tbody>
               </table>
             </div>
@@ -513,14 +514,14 @@
             <table class="runs-table">
               <thead>
                 <tr>
-                  <th>批次</th>
-                  <th>触发方式</th>
-                  <th>状态</th>
-                  <th>进度</th>
-                  <th>新增</th>
-                  <th>重复</th>
-                  <th>开始时间</th>
-                  <th>耗时</th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="runs" data-sort-key="id" data-sort-first="desc"><span>批次</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="runs" data-sort-key="trigger" data-sort-first="asc"><span>触发方式</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="runs" data-sort-key="status" data-sort-first="asc"><span>状态</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="runs" data-sort-key="progress" data-sort-first="desc"><span>进度</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="runs" data-sort-key="new_count" data-sort-first="desc"><span>新增</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="runs" data-sort-key="duplicate_count" data-sort-first="desc"><span>重复</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="runs" data-sort-key="started_at" data-sort-first="desc"><span>开始时间</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="runs" data-sort-key="duration" data-sort-first="desc"><span>耗时</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
                   <th><span class="sr-only">操作</span></th>
                 </tr>
               </thead>
@@ -590,13 +591,13 @@
             <table class="users-table">
               <thead>
                 <tr>
-                  <th>用户</th>
-                  <th>角色</th>
-                  <th>状态</th>
-                  <th>调用限额</th>
-                  <th>有效期</th>
-                  <th>API Key</th>
-                  <th>最近登录</th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="users" data-sort-key="username" data-sort-first="asc"><span>用户</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="users" data-sort-key="role" data-sort-first="asc"><span>角色</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="users" data-sort-key="status" data-sort-first="asc"><span>状态</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="users" data-sort-key="rps_limit" data-sort-first="desc"><span>调用限额</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="users" data-sort-key="expires_at" data-sort-first="desc"><span>有效期</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="users" data-sort-key="api_key" data-sort-first="asc"><span>API Key</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                  <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="users" data-sort-key="last_login_at" data-sort-first="desc"><span>最近登录</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
                   <th><span class="sr-only">操作</span></th>
                 </tr>
               </thead>
@@ -733,15 +734,15 @@
                 <table class="usage-log-table">
                   <thead>
                     <tr>
-                      <th>时间</th>
-                      <th>用户 / 入口</th>
-                      <th>请求</th>
-                      <th>关键词</th>
-                      <th>状态</th>
-                      <th>耗时</th>
-                      <th>结果</th>
-                      <th>缓存</th>
-                      <th>来源 IP</th>
+                      <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="usageLogs" data-sort-key="created_at" data-sort-first="desc"><span>时间</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                      <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="usageLogs" data-sort-key="username" data-sort-first="asc"><span>用户 / 入口</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                      <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="usageLogs" data-sort-key="request" data-sort-first="asc"><span>请求</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                      <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="usageLogs" data-sort-key="keyword" data-sort-first="asc"><span>关键词</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                      <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="usageLogs" data-sort-key="status_code" data-sort-first="desc"><span>状态</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                      <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="usageLogs" data-sort-key="duration_ms" data-sort-first="desc"><span>耗时</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                      <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="usageLogs" data-sort-key="result_count" data-sort-first="desc"><span>结果</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                      <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="usageLogs" data-sort-key="cache_status" data-sort-first="asc"><span>缓存</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
+                      <th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="usageLogs" data-sort-key="source_ip" data-sort-first="asc"><span>来源 IP</span><span data-sort-indicator><i data-lucide="chevrons-up-down"></i></span></button></th>
                     </tr>
                   </thead>
                   <tbody id="usage-logs-body"></tbody>

@@ -150,6 +150,8 @@ type KeywordAPISourceFilter struct {
 	Statuses []string
 	Page     int
 	PageSize int
+	SortBy   string
+	SortDir  string
 }
 
 type KeywordAPISourcePage struct {
@@ -287,6 +289,15 @@ type KeywordAPISyncRunFilter struct {
 	To       *time.Time
 	Page     int
 	PageSize int
+	SortBy   string
+	SortDir  string
+}
+
+type KeywordAPISyncIterationFilter struct {
+	Page     int
+	PageSize int
+	SortBy   string
+	SortDir  string
 }
 
 type KeywordAPISyncRunPage struct {

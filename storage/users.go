@@ -236,9 +236,13 @@ func (s *Store) ListUsers(ctx context.Context, filter UserFilter) (UserPage, err
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE `+where, args...).Scan(&total); err != nil {
 		return UserPage{}, fmt.Errorf("count users: %w", err)
 	}
+	sortClause, err := buildSortClause(filter.SortBy, filter.SortDir, "created_at DESC, id DESC", userSortFields)
+	if err != nil {
+		return UserPage{}, err
+	}
 	queryArgs := append(append([]any(nil), args...), pageSize, (page-1)*pageSize)
 	rows, err := s.pool.Query(ctx, `SELECT `+userColumns+` FROM users WHERE `+where+
-		` ORDER BY created_at DESC, id DESC`+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
+		` ORDER BY `+sortClause+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
 	if err != nil {
 		return UserPage{}, fmt.Errorf("list users: %w", err)
 	}

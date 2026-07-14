@@ -53,14 +53,15 @@
     charts: {},
     overview: null,
     overviewTrends: [],
+    overviewRecentSort: { sortBy: '', sortDir: '' },
     overviewRefresh: { timer: null, controller: null, serial: 0, fastRetryCount: 0 },
-    resources: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
-    keywords: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, selected: new Set(), query: {}, tab: 'list' },
-    keywordSources: { items: [], loaded: false, editing: null, testResponse: null, selectedPath: '', testedSignature: '', originalSignature: '', requestSerial: 0, pollTimer: null, editorModes: { query: 'kv', header: 'kv', form: 'kv' } },
-    keywordSyncRuns: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, loaded: false, requestSerial: 0, detailID: null, detailPollTimer: null, detailController: null, iterationController: null, iterations: [], iterationPage: 1, iterationPages: 1 },
-    runs: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
-    users: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {} },
-    usage: { overview: null, trends: [], logs: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, range: '7d', query: {} },
+    resources: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, sortBy: '', sortDir: '' },
+    keywords: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, selected: new Set(), query: {}, tab: 'list', sortBy: '', sortDir: '' },
+    keywordSources: { items: [], loaded: false, editing: null, createDraft: null, suppressDraftCapture: false, testResult: null, testResponse: null, selectedPath: '', testedSignature: '', originalSignature: '', requestSerial: 0, pollTimer: null, sortBy: '', sortDir: '', editorModes: { query: 'kv', header: 'kv', form: 'kv' } },
+    keywordSyncRuns: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, loaded: false, requestSerial: 0, sortBy: '', sortDir: '', detailID: null, detailPollTimer: null, detailController: null, iterationController: null, iterations: [], iterationPage: 1, iterationPages: 1, iterationSortBy: '', iterationSortDir: '' },
+    runs: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, sortBy: '', sortDir: '' },
+    users: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, sortBy: '', sortDir: '' },
+    usage: { overview: null, trends: [], logs: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, range: '7d', query: {}, sortBy: '', sortDir: '' },
     sources: { catalog: [], config: null, credentials: [], adminCredentials: [], tab: 'admin', configTab: 'tg', dirty: false, saving: false, sharedTotal: 0, pluginSearch: '', credentialEditing: null, credentialEditMode: 'login', loginFlow: null, loginFlowTimer: null, credentialQuery: {} },
     runPicker: { items: [], selected: new Set(), search: '', page: 1, pages: 1, total: 0, loading: false, controller: null, searchTimer: null },
     runDetail: { id: null, summary: null, items: [], page: 1, pages: 1, loadedPages: 0, total: 0, loading: false, query: {}, controller: null, itemsController: null, pollController: null, sourceControllers: {}, observer: null },
@@ -285,6 +286,133 @@
     if (percent > 0 && percent <= 1) percent *= 100;
     percent = Math.min(100, Math.max(0, Math.round(percent)));
     return { total: total, completed: completed, percent: percent };
+  }
+
+  function durationValue(item) {
+    var milliseconds = pick(item, ['duration_ms', 'elapsed_ms'], null);
+    if (milliseconds !== null && milliseconds !== undefined) return numberValue(milliseconds, 0);
+    var seconds = pick(item, ['duration_seconds', 'elapsed_seconds', 'duration'], null);
+    if (seconds !== null && seconds !== undefined) return numberValue(seconds, 0) * 1000;
+    var start = toDate(pick(item, ['started_at', 'start_time', 'created_at'], null));
+    var end = toDate(pick(item, ['finished_at', 'ended_at', 'completed_at'], null));
+    return start ? Math.max(0, (end || new Date()).getTime() - start.getTime()) : null;
+  }
+
+  function tableSortState(scope) {
+    if (scope === 'overviewRuns') return state.overviewRecentSort;
+    if (scope === 'usageLogs') return state.usage;
+    if (scope === 'keywordSyncIterations') {
+      return { sortBy: state.keywordSyncRuns.iterationSortBy, sortDir: state.keywordSyncRuns.iterationSortDir };
+    }
+    return state[scope] || null;
+  }
+
+  function setTableSortState(scope, sortBy, sortDir) {
+    if (scope === 'keywordSyncIterations') {
+      state.keywordSyncRuns.iterationSortBy = sortBy;
+      state.keywordSyncRuns.iterationSortDir = sortDir;
+      return;
+    }
+    var target = tableSortState(scope);
+    if (!target) return;
+    target.sortBy = sortBy;
+    target.sortDir = sortDir;
+  }
+
+  function tableSortQuery(scope) {
+    var current = tableSortState(scope);
+    return current && current.sortBy ? { sort_by: current.sortBy, sort_dir: current.sortDir } : {};
+  }
+
+  function updateSortHeaders(scope) {
+    var current = tableSortState(scope) || { sortBy: '', sortDir: '' };
+    document.querySelectorAll('.sort-header[data-sort-scope="' + scope + '"]').forEach(function (button) {
+      var active = button.dataset.sortKey === current.sortBy;
+      var direction = active ? current.sortDir : '';
+      var nextDirection = active ? (direction === 'asc' ? 'desc' : 'asc') : (button.dataset.sortFirst || 'asc');
+      var label = button.querySelector('span').textContent.trim();
+      button.dataset.sortActive = active ? 'true' : 'false';
+      button.setAttribute('aria-label', label + '，点击按' + (nextDirection === 'asc' ? '升序' : '降序') + '排列');
+      var heading = button.closest('th');
+      if (heading) heading.setAttribute('aria-sort', active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none');
+      var indicator = button.querySelector('[data-sort-indicator]');
+      if (indicator) indicator.innerHTML = icon(active ? (direction === 'asc' ? 'arrow-up' : 'arrow-down') : 'chevrons-up-down');
+      refreshIcons(button);
+    });
+  }
+
+  function updateAllSortHeaders() {
+    ['overviewRuns', 'resources', 'keywords', 'keywordSources', 'keywordSyncRuns', 'keywordSyncIterations', 'runs', 'users', 'usageLogs'].forEach(updateSortHeaders);
+  }
+
+  function sortHeaderMarkup(label, scope, key, firstDirection) {
+    return '<th><button class="sort-header" type="button" data-action="sort-table" data-sort-scope="' + escapeHTML(scope) + '" data-sort-key="' + escapeHTML(key) + '" data-sort-first="' + escapeHTML(firstDirection) + '"><span>' + escapeHTML(label) + '</span><span data-sort-indicator>' + icon('chevrons-up-down') + '</span></button></th>';
+  }
+
+  function overviewRunSortValue(run, key) {
+    if (key === 'id') return numberValue(pick(run, ['id', 'run_id', 'batch_id'], 0));
+    if (key === 'trigger') return String(pick(run, ['trigger', 'trigger_type'], '')).toLowerCase();
+    if (key === 'status') {
+      var ranks = { running: 0, pending: 1, success: 2, success_empty: 3, partial: 4, failed: 5 };
+      return Object.prototype.hasOwnProperty.call(ranks, normalizedStatus(run)) ? ranks[normalizedStatus(run)] : 6;
+    }
+    if (key === 'keyword_count') return numberValue(pick(run, ['keyword_count', 'total_keywords', 'total_items'], 0));
+    if (key === 'new_count') return numberValue(pick(run, ['new_count', 'created_count', 'added_count'], 0));
+    if (key === 'started_at') {
+      var started = toDate(pick(run, ['started_at', 'created_at', 'start_time'], null));
+      return started ? started.getTime() : null;
+    }
+    if (key === 'duration') return durationValue(run);
+    return null;
+  }
+
+  function compareSortValues(left, right, direction) {
+    var leftMissing = left === null || left === undefined || left === '';
+    var rightMissing = right === null || right === undefined || right === '';
+    if (leftMissing || rightMissing) return leftMissing === rightMissing ? 0 : (leftMissing ? 1 : -1);
+    var result = typeof left === 'number' && typeof right === 'number'
+      ? left - right
+      : String(left).localeCompare(String(right), 'zh-CN', { numeric: true, sensitivity: 'base' });
+    return direction === 'desc' ? -result : result;
+  }
+
+  function sortOverviewRuns(runs) {
+    var current = state.overviewRecentSort;
+    if (!current.sortBy) return runs.slice();
+    return runs.slice().sort(function (left, right) {
+      var result = compareSortValues(overviewRunSortValue(left, current.sortBy), overviewRunSortValue(right, current.sortBy), current.sortDir);
+      if (result) return result;
+      return compareSortValues(numberValue(pick(left, ['id', 'run_id', 'batch_id'], 0)), numberValue(pick(right, ['id', 'run_id', 'batch_id'], 0)), current.sortDir);
+    });
+  }
+
+  function handleTableSort(button) {
+    var scope = button.dataset.sortScope;
+    var key = button.dataset.sortKey;
+    var current = tableSortState(scope) || { sortBy: '', sortDir: '' };
+    var direction = current.sortBy === key ? (current.sortDir === 'asc' ? 'desc' : 'asc') : (button.dataset.sortFirst || 'asc');
+    setTableSortState(scope, key, direction);
+    updateSortHeaders(scope);
+    if (scope === 'overviewRuns') {
+      renderRecentRuns(arrayFrom(pick(state.overview, ['recent_runs', 'runs', 'collection_runs'], []), ['items', 'runs']));
+    } else if (scope === 'resources') {
+      state.resources.page = 1; state.loaded.resources = false; loadResources(true);
+    } else if (scope === 'keywords') {
+      state.keywords.page = 1; state.loaded.keywords = false; loadKeywords(true);
+    } else if (scope === 'keywordSources') {
+      state.keywordSources.loaded = false; loadKeywordSources(true);
+    } else if (scope === 'keywordSyncRuns') {
+      state.keywordSyncRuns.page = 1; state.keywordSyncRuns.loaded = false; loadKeywordSyncRuns({ force: true });
+    } else if (scope === 'keywordSyncIterations') {
+      state.keywordSyncRuns.iterations = []; state.keywordSyncRuns.iterationPage = 1; state.keywordSyncRuns.iterationPages = 1;
+      loadKeywordSyncIterations(true, pick(state.keywordSyncRuns.currentDetail, ['request_summary'], {}));
+    } else if (scope === 'runs') {
+      state.runs.page = 1; state.loaded.runs = false; loadRuns({ force: true });
+    } else if (scope === 'users') {
+      state.users.page = 1; state.loaded.users = false; loadUsers(true);
+    } else if (scope === 'usageLogs') {
+      state.usage.page = 1; loadUsageLogs(true);
+    }
   }
 
   function paginationMeta(data, items, page, pageSize) {
@@ -835,12 +963,6 @@
 
   function setupDialogBehavior() {
     document.querySelectorAll('dialog').forEach(function (dialog) {
-      dialog.addEventListener('click', function (event) {
-        if (event.target === dialog) {
-          if (dialog.id === 'credential-dialog') attemptCloseCredentials();
-          else dialog.close();
-        }
-      });
       dialog.addEventListener('cancel', function (event) {
         if (dialog.id === 'credential-dialog') {
           event.preventDefault();
@@ -848,6 +970,10 @@
         }
       });
       dialog.addEventListener('close', function () {
+        if (dialog.id === 'keyword-dialog') {
+          if (state.keywordSources.suppressDraftCapture) state.keywordSources.suppressDraftCapture = false;
+          else captureKeywordAPISourceDraft();
+        }
         if (dialog.id === 'resource-dialog') cancelResourceDetailRequests(dialog);
         if (dialog.id === 'run-dialog') {
           if (state.runPicker.controller) state.runPicker.controller.abort();
@@ -1186,6 +1312,8 @@
 
   function renderRecentRuns(runs) {
     var body = byId('recent-runs-body');
+    updateSortHeaders('overviewRuns');
+    runs = sortOverviewRuns(runs);
     if (!runs.length) {
       body.innerHTML = '<tr class="table-empty"><td colspan="7">暂无任务记录</td></tr>';
       return;
@@ -1218,7 +1346,7 @@
     byId('resources-pagination').innerHTML = '';
     tableLoading('resources-body', 7);
 
-    var query = Object.assign({}, state.resources.query, {
+    var query = Object.assign({}, state.resources.query, tableSortQuery('resources'), {
       page: state.resources.page,
       page_size: state.resources.pageSize
     });
@@ -1262,6 +1390,7 @@
 
   function renderResources() {
     var body = byId('resources-body');
+    updateSortHeaders('resources');
     var empty = byId('resources-empty');
     byId('resource-total-label').textContent = formatNumber(state.resources.total) + ' 条资源';
     if (!state.resources.items.length) {
@@ -1424,7 +1553,7 @@
     byId('keywords-empty').hidden = true;
     byId('keywords-pagination').innerHTML = '';
     tableLoading('keywords-body', 8);
-    var query = Object.assign({}, state.keywords.query, { page: state.keywords.page, page_size: state.keywords.pageSize });
+    var query = Object.assign({}, state.keywords.query, tableSortQuery('keywords'), { page: state.keywords.page, page_size: state.keywords.pageSize });
     var controller = replaceRequestController('keywords');
     try {
       var data = await apiRequest(API.keywords, { query: query, signal: controller.signal });
@@ -1452,6 +1581,7 @@
 
   function renderKeywords() {
     var body = byId('keywords-body');
+    updateSortHeaders('keywords');
     var empty = byId('keywords-empty');
     if (!state.keywords.items.length) {
       body.innerHTML = '';
@@ -1517,9 +1647,10 @@
     byId('select-all-keywords').indeterminate = count > 0 && !all;
   }
 
-  function setKeywordDialogMode(mode, locked) {
+  function setKeywordDialogMode(mode, locked, skipDraftCapture) {
     var form = byId('keyword-form');
     mode = mode === 'api' ? 'api' : 'manual';
+    if (!skipDraftCapture && form.dataset.mode === 'api' && mode !== 'api') captureKeywordAPISourceDraft();
     form.dataset.mode = mode;
     document.querySelectorAll('[data-keyword-mode]').forEach(function (button) {
       var active = button.dataset.keywordMode === mode;
@@ -1540,12 +1671,9 @@
   function openKeywordDialog(keyword, mode) {
     var dialog = byId('keyword-dialog');
     var form = byId('keyword-form');
+    var createDraft = !keyword && mode === 'api' ? state.keywordSources.createDraft : null;
     form.reset();
     state.keywordSources.editing = null;
-    state.keywordSources.testResponse = null;
-    state.keywordSources.selectedPath = '';
-    state.keywordSources.testedSignature = '';
-    state.keywordSources.originalSignature = '';
     byId('keyword-form-error').hidden = true;
     form.elements.id.value = keyword ? pick(keyword, ['id', 'keyword_id'], '') : '';
     form.elements.keyword.value = keyword ? pick(keyword, ['keyword', 'name'], '') : '';
@@ -1557,7 +1685,8 @@
     form.elements.cooldown_days.value = seconds === null ? '' : formatCooldownInputDays(seconds);
     form.elements.enabled.checked = keyword ? boolValue(pick(keyword, ['enabled', 'is_enabled'], true), true) : true;
     resetKeywordAPIBuilder();
-    setKeywordDialogMode(mode === 'api' ? 'api' : 'manual', Boolean(keyword));
+    setKeywordDialogMode(mode === 'api' ? 'api' : 'manual', Boolean(keyword), true);
+    if (createDraft) restoreKeywordAPISourceDraft(createDraft);
     dialog.showModal();
     window.setTimeout(function () { (form.dataset.mode === 'api' ? form.elements.api_name : form.elements.keyword).focus(); }, 0);
   }
@@ -1720,15 +1849,17 @@
       tableLoading('keyword-api-body', 6);
       byId('keyword-api-empty').hidden = true;
     }
+    var controller = replaceRequestController('keywordSources');
     try {
-      var data = await apiRequest(API.keywordAPISources, { query: { page: 1, page_size: 200 } });
-      if (serial !== state.keywordSources.requestSerial) return;
+      var data = await apiRequest(API.keywordAPISources, { query: Object.assign({}, tableSortQuery('keywordSources'), { page: 1, page_size: 200 }), signal: controller.signal });
+      if (state.requestControllers.keywordSources !== controller || serial !== state.keywordSources.requestSerial) return;
       state.keywordSources.items = arrayFrom(data, ['items', 'sources', 'results']);
       renderKeywordSources();
       populateKeywordSyncSourceFilter();
       updateTimestamp();
       configureKeywordSourcePolling();
     } catch (error) {
+      if (error.name === 'AbortError') return;
       if (serial !== state.keywordSources.requestSerial) return;
       state.keywordSources.loaded = false;
       if (!options.silent) {
@@ -1737,7 +1868,7 @@
         showAlert('keyword-api-alert', error.message || 'API 关键词来源加载失败');
         stopKeywordSourcePolling();
       } else configureKeywordSourcePolling();
-    }
+    } finally { finishRequestController('keywordSources', controller); }
   }
 
   function keywordSourceID(source) {
@@ -1750,6 +1881,23 @@
 
   function keywordSyncRunID(run) {
     return String(pick(run, ['id', 'run_id'], ''));
+  }
+
+  function keywordSyncIterationID(iteration) {
+    var id = pick(iteration, ['id', 'iteration_id'], null);
+    return id === null || id === undefined
+      ? 'sequence:' + String(pick(iteration, ['index', 'sequence'], ''))
+      : 'id:' + String(id);
+  }
+
+  function mergeKeywordSyncIterations(primary, secondary) {
+    var seen = new Set();
+    return (primary || []).concat(secondary || []).filter(function (iteration) {
+      var id = keywordSyncIterationID(iteration);
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
   }
 
   function keywordSyncRunProgress(run) {
@@ -1810,6 +1958,7 @@
 
   function renderKeywordSources() {
     var body = byId('keyword-api-body');
+    updateSortHeaders('keywordSources');
     var empty = byId('keyword-api-empty');
     var items = state.keywordSources.items || [];
     var enabledCount = items.filter(function (item) { return boolValue(item.enabled, false); }).length;
@@ -1890,7 +2039,7 @@
       byId('keyword-sync-history-pagination').innerHTML = '';
       tableLoading('keyword-sync-history-body', 7);
     }
-    var query = Object.assign({}, state.keywordSyncRuns.query, {
+    var query = Object.assign({}, state.keywordSyncRuns.query, tableSortQuery('keywordSyncRuns'), {
       page: state.keywordSyncRuns.page,
       page_size: state.keywordSyncRuns.pageSize
     });
@@ -1921,6 +2070,7 @@
 
   function renderKeywordSyncRuns() {
     var body = byId('keyword-sync-history-body');
+    updateSortHeaders('keywordSyncRuns');
     var empty = byId('keyword-sync-history-empty');
     var items = state.keywordSyncRuns.items || [];
     if (!items.length) {
@@ -2160,6 +2310,68 @@
     renderAPIEditorMode(target);
   }
 
+  function collectAPIRowDraft(targetID) {
+    return Array.prototype.map.call(byId(targetID).querySelectorAll('.api-kv-row'), function (row) {
+      return {
+        key: row.querySelector('[data-api-kv-key]').value,
+        value: row.querySelector('[data-api-kv-value]').value
+      };
+    });
+  }
+
+  function captureKeywordAPISourceDraft() {
+    var form = byId('keyword-form');
+    if (!form || form.dataset.mode !== 'api' || state.keywordSources.editing) return;
+    var controls = {};
+    form.querySelectorAll('[data-keyword-mode-panel="api"] [name]').forEach(function (control) {
+      controls[control.name] = control.type === 'checkbox'
+        ? { checked: control.checked }
+        : { value: control.value };
+    });
+    var rows = {};
+    var json = {};
+    Object.keys(apiEditorDefinitions).forEach(function (target) {
+      var definition = apiEditorDefinitions[target];
+      rows[target] = collectAPIRowDraft(definition.rows);
+      json[target] = byId(definition.json).value;
+    });
+    state.keywordSources.createDraft = {
+      controls: controls,
+      rows: rows,
+      json: json,
+      editorModes: Object.assign({}, state.keywordSources.editorModes),
+      testResult: state.keywordSources.testResult,
+      selectedPath: state.keywordSources.selectedPath,
+      testedSignature: state.keywordSources.testedSignature
+    };
+  }
+
+  function restoreKeywordAPISourceDraft(draft) {
+    if (!draft) return;
+    var form = byId('keyword-form');
+    Object.keys(draft.controls || {}).forEach(function (name) {
+      var control = form.elements[name];
+      if (!control) return;
+      if (control.type === 'checkbox') control.checked = Boolean(draft.controls[name].checked);
+      else control.value = draft.controls[name].value;
+    });
+    Object.keys(apiEditorDefinitions).forEach(function (target) {
+      var definition = apiEditorDefinitions[target];
+      renderAPIRows(definition.rows, pick(draft.rows, [target], []));
+      byId(definition.json).value = String(pick(draft.json, [target], ''));
+      state.keywordSources.editorModes[target] = pick(draft.editorModes, [target], 'kv') === 'json' ? 'json' : 'kv';
+      showAPIEditorError(target, '');
+      renderAPIEditorMode(target);
+    });
+    state.keywordSources.selectedPath = String(draft.selectedPath || '');
+    state.keywordSources.testedSignature = String(draft.testedSignature || '');
+    syncAPIBodyEditor();
+    updateAPIIterationPreview();
+    if (draft.testResult) renderKeywordAPITest(draft.testResult);
+    else updateKeywordAPIExtractPreview();
+    refreshIcons(byId('keyword-api-fields'));
+  }
+
   function formatAPIIterationDuration(seconds) {
     seconds = Math.max(0, Math.trunc(numberValue(seconds, 0)));
     if (seconds === 0) return '0 秒';
@@ -2229,6 +2441,11 @@
 
   function resetKeywordAPIBuilder() {
     var form = byId('keyword-form');
+    state.keywordSources.testResult = null;
+    state.keywordSources.testResponse = null;
+    state.keywordSources.selectedPath = '';
+    state.keywordSources.testedSignature = '';
+    state.keywordSources.originalSignature = '';
     resetAPIEditor('query', {});
     resetAPIEditor('header', {});
     resetAPIEditor('form', {});
@@ -2382,6 +2599,10 @@
       var saved = await apiRequest(editing ? API.keywordAPISources + '/' + encodeURIComponent(keywordSourceID(editing)) : API.keywordAPISources, { method: editing ? 'PUT' : 'POST', body: payload });
       var savedSource = pick(saved, ['source', 'item'], saved);
       var savedID = keywordSourceID(savedSource) || (editing ? keywordSourceID(editing) : '');
+      if (!editing) {
+        state.keywordSources.createDraft = null;
+        state.keywordSources.suppressDraftCapture = true;
+      }
       byId('keyword-dialog').close();
       state.keywordSources.loaded = false;
       state.keywordSyncRuns.loaded = false;
@@ -2462,6 +2683,7 @@
   }
 
   function renderKeywordAPITest(result) {
+    state.keywordSources.testResult = result;
     var candidates = arrayFrom(result, ['candidates', 'fields', 'paths']);
     var extraction = pick(result, ['extraction'], null);
     var candidatesTotal = numberValue(pick(result, ['candidates_total'], candidates.length), candidates.length);
@@ -2570,7 +2792,7 @@
       state.keywordSyncRuns.currentDetail = run;
       renderKeywordSyncRunDetail(run);
       if (!silent || !state.keywordSyncRuns.iterations.length) await loadKeywordSyncIterations(true, pick(run, ['request_summary'], {}));
-      else await refreshKeywordSyncIterationTail(pick(run, ['request_summary'], {}));
+      else await refreshKeywordSyncIterationPages(pick(run, ['request_summary'], {}));
       if (ACTIVE_KEYWORD_SYNC_STATUSES.indexOf(keywordSyncRunStatus(run)) >= 0) startKeywordSyncDetailPolling();
       else stopKeywordSyncDetailPolling();
     } catch (error) {
@@ -2592,9 +2814,13 @@
     var controller = new AbortController();
     state.keywordSyncRuns.iterationController = controller;
     try {
-      var data = await apiRequest(API.keywordAPISyncRuns + '/' + encodeURIComponent(id) + '/iterations', { query: { page: page, page_size: 50 }, signal: controller.signal });
+      var data = await apiRequest(API.keywordAPISyncRuns + '/' + encodeURIComponent(id) + '/iterations', { query: Object.assign({}, tableSortQuery('keywordSyncIterations'), { page: page, page_size: 50 }), signal: controller.signal });
       if (state.keywordSyncRuns.iterationController !== controller || state.keywordSyncRuns.detailID !== id || !byId('keyword-sync-detail-dialog').open) return;
-      var items = arrayFrom(data, ['iterations','items']), meta = paginationMeta(data, items, page, 50); state.keywordSyncRuns.iterations = state.keywordSyncRuns.iterations.concat(items); state.keywordSyncRuns.iterationPages = meta.pages; state.keywordSyncRuns.iterationPage = page + 1;
+      var items = arrayFrom(data, ['iterations','items']);
+      var meta = paginationMeta(data, items, page, 50);
+      state.keywordSyncRuns.iterations = reset ? items : mergeKeywordSyncIterations(state.keywordSyncRuns.iterations, items);
+      state.keywordSyncRuns.iterationPages = meta.pages;
+      state.keywordSyncRuns.iterationPage = page + 1;
       renderKeywordSyncIterations(summary);
     } catch(error){if(error.name!=='AbortError')toast(error.message||'迭代记录加载失败','error');}
     finally { if (state.keywordSyncRuns.iterationController === controller) state.keywordSyncRuns.iterationController = null; }
@@ -2602,25 +2828,36 @@
 
   function renderKeywordSyncIterations(summary) {
     var body = byId('keyword-sync-iterations-body');
+    updateSortHeaders('keywordSyncIterations');
     if (body) body.innerHTML = state.keywordSyncRuns.iterations.length ? state.keywordSyncRuns.iterations.map(function(i){return renderKeywordSyncIteration(i, summary || {});}).join('') : '<tr class="table-empty"><td colspan="7">暂无逐轮记录</td></tr>';
     var more = byId('keyword-sync-iterations-more');
     if (more) more.hidden = state.keywordSyncRuns.iterationPage > state.keywordSyncRuns.iterationPages;
   }
 
-  async function refreshKeywordSyncIterationTail(summary) {
+  async function refreshKeywordSyncIterationPages(summary) {
     if (state.keywordSyncRuns.iterationController || !state.keywordSyncRuns.detailID) return;
     var id = state.keywordSyncRuns.detailID;
-    var page = Math.max(1, state.keywordSyncRuns.iterationPage - 1);
+    var loadedPages = Math.max(1, state.keywordSyncRuns.iterationPage - 1);
+    loadedPages = Math.min(loadedPages, Math.max(1, state.keywordSyncRuns.iterationPages));
     var controller = new AbortController();
     state.keywordSyncRuns.iterationController = controller;
     try {
-      var data = await apiRequest(API.keywordAPISyncRuns + '/' + encodeURIComponent(id) + '/iterations', { query: { page: page, page_size: 50 }, signal: controller.signal });
+      var requests = [];
+      for (var page = 1; page <= loadedPages; page += 1) {
+        requests.push(apiRequest(API.keywordAPISyncRuns + '/' + encodeURIComponent(id) + '/iterations', { query: Object.assign({}, tableSortQuery('keywordSyncIterations'), { page: page, page_size: 50 }), signal: controller.signal }));
+      }
+      var pages = await Promise.all(requests);
       if (state.keywordSyncRuns.iterationController !== controller || state.keywordSyncRuns.detailID !== id || !byId('keyword-sync-detail-dialog').open) return;
-      var items = arrayFrom(data, ['iterations','items']), meta = paginationMeta(data, items, page, 50);
-      var offset = (page - 1) * 50;
-      state.keywordSyncRuns.iterations = state.keywordSyncRuns.iterations.slice(0, offset).concat(items);
+      var items = [];
+      pages.forEach(function (data) {
+        items = items.concat(arrayFrom(data, ['iterations','items']));
+      });
+      var firstPageItems = arrayFrom(pages[0], ['iterations','items']);
+      var meta = paginationMeta(pages[0], firstPageItems, 1, 50);
+      var retainedPages = Math.min(loadedPages, meta.pages);
+      state.keywordSyncRuns.iterations = mergeKeywordSyncIterations(items, []);
       state.keywordSyncRuns.iterationPages = meta.pages;
-      state.keywordSyncRuns.iterationPage = page + 1;
+      state.keywordSyncRuns.iterationPage = retainedPages + 1;
       renderKeywordSyncIterations(summary);
     } catch (error) { if (error.name !== 'AbortError') toast(error.message || '迭代记录刷新失败', 'error'); }
     finally { if (state.keywordSyncRuns.iterationController === controller) state.keywordSyncRuns.iterationController = null; }
@@ -2713,9 +2950,10 @@
       '</dl></section>' +
       '<section class="detail-section"><h3>脱敏请求摘要</h3>' + keywordSyncRequestSummaryMarkup(summary) + '</section>' +
       '<section class="detail-section"><div class="sync-iterations-heading"><h3>迭代执行记录</h3><span>共 ' + formatNumber(recordsTotal) + ' 轮记录</span></div>' +
-        '<div class="table-wrap keyword-sync-iterations-wrap"><table class="keyword-sync-iterations-table"><thead><tr><th>轮次 / 参数</th><th>状态</th><th>HTTP</th><th>耗时 / 响应</th><th>提取</th><th>关键词</th><th>样例 / 错误</th></tr></thead><tbody id="keyword-sync-iterations-body"><tr class="table-empty"><td colspan="7">正在加载…</td></tr></tbody></table></div><button id="keyword-sync-iterations-more" class="button secondary" type="button" data-action="load-more-sync-iterations" hidden>加载更多</button>' +
+        '<div class="table-wrap keyword-sync-iterations-wrap"><table class="keyword-sync-iterations-table"><thead><tr>' + sortHeaderMarkup('轮次 / 参数', 'keywordSyncIterations', 'sequence', 'desc') + sortHeaderMarkup('状态', 'keywordSyncIterations', 'status', 'asc') + sortHeaderMarkup('HTTP', 'keywordSyncIterations', 'http_status', 'desc') + sortHeaderMarkup('耗时 / 响应', 'keywordSyncIterations', 'duration_ms', 'desc') + sortHeaderMarkup('提取', 'keywordSyncIterations', 'raw_item_count', 'desc') + sortHeaderMarkup('关键词', 'keywordSyncIterations', 'new_keyword_count', 'desc') + sortHeaderMarkup('样例 / 错误', 'keywordSyncIterations', 'detail', 'asc') + '</tr></thead><tbody id="keyword-sync-iterations-body"><tr class="table-empty"><td colspan="7">正在加载…</td></tr></tbody></table></div><button id="keyword-sync-iterations-more" class="button secondary" type="button" data-action="load-more-sync-iterations" hidden>加载更多</button>' +
       '</section>';
     refreshIcons(byId('keyword-sync-detail'));
+    updateSortHeaders('keywordSyncIterations');
   }
 
   function startKeywordSyncDetailPolling() {
@@ -2769,7 +3007,7 @@
       tableLoading('runs-body', 9);
     }
     var serial = ++state.requestSerial.runs;
-    var query = Object.assign({}, state.runs.query, { page: state.runs.page, page_size: state.runs.pageSize });
+    var query = Object.assign({}, state.runs.query, tableSortQuery('runs'), { page: state.runs.page, page_size: state.runs.pageSize });
     var controller = replaceRequestController('runs');
     try {
       var data = await apiRequest(API.runs, { query: query, signal: controller.signal });
@@ -2795,6 +3033,7 @@
 
   function renderRuns() {
     var body = byId('runs-body');
+    updateSortHeaders('runs');
     var empty = byId('runs-empty');
     if (!state.runs.items.length) {
       body.innerHTML = '';
@@ -3122,7 +3361,7 @@
     byId('users-table-wrap').hidden = false;
     byId('users-pagination').hidden = false;
     tableLoading('users-body', 8);
-    var query = Object.assign({}, state.users.query, {
+    var query = Object.assign({}, state.users.query, tableSortQuery('users'), {
       page: state.users.page,
       page_size: state.users.pageSize
     });
@@ -3184,6 +3423,7 @@
 
   function renderUsers() {
     var body = byId('users-body');
+    updateSortHeaders('users');
     var empty = byId('users-empty');
     if (!state.users.items.length) {
       body.innerHTML = '';
@@ -3621,7 +3861,7 @@
     var serial = ++state.requestSerial.usageLogs;
     byId('usage-logs-empty').hidden = true;
     tableLoading('usage-logs-body', 9);
-    var query = Object.assign({}, state.usage.query, {
+    var query = Object.assign({}, state.usage.query, tableSortQuery('usageLogs'), {
       range: state.usage.range,
       page: state.usage.page,
       page_size: state.usage.pageSize
@@ -3649,6 +3889,7 @@
 
   function renderUsageLogs() {
     var body = byId('usage-logs-body');
+    updateSortHeaders('usageLogs');
     var empty = byId('usage-logs-empty');
     byId('usage-log-total').textContent = formatNumber(state.usage.total) + ' 条记录';
     if (!state.usage.logs.length) {
@@ -4493,7 +4734,8 @@
     var actionElement = event.target.closest('[data-action]');
     if (!actionElement) return;
     var action = actionElement.dataset.action;
-    if (action === 'open-menu') openMenu();
+    if (action === 'sort-table') handleTableSort(actionElement);
+    else if (action === 'open-menu') openMenu();
     else if (action === 'close-menu') closeMenu();
     else if (action === 'logout') logout();
     else if (action === 'refresh-view') refreshCurrentView();
@@ -4735,6 +4977,7 @@
     }).format(new Date());
     setupEvents();
     setupDialogBehavior();
+    updateAllSortHeaders();
     refreshIcons();
     restoreSession();
   }

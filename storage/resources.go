@@ -368,16 +368,22 @@ func (s *Store) listResources(ctx context.Context, filter ResourceFilter, summar
 	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM resources r WHERE "+where, args...).Scan(&total); err != nil {
 		return ResourcePage{}, fmt.Errorf("count resources: %w", err)
 	}
-	sortClause := "r.last_seen_at DESC, r.id DESC"
-	switch filter.Sort {
-	case "first_seen_asc":
-		sortClause = "r.first_seen_at ASC, r.id ASC"
-	case "first_seen_desc":
-		sortClause = "r.first_seen_at DESC, r.id DESC"
-	case "discoveries_desc":
-		sortClause = "r.discovery_count DESC, r.id DESC"
-	case "last_seen_asc":
-		sortClause = "r.last_seen_at ASC, r.id ASC"
+	sortBy, sortDir := filter.SortBy, filter.SortDir
+	if strings.TrimSpace(sortBy) == "" {
+		switch filter.Sort {
+		case "first_seen_asc":
+			sortBy, sortDir = "first_seen_at", "asc"
+		case "first_seen_desc":
+			sortBy, sortDir = "first_seen_at", "desc"
+		case "discoveries_desc":
+			sortBy, sortDir = "discovery_count", "desc"
+		case "last_seen_asc":
+			sortBy, sortDir = "last_seen_at", "asc"
+		}
+	}
+	sortClause, err := buildSortClause(sortBy, sortDir, "r.last_seen_at DESC, r.id DESC", resourceSortFields)
+	if err != nil {
+		return ResourcePage{}, err
 	}
 	queryArgs := append(append([]any(nil), args...), pageSize, (page-1)*pageSize)
 	columns := resourceColumns

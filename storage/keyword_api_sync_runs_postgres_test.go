@@ -57,9 +57,14 @@ func TestPostgresKeywordAPISyncRunLifecycle(t *testing.T) {
 	if err != nil || len(summary.Iterations) != 0 || summary.IterationRecordsTotal != 3 || !summary.IterationsTruncated {
 		t.Fatalf("queued summary = %+v err=%v", summary, err)
 	}
-	iterationPage, err := store.ListKeywordAPISyncRunIterations(ctx, run.ID, 2, 2)
+	iterationPage, err := store.ListKeywordAPISyncRunIterations(ctx, run.ID, KeywordAPISyncIterationFilter{Page: 1, PageSize: 2})
+	if err != nil || iterationPage.Total != 3 || iterationPage.Page != 1 || len(iterationPage.Items) != 2 ||
+		iterationPage.Items[0].Sequence != 3 || iterationPage.Items[1].Sequence != 2 {
+		t.Fatalf("latest iteration page = %+v err=%v", iterationPage, err)
+	}
+	iterationPage, err = store.ListKeywordAPISyncRunIterations(ctx, run.ID, KeywordAPISyncIterationFilter{Page: 2, PageSize: 2})
 	if err != nil || iterationPage.Total != 3 || iterationPage.Page != 2 || len(iterationPage.Items) != 1 ||
-		iterationPage.Items[0].Sequence != 3 {
+		iterationPage.Items[0].Sequence != 1 {
 		t.Fatalf("iteration page = %+v err=%v", iterationPage, err)
 	}
 	for index, iteration := range detail.Iterations {
@@ -114,6 +119,11 @@ func TestPostgresKeywordAPISyncRunLifecycle(t *testing.T) {
 		detail.Iterations[0].NewKeywordCount+detail.Iterations[0].ExistingKeywordCount != 2 ||
 		detail.Iterations[1].NewKeywordCount != 0 || detail.Iterations[1].ExistingKeywordCount != 0 {
 		t.Fatalf("completed detail = %+v err=%v", detail, err)
+	}
+	iterationPage, err = store.ListKeywordAPISyncRunIterations(ctx, run.ID, KeywordAPISyncIterationFilter{Page: 1, PageSize: 3})
+	if err != nil || len(iterationPage.Items) != 3 || iterationPage.Items[0].Sequence != 2 ||
+		iterationPage.Items[1].Sequence != 1 || iterationPage.Items[2].Sequence != 3 {
+		t.Fatalf("completed iteration order = %+v err=%v", iterationPage, err)
 	}
 
 	repeatRun, _, err := store.EnqueueKeywordAPISourceSync(ctx, source.ID, KeywordAPISyncTriggerManual, now.Add(70*time.Second))

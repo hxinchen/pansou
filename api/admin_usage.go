@@ -75,6 +75,8 @@ func (h *AdminHandler) adminUsageLogs(c *gin.Context) {
 		Query:     strings.TrimSpace(c.Query("q")),
 		Page:      queryInt(c, "page", 1),
 		PageSize:  queryInt(c, "page_size", 30),
+		SortBy:    strings.TrimSpace(c.Query("sort_by")),
+		SortDir:   strings.TrimSpace(c.Query("sort_dir")),
 	}
 	if value := strings.TrimSpace(c.Query("user_id")); value != "" {
 		userID, err := strconv.ParseInt(value, 10, 64)

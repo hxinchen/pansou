@@ -78,6 +78,8 @@ type UserFilter struct {
 	ExpiresAfter   *time.Time
 	Page           int
 	PageSize       int
+	SortBy         string
+	SortDir        string
 }
 
 type UserPage struct {
@@ -151,6 +153,8 @@ type APIRequestLogFilter struct {
 	To          *time.Time
 	Page        int
 	PageSize    int
+	SortBy      string
+	SortDir     string
 }
 
 type APIRequestLogPage struct {
