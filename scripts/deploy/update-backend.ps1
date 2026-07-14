@@ -7,6 +7,7 @@ param(
     [string]$EnabledPlugins = "labi,zhizhen,shandian,duoduo,muou,qqpd,gying,weibo",
     [string]$Channels = "",
     [string]$ProxyUrl = "socks5h://192.168.0.1:7890",
+    [string]$BrowserGatewayUrl = "http://192.168.16.1:18789/fetch",
     [string]$PublicBaseUrl = "http://103.236.97.248:22350",
     [switch]$SkipPublicCheck
 )
@@ -81,6 +82,7 @@ if ([string]::IsNullOrWhiteSpace($Channels)) {
 }
 $channelsQ = ConvertTo-BashSingleQuoted $Channels
 $proxyUrlQ = ConvertTo-BashSingleQuoted $ProxyUrl
+$browserGatewayUrlQ = ConvertTo-BashSingleQuoted $BrowserGatewayUrl
 
 if (!(Test-Path -LiteralPath $KeyPath)) {
     throw "SSH key not found: $KeyPath"
@@ -125,6 +127,7 @@ REMOTE_ROOT=$remoteRootQ
 ENABLED_PLUGINS_VALUE=$enabledPluginsQ
 CHANNELS_VALUE=$channelsQ
 PROXY_URL_VALUE=$proxyUrlQ
+BROWSER_GATEWAY_URL_VALUE=$browserGatewayUrlQ
 
 mkdir -p "`$REMOTE_ROOT/build" "`$REMOTE_ROOT/cache" "`$REMOTE_ROOT/backups" "`$REMOTE_ROOT/scripts"
 cd "`$REMOTE_ROOT"
@@ -254,6 +257,7 @@ docker run -d \
   -e CACHE_PATH=/app/cache \
   -e "TRUSTED_PROXIES=`$TRUSTED_PROXIES_VALUE" \
   -e "PROXY=`$PROXY_URL_VALUE" \
+  -e "KEYWORD_BROWSER_GATEWAY_URL=`$BROWSER_GATEWAY_URL_VALUE" \
   -v "`$REMOTE_ROOT/cache:/app/cache" \
   local/pansou-api:latest
 

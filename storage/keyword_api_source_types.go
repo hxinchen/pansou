@@ -37,6 +37,7 @@ type KeywordAPISource struct {
 	ID                             int64              `json:"id"`
 	Name                           string             `json:"name"`
 	Enabled                        bool               `json:"enabled"`
+	RequestExecutor                string             `json:"request_executor"`
 	RequestMethod                  string             `json:"request_method"`
 	RequestURL                     string             `json:"request_url"`
 	RequestHeaders                 map[string]string  `json:"request_headers"`
@@ -82,6 +83,7 @@ type KeywordAPISource struct {
 type CreateKeywordAPISourceInput struct {
 	Name                           string
 	Enabled                        bool
+	RequestExecutor                string
 	RequestMethod                  string
 	RequestURL                     string
 	RequestHeaders                 map[string]string
@@ -113,6 +115,7 @@ type CreateKeywordAPISourceInput struct {
 type UpdateKeywordAPISourceInput struct {
 	Name                           *string
 	Enabled                        *bool
+	RequestExecutor                *string
 	RequestMethod                  *string
 	RequestURL                     *string
 	RequestHeaders                 *map[string]string
@@ -190,6 +193,7 @@ type KeywordAPISourceSyncResult struct {
 // but their values, request bodies, proxy credentials, and URL userinfo/path/
 // query/fragment values are never persisted in sync history.
 type KeywordAPISyncConfigSnapshot struct {
+	RequestExecutor                string   `json:"request_executor"`
 	RequestMethod                  string   `json:"request_method"`
 	RequestURL                     string   `json:"request_url"`
 	HeaderKeys                     []string `json:"header_keys,omitempty"`

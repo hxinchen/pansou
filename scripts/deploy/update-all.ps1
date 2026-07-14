@@ -7,6 +7,7 @@ param(
     [string]$EnabledPlugins = "labi,zhizhen,shandian,duoduo,muou,qqpd,gying,weibo",
     [string]$FrontendRoot = "",
     [string]$BasePath = "/pansou/",
+    [string]$BrowserGatewayUrl = "http://192.168.16.1:18789/fetch",
     [string]$PublicBaseUrl = "http://103.236.97.248:22350",
     [switch]$SkipNpmInstall
 )
@@ -22,7 +23,7 @@ $common = @{
     PublicBaseUrl = $PublicBaseUrl
 }
 
-& (Join-Path $PSScriptRoot "update-backend.ps1") @common -EnabledPlugins $EnabledPlugins
+& (Join-Path $PSScriptRoot "update-backend.ps1") @common -EnabledPlugins $EnabledPlugins -BrowserGatewayUrl $BrowserGatewayUrl
 & (Join-Path $PSScriptRoot "update-frontend.ps1") @common -FrontendRoot $FrontendRoot -BasePath $BasePath -SkipNpmInstall:$SkipNpmInstall
 
 Write-Host "Full deployment complete: $PublicBaseUrl/pansou/"

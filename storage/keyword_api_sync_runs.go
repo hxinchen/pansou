@@ -105,7 +105,7 @@ func keywordAPISyncRequestSummary(source KeywordAPISource) KeywordAPISyncConfigS
 	headerKeys := sortedStringMapKeys(source.RequestHeaders)
 	queryKeys := sortedStringMapKeys(source.QueryParams)
 	return KeywordAPISyncConfigSnapshot{
-		RequestMethod: source.RequestMethod, RequestURL: requestURL, HeaderKeys: headerKeys,
+		RequestExecutor: source.RequestExecutor, RequestMethod: source.RequestMethod, RequestURL: requestURL, HeaderKeys: headerKeys,
 		QueryKeys: queryKeys, BodyType: source.BodyType, HasRequestBody: strings.TrimSpace(source.RequestBody) != "",
 		ProxyScheme: proxyScheme, TimeoutSeconds: source.TimeoutSeconds, ResponsePath: source.ResponsePath,
 		DefaultKeywordType: source.DefaultKeywordType, DefaultKeywordEnabled: source.DefaultKeywordEnabled,

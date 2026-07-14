@@ -4,6 +4,7 @@ cache
 # Local deployment build artifacts
 /pansou-linux-amd64
 /pansou-web-dist.tar.gz
+/LOCAL_DEPLOYMENT.md
 
 # Local database credentials and backups
 /secrets/database.env
@@ -14,3 +15,8 @@ cache
 /.playwright-cli/
 /output/
 /.superpowers/
+/tools/browser-gateway/data/
+/tools/browser-gateway/node_modules/
+/tools/browser-gateway/*.log
+/tools/browser-gateway/tmp-*.json
+/tmp/browser-gateway-node_modules.tgz

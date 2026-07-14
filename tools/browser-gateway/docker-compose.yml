@@ -1,0 +1,18 @@
+services:
+  browser-gateway:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      BROWSER_GATEWAY_HOST: 0.0.0.0
+      BROWSER_GATEWAY_PORT: 18789
+      BROWSER_GATEWAY_DATA_DIR: /data
+      BROWSER_ENGINE_PACKAGE: cloakbrowser
+      BROWSER_HEADLESS: "true"
+    volumes:
+      - browser-gateway-data:/data
+    ports:
+      - "127.0.0.1:18789:18789"
+
+volumes:
+  browser-gateway-data:

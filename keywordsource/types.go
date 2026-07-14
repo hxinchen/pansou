@@ -35,9 +35,17 @@ const (
 	BodyRaw  BodyType = "raw"
 )
 
+type RequestExecutor string
+
+const (
+	ExecutorHTTP    RequestExecutor = "http"
+	ExecutorBrowser RequestExecutor = "browser"
+)
+
 // RequestConfig is the complete, persistence-neutral HTTP request definition.
 // TimeoutSeconds and MaxRedirects use their documented defaults when zero.
 type RequestConfig struct {
+	Executor       RequestExecutor   `json:"executor,omitempty"`
 	Method         string            `json:"method"`
 	URL            string            `json:"url"`
 	Headers        map[string]string `json:"headers,omitempty"`
@@ -48,6 +56,8 @@ type RequestConfig struct {
 	ProxyURL       string            `json:"proxy_url,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
 	MaxRedirects   int               `json:"max_redirects,omitempty"`
+	BrowserGateway string            `json:"browser_gateway,omitempty"`
+	BrowserSession string            `json:"browser_session,omitempty"`
 }
 
 // Response contains the bounded decoded response. Raw bytes are intentionally

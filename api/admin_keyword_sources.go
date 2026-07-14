@@ -20,6 +20,7 @@ import (
 type keywordAPISourceRequest struct {
 	Name                           string            `json:"name"`
 	Enabled                        bool              `json:"enabled"`
+	RequestExecutor                string            `json:"request_executor"`
 	RequestMethod                  string            `json:"request_method"`
 	RequestURL                     string            `json:"request_url"`
 	RequestHeaders                 flexibleStringMap `json:"request_headers"`
@@ -100,6 +101,7 @@ type keywordAPISourceListItem struct {
 	ID                        int64                      `json:"id"`
 	Name                      string                     `json:"name"`
 	Enabled                   bool                       `json:"enabled"`
+	RequestExecutor           string                     `json:"request_executor"`
 	RequestMethod             string                     `json:"request_method"`
 	RequestURL                string                     `json:"request_url"`
 	SyncIntervalSeconds       int64                      `json:"sync_interval_seconds"`
@@ -166,7 +168,7 @@ func (h *AdminHandler) listKeywordAPISources(c *gin.Context) {
 
 func keywordAPISourceListItemFrom(source storage.KeywordAPISource) keywordAPISourceListItem {
 	return keywordAPISourceListItem{
-		ID: source.ID, Name: source.Name, Enabled: source.Enabled, RequestMethod: source.RequestMethod,
+		ID: source.ID, Name: source.Name, Enabled: source.Enabled, RequestExecutor: source.RequestExecutor, RequestMethod: source.RequestMethod,
 		RequestURL: redactKeywordSourceListURL(source.RequestURL), SyncIntervalSeconds: source.SyncIntervalSeconds,
 		NextSyncAt: source.NextSyncAt, LastSyncedAt: source.LastSyncedAt, LastStatus: source.LastStatus,
 		LastError: source.LastError, LastItemCount: source.LastItemCount,
@@ -202,7 +204,8 @@ func (h *AdminHandler) createKeywordAPISource(c *gin.Context) {
 		return
 	}
 	created, err := h.store.CreateKeywordAPISource(c.Request.Context(), storage.CreateKeywordAPISourceInput{
-		Name: request.Name, Enabled: request.Enabled, RequestMethod: request.RequestMethod, RequestURL: request.RequestURL,
+		Name: request.Name, Enabled: request.Enabled, RequestExecutor: request.RequestExecutor,
+		RequestMethod: request.RequestMethod, RequestURL: request.RequestURL,
 		RequestHeaders: stringMap(request.RequestHeaders), QueryParams: stringMap(request.QueryParams), BodyType: request.BodyType, RequestBody: body,
 		ProxyURL: request.ProxyURL, TimeoutSeconds: request.TimeoutSeconds, ResponsePath: request.ResponsePath,
 		SyncIntervalSeconds: request.SyncIntervalSeconds, DefaultKeywordType: request.DefaultKeywordType,
@@ -240,7 +243,8 @@ func (h *AdminHandler) updateKeywordAPISource(c *gin.Context) {
 		defaultEnabled = &value
 	}
 	updated, err := h.store.UpdateKeywordAPISource(c.Request.Context(), id, storage.UpdateKeywordAPISourceInput{
-		Name: &request.Name, Enabled: &request.Enabled, RequestMethod: &request.RequestMethod, RequestURL: &request.RequestURL,
+		Name: &request.Name, Enabled: &request.Enabled, RequestExecutor: &request.RequestExecutor,
+		RequestMethod: &request.RequestMethod, RequestURL: &request.RequestURL,
 		RequestHeaders: mapPointer(stringMap(request.RequestHeaders)), QueryParams: mapPointer(stringMap(request.QueryParams)), BodyType: &request.BodyType, RequestBody: &body,
 		ProxyURL: &request.ProxyURL, TimeoutSeconds: &request.TimeoutSeconds, ResponsePath: &request.ResponsePath,
 		SyncIntervalSeconds: &request.SyncIntervalSeconds, DefaultKeywordType: &request.DefaultKeywordType,
@@ -611,7 +615,8 @@ func keywordAPISourceIterationConfig(request keywordAPISourceRequest) keywordsou
 
 func keywordAPISourceRequestConfig(request keywordAPISourceRequest, body string) (keywordsource.RequestConfig, error) {
 	config := keywordsource.RequestConfig{
-		Method: request.RequestMethod, URL: request.RequestURL, Headers: stringMap(request.RequestHeaders), Query: stringMap(request.QueryParams),
+		Executor: keywordsource.RequestExecutor(request.RequestExecutor),
+		Method:   request.RequestMethod, URL: request.RequestURL, Headers: stringMap(request.RequestHeaders), Query: stringMap(request.QueryParams),
 		BodyType: keywordsource.BodyType(request.BodyType), Body: body, ProxyURL: request.ProxyURL, TimeoutSeconds: request.TimeoutSeconds,
 	}
 	if strings.EqualFold(request.BodyType, "form") && strings.TrimSpace(body) != "" {
@@ -635,7 +640,7 @@ func keywordAPISourceDetail(source storage.KeywordAPISource) gin.H {
 		}
 	}
 	return gin.H{
-		"id": source.ID, "name": source.Name, "enabled": source.Enabled, "request_method": source.RequestMethod,
+		"id": source.ID, "name": source.Name, "enabled": source.Enabled, "request_executor": source.RequestExecutor, "request_method": source.RequestMethod,
 		"request_url": source.RequestURL, "request_headers": source.RequestHeaders, "query_params": source.QueryParams,
 		"body_type": source.BodyType, "request_body": requestBody, "proxy_url": source.ProxyURL,
 		"timeout_seconds": source.TimeoutSeconds, "response_path": source.ResponsePath,

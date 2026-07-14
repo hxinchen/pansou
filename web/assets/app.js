@@ -1830,6 +1830,8 @@
     body.innerHTML = items.map(function (source) {
       var id = keywordSourceID(source);
       var method = String(pick(source, ['request_method', 'method'], 'GET')).toUpperCase();
+      var executor = String(pick(source, ['request_executor'], 'http')).toLowerCase();
+      var executorLabel = executor === 'browser' ? '浏览器' : 'HTTP';
       var url = pick(source, ['request_url', 'url'], '');
       var interval = Math.max(1, Math.round(numberValue(pick(source, ['sync_interval_seconds'], 3600)) / 60));
       var enabled = boolValue(source.enabled, false);
@@ -1844,7 +1846,7 @@
       var active = activeRun && ACTIVE_KEYWORD_SYNC_STATUSES.indexOf(keywordSyncRunStatus(activeRun)) >= 0;
       var syncButtonLabel = active ? '同步正在进行' : (stale ? '按新配置同步' : '立即同步');
       return '<tr><td><div class="keyword-api-name"><strong>' + escapeHTML(source.name || '未命名来源') + '</strong><small>' + (enabled ? '自动同步已启用' : '草稿 / 已停用') + (stale ? ' · <span class="stale-label">旧配置结果 / 待同步</span>' : '') + '</small></div></td>' +
-        '<td><div class="api-request-summary"><span class="http-status status-ok">' + escapeHTML(method) + '</span><code title="' + escapeHTML(url) + '">' + escapeHTML(url) + '</code></div></td>' +
+        '<td><div class="api-request-summary"><span class="http-status status-ok">' + escapeHTML(method) + '</span><span class="status-badge status-' + escapeHTML(executor === 'browser' ? 'running' : 'success') + '">' + escapeHTML(executorLabel) + '</span><code title="' + escapeHTML(url) + '">' + escapeHTML(url) + '</code></div></td>' +
         '<td>每 ' + interval + ' 分钟<small class="table-subline">下次 ' + escapeHTML(relativeTime(pick(source, ['next_sync_at'], null))) + '</small></td>' +
         '<td>' + keywordSourceStatus(source, latest) + (active ? keywordSourceProgressMarkup(activeRun) : '<small class="table-subline">' + escapeHTML(roundSummary || pick(latest || source, ['error', 'last_error'], '') || relativeTime(pick(latest || source, ['finished_at', 'last_synced_at'], null))) + '</small>') + '</td>' +
         '<td>' + keywordSourceResultMarkup(source, latest) + '</td>' +
@@ -2230,6 +2232,7 @@
     resetAPIEditor('query', {});
     resetAPIEditor('header', {});
     resetAPIEditor('form', {});
+    form.elements.request_executor.value = 'http';
     form.elements.request_method.value = 'GET';
     form.elements.body_type.value = 'none';
     form.elements.timeout_seconds.value = 15;
@@ -2271,6 +2274,7 @@
     return {
       name: form.elements.api_name.value.trim(),
       enabled: form.elements.api_enabled.checked,
+      request_executor: form.elements.request_executor.value || 'http',
       request_method: form.elements.request_method.value,
       request_url: form.elements.request_url.value.trim(),
       request_headers: collectAPIEditorValue('header'),
@@ -2302,6 +2306,7 @@
   function keywordAPIRequestSignature(payload) {
     return JSON.stringify({
       request_method: payload.request_method,
+      request_executor: payload.request_executor,
       request_url: payload.request_url,
       request_headers: payload.request_headers,
       query_params: payload.query_params,
@@ -2419,6 +2424,7 @@
       state.keywordSources.editing = source;
       form.elements.api_name.value = source.name || '';
       form.elements.api_enabled.checked = boolValue(source.enabled, false);
+      form.elements.request_executor.value = source.request_executor || 'http';
       form.elements.request_method.value = String(source.request_method || 'GET').toUpperCase();
       form.elements.request_url.value = source.request_url || '';
       form.elements.body_type.value = source.body_type || 'none';
@@ -2630,6 +2636,8 @@
   function keywordSyncRequestSummaryMarkup(summary) {
     summary = summary && typeof summary === 'object' ? summary : {};
     var method = String(pick(summary, ['request_method'], 'GET')).toUpperCase();
+    var executor = String(pick(summary, ['request_executor'], 'http')).toLowerCase();
+    var executorLabel = executor === 'browser' ? '浏览器模式' : '标准 HTTP';
     var url = pick(summary, ['request_url'], '—');
     var headers = arrayFrom(pick(summary, ['header_keys'], []), ['items']);
     var query = arrayFrom(pick(summary, ['query_keys'], []), ['items']);
@@ -2642,7 +2650,7 @@
         ' · 起始 ' + formatNumber(pick(summary, ['iteration_start'], 0)) + ' / 步长 ' + formatNumber(pick(summary, ['iteration_step'], 0));
     }
     return '<div class="sync-request-card">' +
-      '<div class="api-request-summary"><span class="http-status status-ok">' + escapeHTML(method) + '</span><code title="' + escapeHTML(url) + '">' + escapeHTML(url) + '</code></div>' +
+      '<div class="api-request-summary"><span class="http-status status-ok">' + escapeHTML(method) + '</span><span class="status-badge status-' + escapeHTML(executor === 'browser' ? 'running' : 'success') + '">' + escapeHTML(executorLabel) + '</span><code title="' + escapeHTML(url) + '">' + escapeHTML(url) + '</code></div>' +
       '<dl class="detail-grid">' +
         '<div class="detail-pair"><dt>Header 名称</dt><dd>' + escapeHTML(headers.length ? headers.join(', ') : '无') + '</dd></div>' +
         '<div class="detail-pair"><dt>Query 名称</dt><dd>' + escapeHTML(query.length ? query.join(', ') : '无') + '</dd></div>' +

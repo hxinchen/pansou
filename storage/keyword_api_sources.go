@@ -15,7 +15,7 @@ import (
 )
 
 const keywordAPISourceColumns = `
-	id, name, enabled, request_method, request_url, request_headers, query_params,
+	id, name, enabled, request_executor, request_method, request_url, request_headers, query_params,
 	body_type, request_body, proxy_url, timeout_seconds, response_path,
 	sync_interval_seconds, default_keyword_type, default_keyword_enabled,
 	default_priority, default_cooldown_seconds, iteration_enabled, iteration_location,
@@ -33,7 +33,7 @@ func scanKeywordAPISource(row rowScanner) (KeywordAPISource, error) {
 	var cooldown pgtype.Int8
 	var nextSync, lastSynced pgtype.Timestamptz
 	err := row.Scan(
-		&source.ID, &source.Name, &source.Enabled, &source.RequestMethod, &source.RequestURL,
+		&source.ID, &source.Name, &source.Enabled, &source.RequestExecutor, &source.RequestMethod, &source.RequestURL,
 		&headers, &query, &source.BodyType, &source.RequestBody, &source.ProxyURL,
 		&source.TimeoutSeconds, &source.ResponsePath, &source.SyncIntervalSeconds,
 		&source.DefaultKeywordType, &source.DefaultKeywordEnabled, &source.DefaultPriority,
@@ -69,7 +69,7 @@ func (s *Store) CreateKeywordAPISource(ctx context.Context, input CreateKeywordA
 		return KeywordAPISource{}, err
 	}
 	created, err := scanKeywordAPISource(s.pool.QueryRow(ctx, `INSERT INTO keyword_api_sources (
-		name, enabled, request_method, request_url, request_headers, query_params,
+		name, enabled, request_executor, request_method, request_url, request_headers, query_params,
 		body_type, request_body, proxy_url, timeout_seconds, response_path,
 		sync_interval_seconds, default_keyword_type, default_keyword_enabled,
 		default_priority, default_cooldown_seconds, iteration_enabled, iteration_location,
@@ -77,9 +77,9 @@ func (s *Store) CreateKeywordAPISource(ctx context.Context, input CreateKeywordA
 		iteration_unlimited, iteration_no_keyword_stop_count,
 		iteration_random_delay_min_seconds, iteration_random_delay_max_seconds,
 		next_sync_at
-	) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+	) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
 	RETURNING `+keywordAPISourceColumns,
-		source.Name, source.Enabled, source.RequestMethod, source.RequestURL,
+		source.Name, source.Enabled, source.RequestExecutor, source.RequestMethod, source.RequestURL,
 		encodeStringMap(source.RequestHeaders), encodeStringMap(source.QueryParams),
 		source.BodyType, source.RequestBody, source.ProxyURL, source.TimeoutSeconds,
 		source.ResponsePath, source.SyncIntervalSeconds, source.DefaultKeywordType,
@@ -192,18 +192,18 @@ func (s *Store) UpdateKeywordAPISource(ctx context.Context, id int64, input Upda
 		updated.ResultStale = current.ResultStale || current.LastSyncedAt != nil || current.LastAppliedConfigRevision > 0
 	}
 	updated, err = scanKeywordAPISource(tx.QueryRow(ctx, `UPDATE keyword_api_sources SET
-		name=$2, enabled=$3, request_method=$4, request_url=$5, request_headers=$6::jsonb,
-		query_params=$7::jsonb, body_type=$8, request_body=$9, proxy_url=$10,
-		timeout_seconds=$11, response_path=$12, sync_interval_seconds=$13,
-		default_keyword_type=$14, default_keyword_enabled=$15, default_priority=$16,
-		default_cooldown_seconds=$17, iteration_enabled=$18, iteration_location=$19,
-		iteration_path=$20, iteration_start=$21, iteration_step=$22, iteration_count=$23,
-		iteration_delay_seconds=$24, iteration_unlimited=$25,
-		iteration_no_keyword_stop_count=$26, iteration_random_delay_min_seconds=$27,
-		iteration_random_delay_max_seconds=$28, next_sync_at=$29,
-		sync_config_revision=$30, result_stale=$31, updated_at=now()
+		name=$2, enabled=$3, request_executor=$4, request_method=$5, request_url=$6, request_headers=$7::jsonb,
+		query_params=$8::jsonb, body_type=$9, request_body=$10, proxy_url=$11,
+		timeout_seconds=$12, response_path=$13, sync_interval_seconds=$14,
+		default_keyword_type=$15, default_keyword_enabled=$16, default_priority=$17,
+		default_cooldown_seconds=$18, iteration_enabled=$19, iteration_location=$20,
+		iteration_path=$21, iteration_start=$22, iteration_step=$23, iteration_count=$24,
+		iteration_delay_seconds=$25, iteration_unlimited=$26,
+		iteration_no_keyword_stop_count=$27, iteration_random_delay_min_seconds=$28,
+		iteration_random_delay_max_seconds=$29, next_sync_at=$30,
+		sync_config_revision=$31, result_stale=$32, updated_at=now()
 	WHERE id=$1 RETURNING `+keywordAPISourceColumns,
-		id, updated.Name, updated.Enabled, updated.RequestMethod, updated.RequestURL,
+		id, updated.Name, updated.Enabled, updated.RequestExecutor, updated.RequestMethod, updated.RequestURL,
 		encodeStringMap(updated.RequestHeaders), encodeStringMap(updated.QueryParams),
 		updated.BodyType, updated.RequestBody, updated.ProxyURL, updated.TimeoutSeconds,
 		updated.ResponsePath, updated.SyncIntervalSeconds, updated.DefaultKeywordType,
@@ -228,7 +228,7 @@ func (s *Store) CopyKeywordAPISource(ctx context.Context, id int64) (KeywordAPIS
 		return KeywordAPISource{}, fmt.Errorf("storage is disabled")
 	}
 	source, err := scanKeywordAPISource(s.pool.QueryRow(ctx, `INSERT INTO keyword_api_sources (
-		name, enabled, request_method, request_url, request_headers, query_params,
+		name, enabled, request_executor, request_method, request_url, request_headers, query_params,
 		body_type, request_body, proxy_url, timeout_seconds, response_path,
 		sync_interval_seconds, default_keyword_type, default_keyword_enabled,
 		default_priority, default_cooldown_seconds, iteration_enabled, iteration_location,
@@ -237,7 +237,7 @@ func (s *Store) CopyKeywordAPISource(ctx context.Context, id int64) (KeywordAPIS
 		iteration_random_delay_min_seconds, iteration_random_delay_max_seconds,
 		next_sync_at, last_synced_at, last_status, last_error, last_item_count,
 		last_request_count, last_success_count, last_failure_count
-	) SELECT name || ' 副本', FALSE, request_method, request_url, request_headers, query_params,
+	) SELECT name || ' 副本', FALSE, request_executor, request_method, request_url, request_headers, query_params,
 		body_type, request_body, proxy_url, timeout_seconds, response_path,
 		sync_interval_seconds, default_keyword_type, default_keyword_enabled,
 		default_priority, default_cooldown_seconds, iteration_enabled, iteration_location,
@@ -291,7 +291,7 @@ func (s *Store) DeleteKeywordAPISource(ctx context.Context, id int64) error {
 }
 
 func keywordAPISourceConfigChanged(before, after KeywordAPISource) bool {
-	if before.RequestMethod != after.RequestMethod || before.RequestURL != after.RequestURL ||
+	if before.RequestExecutor != after.RequestExecutor || before.RequestMethod != after.RequestMethod || before.RequestURL != after.RequestURL ||
 		before.BodyType != after.BodyType || before.RequestBody != after.RequestBody || before.ProxyURL != after.ProxyURL ||
 		before.TimeoutSeconds != after.TimeoutSeconds || before.ResponsePath != after.ResponsePath ||
 		before.DefaultKeywordType != after.DefaultKeywordType || before.DefaultKeywordEnabled != after.DefaultKeywordEnabled ||
@@ -562,6 +562,10 @@ func normalizeKeywordAPISourceValues(values []string) []normalizedKeywordAPIValu
 }
 
 func normalizeKeywordAPISourceCreate(input CreateKeywordAPISourceInput, now time.Time) (KeywordAPISource, error) {
+	executor := strings.ToLower(strings.TrimSpace(input.RequestExecutor))
+	if executor == "" {
+		executor = "http"
+	}
 	method := strings.ToUpper(strings.TrimSpace(input.RequestMethod))
 	if method == "" {
 		method = "GET"
@@ -604,7 +608,7 @@ func normalizeKeywordAPISourceCreate(input CreateKeywordAPISourceInput, now time
 		iterationStep = 20
 	}
 	source := KeywordAPISource{
-		Name: strings.TrimSpace(input.Name), Enabled: input.Enabled, RequestMethod: method,
+		Name: strings.TrimSpace(input.Name), Enabled: input.Enabled, RequestExecutor: executor, RequestMethod: method,
 		RequestURL: strings.TrimSpace(input.RequestURL), RequestHeaders: cloneStringMap(input.RequestHeaders),
 		QueryParams: cloneStringMap(input.QueryParams), BodyType: bodyType, RequestBody: input.RequestBody,
 		ProxyURL: strings.TrimSpace(input.ProxyURL), TimeoutSeconds: timeout,
@@ -631,6 +635,12 @@ func applyKeywordAPISourceUpdate(source KeywordAPISource, input UpdateKeywordAPI
 	}
 	if input.Enabled != nil {
 		source.Enabled = *input.Enabled
+	}
+	if input.RequestExecutor != nil {
+		source.RequestExecutor = strings.ToLower(strings.TrimSpace(*input.RequestExecutor))
+		if source.RequestExecutor == "" {
+			source.RequestExecutor = "http"
+		}
 	}
 	if input.RequestMethod != nil {
 		source.RequestMethod = strings.ToUpper(strings.TrimSpace(*input.RequestMethod))
@@ -725,6 +735,13 @@ func validateKeywordAPISource(source KeywordAPISource) error {
 	case "GET", "POST", "PUT", "PATCH":
 	default:
 		return fmt.Errorf("%w: request method", ErrInvalid)
+	}
+	switch source.RequestExecutor {
+	case "", "http":
+		source.RequestExecutor = "http"
+	case "browser":
+	default:
+		return fmt.Errorf("%w: request executor", ErrInvalid)
 	}
 	switch source.BodyType {
 	case "none", "json", "form", "raw":

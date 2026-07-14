@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -40,6 +41,14 @@ func canonicalBodyType(bodyType BodyType) BodyType {
 	return BodyType(strings.ToLower(strings.TrimSpace(string(bodyType))))
 }
 
+func canonicalExecutor(executor RequestExecutor) RequestExecutor {
+	executor = RequestExecutor(strings.ToLower(strings.TrimSpace(string(executor))))
+	if executor == "" {
+		return ExecutorHTTP
+	}
+	return executor
+}
+
 func effectiveTimeout(seconds int) int {
 	if seconds == 0 {
 		return DefaultTimeoutSeconds
@@ -56,6 +65,11 @@ func effectiveMaxRedirects(limit int) int {
 
 // ValidateRequestConfig validates without sending a request.
 func ValidateRequestConfig(config RequestConfig) error {
+	switch canonicalExecutor(config.Executor) {
+	case ExecutorHTTP, ExecutorBrowser:
+	default:
+		return fmt.Errorf("%w: unsupported request executor", ErrInvalidConfig)
+	}
 	switch canonicalMethod(config.Method) {
 	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch:
 	default:
@@ -108,6 +122,29 @@ func ValidateRequestConfig(config RequestConfig) error {
 	}
 	if err := validateProxyURL(config.ProxyURL); err != nil {
 		return err
+	}
+	if canonicalExecutor(config.Executor) == ExecutorBrowser {
+		if err := validateBrowserGatewayURL(effectiveBrowserGateway(config)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func effectiveBrowserGateway(config RequestConfig) string {
+	if raw := strings.TrimSpace(config.BrowserGateway); raw != "" {
+		return raw
+	}
+	return strings.TrimSpace(os.Getenv("KEYWORD_BROWSER_GATEWAY_URL"))
+}
+
+func validateBrowserGatewayURL(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("%w: browser gateway URL is not configured", ErrInvalidConfig)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("%w: browser gateway URL must be absolute HTTP(S)", ErrInvalidConfig)
 	}
 	return nil
 }
@@ -239,6 +276,9 @@ func Execute(ctx context.Context, config RequestConfig) (response Response, err 
 	}
 	if err = ValidateRequestConfig(config); err != nil {
 		return Response{}, err
+	}
+	if canonicalExecutor(config.Executor) == ExecutorBrowser {
+		return ExecuteViaBrowser(ctx, config)
 	}
 	req, err := buildRequest(ctx, config)
 	if err != nil {

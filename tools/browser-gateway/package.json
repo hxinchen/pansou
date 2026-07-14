@@ -1,0 +1,13 @@
+{
+  "name": "pansou-browser-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "cloakbrowser": "^0.4.10",
+    "playwright": "^1.54.1"
+  }
+}

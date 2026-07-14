@@ -391,6 +391,7 @@ func iterationError(index int, value int64, err error, config keywordsource.Requ
 // Form bodies are stored as a JSON object in request_body.
 func RequestConfig(source storage.KeywordAPISource) (keywordsource.RequestConfig, error) {
 	config := keywordsource.RequestConfig{
+		Executor:       keywordsource.RequestExecutor(source.RequestExecutor),
 		Method:         source.RequestMethod,
 		URL:            source.RequestURL,
 		Headers:        source.RequestHeaders,

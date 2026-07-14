@@ -21,7 +21,7 @@ func TestNormalizeKeywordAPISourceCreateDefaultsAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if source.Name != "Draft" || source.RequestMethod != "GET" || source.BodyType != "none" ||
+	if source.Name != "Draft" || source.RequestExecutor != "http" || source.RequestMethod != "GET" || source.BodyType != "none" ||
 		source.TimeoutSeconds != 15 || source.SyncIntervalSeconds != 3600 ||
 		source.DefaultKeywordType != DefaultKeywordType || !source.DefaultKeywordEnabled || source.NextSyncAt != nil ||
 		source.IterationEnabled || source.IterationLocation != "query" || source.IterationPath != "" ||
@@ -39,6 +39,16 @@ func TestNormalizeKeywordAPISourceCreateDefaultsAndValidation(t *testing.T) {
 	}, now)
 	if err != nil || enabled.NextSyncAt == nil || !enabled.NextSyncAt.Equal(now) {
 		t.Fatalf("enabled source = %+v, %v", enabled, err)
+	}
+	browser, err := normalizeKeywordAPISourceCreate(CreateKeywordAPISourceInput{
+		Name: "Browser", RequestExecutor: "browser", RequestURL: "https://example.test/api", ResponsePath: "items[]",
+	}, now)
+	if err != nil || browser.RequestExecutor != "browser" {
+		t.Fatalf("browser source = %+v, %v", browser, err)
+	}
+	_, err = normalizeKeywordAPISourceCreate(CreateKeywordAPISourceInput{Name: "Bad", RequestExecutor: "tcp"}, now)
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid executor error = %v, want ErrInvalid", err)
 	}
 }
 
