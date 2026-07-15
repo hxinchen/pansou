@@ -35,8 +35,10 @@ PanSou是一个高性能的网盘资源搜索API服务，支持TG搜索和自定
 | **USAGE_LOG_RETENTION_DAYS** | `30` | 网页/API 搜索调用明细保留天数 |
 | **COLLECTION_INTERVAL_SECONDS** | `60` | 自动采集调度检查间隔（秒） |
 | **COLLECTION_DEFAULT_COOLDOWN_HOURS** | `168` | 关键词默认冷却期（小时） |
-| **LINK_CHECK_WORKERS** | `4` | 新资源异步链接检测并发数 |
+| **LINK_CHECK_WORKERS** | `4` | 新资源首检与周期复检的异步并发数 |
 | **HYBRID_REFRESH_AFTER_MINUTES** | `60` | 数据库命中后触发后台实时刷新的陈旧阈值（分钟） |
+
+管理员可在管理台“资源库 → 检测策略”中启用周期复检，统一选择参与复检的链接状态并设置 1 小时至 365 天的周期。策略默认关闭并预填“有效 + 未知、7 天”；新发现资源的首次检测始终执行。周期策略保存于 PostgreSQL，最多 1 分钟热生效，无需重启服务。
 
 Compose 密钥文件、每日备份和上线验证步骤见[资源库与自动采集 V1](docs/resource-library-v1.md)。
 

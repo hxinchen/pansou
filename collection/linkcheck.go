@@ -9,19 +9,23 @@ import (
 )
 
 type LinkCheckQueueConfig struct {
-	Workers int
-	Buffer  int
-	Timeout time.Duration
-	Now     func() time.Time
-	OnError func(error)
+	Workers      int
+	Buffer       int
+	Timeout      time.Duration
+	PollInterval time.Duration
+	BatchSize    int
+	Now          func() time.Time
+	OnError      func(error)
 }
 
 func DefaultLinkCheckQueueConfig() LinkCheckQueueConfig {
 	return LinkCheckQueueConfig{
-		Workers: 2,
-		Buffer:  256,
-		Timeout: 15 * time.Second,
-		Now:     time.Now,
+		Workers:      2,
+		Buffer:       256,
+		Timeout:      15 * time.Second,
+		PollInterval: time.Minute,
+		BatchSize:    500,
+		Now:          time.Now,
 	}
 }
 
@@ -50,6 +54,12 @@ func NewLinkCheckQueue(repository LinkCheckRepository, checker LinkChecker, conf
 	}
 	if config.Timeout <= 0 {
 		config.Timeout = defaults.Timeout
+	}
+	if config.PollInterval <= 0 {
+		config.PollInterval = defaults.PollInterval
+	}
+	if config.BatchSize <= 0 || config.BatchSize > 1000 {
+		config.BatchSize = defaults.BatchSize
 	}
 	if config.Now == nil {
 		config.Now = defaults.Now
@@ -85,6 +95,8 @@ func (q *LinkCheckQueue) Start(parent context.Context) error {
 		q.wg.Add(1)
 		go q.worker(ctx)
 	}
+	q.wg.Add(1)
+	go q.schedule(ctx)
 	return nil
 }
 
@@ -151,6 +163,39 @@ func (q *LinkCheckQueue) worker(ctx context.Context) {
 			return
 		case candidate := <-q.jobs:
 			q.process(ctx, candidate)
+		}
+	}
+}
+
+func (q *LinkCheckQueue) schedule(ctx context.Context) {
+	defer q.wg.Done()
+	q.dispatch(ctx)
+	ticker := time.NewTicker(q.config.PollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			q.dispatch(ctx)
+		}
+	}
+}
+
+func (q *LinkCheckQueue) dispatch(ctx context.Context) {
+	candidates, err := q.repository.DueLinkChecks(ctx, q.config.BatchSize, q.config.Now().UTC())
+	if err != nil {
+		if ctx.Err() == nil {
+			q.report(fmt.Errorf("list due link checks: %w", err))
+		}
+		return
+	}
+	for _, candidate := range candidates {
+		if err := q.Enqueue(ctx, candidate); err != nil {
+			if errors.Is(err, ErrQueueFull) || errors.Is(err, ErrQueueNotStarted) || ctx.Err() != nil {
+				return
+			}
+			q.report(fmt.Errorf("enqueue due link check for resource %d: %w", candidate.ResourceID, err))
 		}
 	}
 }

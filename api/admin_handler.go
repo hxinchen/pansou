@@ -57,6 +57,8 @@ func (h *AdminHandler) Register(group *gin.RouterGroup) {
 	group.GET("/resources/:id", h.getResource)
 	group.GET("/resources/:id/sources", h.listResourceSources)
 	group.GET("/resources/:id/keywords", h.listResourceKeywords)
+	group.GET("/link-check-policy", h.getLinkCheckPolicy)
+	group.PUT("/link-check-policy", h.updateLinkCheckPolicy)
 	group.GET("/keywords", h.listKeywords)
 	group.POST("/keywords", h.createKeyword)
 	group.PUT("/keywords/:id", h.updateKeyword)

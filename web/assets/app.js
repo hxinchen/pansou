@@ -6,6 +6,7 @@
     search: '/api/search',
     trends: '/api/admin/trends',
     resources: '/api/admin/resources',
+    linkCheckPolicy: '/api/admin/link-check-policy',
     keywords: '/api/admin/keywords',
     keywordAPISources: '/api/admin/keyword-api-sources',
     keywordAPISourceTest: '/api/admin/keyword-api-sources/test',
@@ -56,6 +57,7 @@
     overview: null,
     overviewTrends: [],
     overviewRecentSort: { sortBy: '', sortDir: '' },
+    linkCheckPolicy: { data: null, controller: null, loading: false },
     sourceContributions: {
       scope: 'plugin', items: [], page: 1, pageSize: 20, total: 0, pages: 1,
       sortBy: 'resource_count', sortDir: 'desc', controller: null, mode: 'list',
@@ -101,6 +103,23 @@
     active: '可用',
     disabled: '已停用',
     admin_suspended: '管理员暂停'
+  };
+
+  var linkCheckPolicyStatusLabels = {
+    valid: '有效',
+    unknown: '未知',
+    invalid: '失效',
+    expired: '已过期',
+    cancelled: '取消分享',
+    violation: '违规',
+    locked: '需提取码'
+  };
+  var LINK_CHECK_POLICY_STATUSES = Object.keys(linkCheckPolicyStatusLabels);
+  var LINK_CHECK_POLICY_DEFAULT = {
+    enabled: false,
+    statuses: ['valid', 'unknown'],
+    interval_seconds: 7 * 24 * 60 * 60,
+    updated_at: ''
   };
 
   var diskLabels = {
@@ -1001,6 +1020,13 @@
           else captureKeywordAPISourceDraft();
         }
         if (dialog.id === 'resource-dialog') cancelResourceDetailRequests(dialog);
+        if (dialog.id === 'link-check-policy-dialog') {
+          if (state.linkCheckPolicy.controller) state.linkCheckPolicy.controller.abort();
+          state.linkCheckPolicy.controller = null;
+          setLinkCheckPolicyControlsDisabled(false);
+          setButtonLoading(byId('link-check-policy-save'), false);
+          byId('link-check-policy-retry').hidden = true;
+        }
         if (dialog.id === 'run-dialog') {
           if (state.runPicker.controller) state.runPicker.controller.abort();
           clearTimeout(state.runPicker.searchTimer);
@@ -1617,6 +1643,190 @@
       byId('resources-body').innerHTML = '';
       showAlert('resources-alert', error.message || '资源加载失败');
     } finally { finishRequestController('resources', controller); }
+  }
+
+  function normalizeLinkCheckPolicy(data) {
+    data = pick(data, ['policy'], data || {});
+    var rawStatuses = pick(data, ['statuses'], LINK_CHECK_POLICY_DEFAULT.statuses);
+    if (!Array.isArray(rawStatuses)) rawStatuses = LINK_CHECK_POLICY_DEFAULT.statuses;
+    var selected = new Set(rawStatuses.map(function (status) { return String(status || '').toLowerCase(); }));
+    var intervalSeconds = Number(pick(data, ['interval_seconds'], LINK_CHECK_POLICY_DEFAULT.interval_seconds));
+    if (!Number.isInteger(intervalSeconds) || intervalSeconds < 3600 || intervalSeconds > 31536000 || intervalSeconds % 3600 !== 0) {
+      intervalSeconds = LINK_CHECK_POLICY_DEFAULT.interval_seconds;
+    }
+    return {
+      enabled: boolValue(pick(data, ['enabled'], LINK_CHECK_POLICY_DEFAULT.enabled), false),
+      statuses: LINK_CHECK_POLICY_STATUSES.filter(function (status) { return selected.has(status); }),
+      interval_seconds: intervalSeconds,
+      updated_at: pick(data, ['updated_at'], '')
+    };
+  }
+
+  function selectedLinkCheckStatuses() {
+    return Array.from(document.querySelectorAll('#link-check-policy-form input[name="statuses"]:checked')).map(function (input) {
+      return input.value;
+    }).filter(function (status) {
+      return LINK_CHECK_POLICY_STATUSES.indexOf(status) >= 0;
+    });
+  }
+
+  function syncLinkCheckIntervalConstraints() {
+    var input = byId('link-check-interval-value');
+    var unit = byId('link-check-interval-unit').value;
+    input.min = '1';
+    input.max = unit === 'days' ? '365' : '8760';
+    input.step = '1';
+  }
+
+  function syncLinkCheckPolicySummary() {
+    var form = byId('link-check-policy-form');
+    var enabled = form.elements.enabled.checked;
+    var statuses = selectedLinkCheckStatuses();
+    var value = Number(form.elements.interval_value.value);
+    var unit = form.elements.interval_unit.value;
+    var intervalText = Number.isInteger(value) && value > 0
+      ? value + (unit === 'days' ? ' 天' : ' 小时')
+      : '未设置有效周期';
+    var statusText = statuses.length
+      ? statuses.map(function (status) { return linkCheckPolicyStatusLabels[status]; }).join('、')
+      : '尚未选择状态';
+    var summary = byId('link-check-policy-summary');
+    summary.textContent = enabled
+      ? '已启用 · 每 ' + intervalText + '复检：' + statusText
+      : '当前已关闭 · 已预设每 ' + intervalText + '复检：' + statusText;
+    summary.classList.toggle('warning', enabled && statuses.length === 0);
+  }
+
+  function populateLinkCheckPolicyForm(policy) {
+    policy = normalizeLinkCheckPolicy(policy);
+    var form = byId('link-check-policy-form');
+    form.elements.enabled.checked = policy.enabled;
+    form.querySelectorAll('input[name="statuses"]').forEach(function (input) {
+      input.checked = policy.statuses.indexOf(input.value) >= 0;
+    });
+    var useDays = policy.interval_seconds % 86400 === 0;
+    form.elements.interval_unit.value = useDays ? 'days' : 'hours';
+    form.elements.interval_value.value = String(policy.interval_seconds / (useDays ? 86400 : 3600));
+    syncLinkCheckIntervalConstraints();
+    syncLinkCheckPolicySummary();
+    var updated = byId('link-check-policy-updated');
+    updated.textContent = policy.updated_at ? '上次更新：' + formatDate(policy.updated_at, true) : '';
+    updated.hidden = !policy.updated_at;
+  }
+
+  function setLinkCheckPolicyControlsDisabled(disabled) {
+    byId('link-check-policy-form').querySelectorAll('.link-check-policy-body input, .link-check-policy-body select').forEach(function (control) {
+      control.disabled = disabled;
+    });
+    state.linkCheckPolicy.loading = disabled;
+  }
+
+  async function openLinkCheckPolicy() {
+    var dialog = byId('link-check-policy-dialog');
+    var button = byId('link-check-policy-save');
+    var retryButton = byId('link-check-policy-retry');
+    populateLinkCheckPolicyForm(state.linkCheckPolicy.data || LINK_CHECK_POLICY_DEFAULT);
+    showAlert('link-check-policy-error', '正在读取检测策略…', 'info');
+    retryButton.hidden = true;
+    if (!dialog.open) dialog.showModal();
+    refreshIcons(dialog);
+
+    if (state.linkCheckPolicy.controller) state.linkCheckPolicy.controller.abort();
+    var controller = new AbortController();
+    state.linkCheckPolicy.controller = controller;
+    setLinkCheckPolicyControlsDisabled(true);
+    setButtonLoading(button, true, '加载中');
+    var failed = false;
+    try {
+      var data = await apiRequest(API.linkCheckPolicy, { signal: controller.signal });
+      if (state.linkCheckPolicy.controller !== controller || !dialog.open) return;
+      var policy = normalizeLinkCheckPolicy(data);
+      state.linkCheckPolicy.data = policy;
+      populateLinkCheckPolicyForm(policy);
+      showAlert('link-check-policy-error', '');
+      window.setTimeout(function () {
+        if (dialog.open && !state.linkCheckPolicy.loading) byId('link-check-policy-enabled').focus();
+      }, 0);
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      failed = true;
+      showAlert('link-check-policy-error', error.message || '检测策略加载失败');
+    } finally {
+      if (state.linkCheckPolicy.controller === controller) {
+        state.linkCheckPolicy.controller = null;
+        setButtonLoading(button, false);
+        setLinkCheckPolicyControlsDisabled(failed);
+        button.disabled = failed;
+        retryButton.hidden = !failed;
+        refreshIcons(retryButton);
+        if (failed) {
+          window.setTimeout(function () {
+            if (dialog.open && !retryButton.hidden) retryButton.focus();
+          }, 0);
+        }
+      }
+    }
+  }
+
+  function linkCheckPolicyPayload() {
+    var form = byId('link-check-policy-form');
+    var rawValue = String(form.elements.interval_value.value || '').trim();
+    var value = Number(rawValue);
+    var unit = form.elements.interval_unit.value;
+    var statuses = selectedLinkCheckStatuses();
+    if (!rawValue || !Number.isInteger(value) || value < 1) {
+      throw new APIError('检测周期必须为正整数', 400, null);
+    }
+    var intervalSeconds = value * (unit === 'days' ? 86400 : 3600);
+    if (intervalSeconds < 3600 || intervalSeconds > 31536000 || intervalSeconds % 3600 !== 0) {
+      throw new APIError('检测周期须在 1 小时至 365 天之间', 400, null);
+    }
+    if (form.elements.enabled.checked && statuses.length === 0) {
+      throw new APIError('启用周期复检时，请至少选择一个链接状态', 400, null);
+    }
+    return {
+      enabled: form.elements.enabled.checked,
+      statuses: statuses,
+      interval_seconds: intervalSeconds
+    };
+  }
+
+  async function saveLinkCheckPolicy(event) {
+    event.preventDefault();
+    if (state.linkCheckPolicy.loading) return;
+    showAlert('link-check-policy-error', '');
+    var payload;
+    try {
+      payload = linkCheckPolicyPayload();
+    } catch (error) {
+      showAlert('link-check-policy-error', error.message || '请检查检测策略设置');
+      return;
+    }
+
+    var dialog = byId('link-check-policy-dialog');
+    var button = byId('link-check-policy-save');
+    var controller = new AbortController();
+    state.linkCheckPolicy.controller = controller;
+    setLinkCheckPolicyControlsDisabled(true);
+    setButtonLoading(button, true, '保存中');
+    try {
+      var data = await apiRequest(API.linkCheckPolicy, { method: 'PUT', body: payload, signal: controller.signal });
+      if (state.linkCheckPolicy.controller !== controller) return;
+      var policy = normalizeLinkCheckPolicy(data);
+      state.linkCheckPolicy.data = policy;
+      populateLinkCheckPolicyForm(policy);
+      dialog.close();
+      toast('检测策略已保存，将在 1 分钟内生效', 'success');
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      showAlert('link-check-policy-error', error.message || '检测策略保存失败');
+    } finally {
+      if (state.linkCheckPolicy.controller === controller) {
+        state.linkCheckPolicy.controller = null;
+        setLinkCheckPolicyControlsDisabled(false);
+        setButtonLoading(button, false);
+      }
+    }
   }
 
   function resourceSources(resource) {
@@ -5220,6 +5430,8 @@
     else if (action === 'logout') logout();
     else if (action === 'refresh-view') refreshCurrentView();
     else if (action === 'close-dialog') actionElement.closest('dialog').close();
+    else if (action === 'open-link-check-policy') openLinkCheckPolicy();
+    else if (action === 'retry-link-check-policy') openLinkCheckPolicy();
     else if (action === 'reset-resource-filters') {
       byId('resource-filters').reset();
       readResourceFilters();
@@ -5369,6 +5581,7 @@
 
   function setupEvents() {
     byId('login-form').addEventListener('submit', submitLogin);
+    byId('link-check-policy-form').addEventListener('submit', saveLinkCheckPolicy);
     byId('keyword-form').addEventListener('submit', saveKeyword);
     byId('run-form').addEventListener('submit', submitRun);
     byId('user-form').addEventListener('submit', saveUser);
@@ -5387,6 +5600,15 @@
       updateKeywordSyncFilters();
     });
     byId('resource-filters').querySelector('[name="q"]').addEventListener('input', debounce(readResourceFilters, 350));
+    byId('link-check-policy-form').addEventListener('input', function () {
+      syncLinkCheckPolicySummary();
+      showAlert('link-check-policy-error', '');
+    });
+    byId('link-check-policy-form').addEventListener('change', function (event) {
+      if (event.target.id === 'link-check-interval-unit') syncLinkCheckIntervalConstraints();
+      syncLinkCheckPolicySummary();
+      showAlert('link-check-policy-error', '');
+    });
     byId('keyword-search').addEventListener('input', debounce(updateKeywordFilters, 350));
     byId('api-response-path').addEventListener('input', debounce(updateKeywordAPIExtractPreview, 120));
     ['api-iteration-start', 'api-iteration-step', 'api-iteration-count', 'api-iteration-delay', 'api-iteration-no-keyword-stop-count', 'api-iteration-random-delay-min', 'api-iteration-random-delay-max'].forEach(function (id) {

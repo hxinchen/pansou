@@ -37,26 +37,28 @@ var (
 
 // Resource is one unique share URL and its accumulated discovery metadata.
 type Resource struct {
-	ID             int64                   `json:"id"`
-	NormalizedURL  string                  `json:"normalized_url"`
-	URL            string                  `json:"url"`
-	Password       string                  `json:"password,omitempty"`
-	Platform       string                  `json:"platform,omitempty"`
-	Title          string                  `json:"title,omitempty"`
-	Content        string                  `json:"content,omitempty"`
-	LinkDatetime   *time.Time              `json:"link_datetime,omitempty"`
-	CheckStatus    string                  `json:"check_status"`
-	LastCheckedAt  *time.Time              `json:"last_checked_at,omitempty"`
-	FirstSeenAt    time.Time               `json:"first_seen_at"`
-	LastSeenAt     time.Time               `json:"last_seen_at"`
-	DiscoveryCount int64                   `json:"discovery_count"`
-	CreatedAt      time.Time               `json:"created_at"`
-	UpdatedAt      time.Time               `json:"updated_at"`
-	SourceCount    int64                   `json:"source_count"`
-	KeywordCount   int64                   `json:"keyword_count"`
-	SourcePreview  []ResourceSourcePreview `json:"source_preview,omitempty"`
-	Sources        []ResourceSource        `json:"sources,omitempty"`
-	Keywords       []ResourceKeyword       `json:"keywords,omitempty"`
+	ID                   int64                   `json:"id"`
+	NormalizedURL        string                  `json:"normalized_url"`
+	URL                  string                  `json:"url"`
+	Password             string                  `json:"password,omitempty"`
+	Platform             string                  `json:"platform,omitempty"`
+	Title                string                  `json:"title,omitempty"`
+	Content              string                  `json:"content,omitempty"`
+	LinkDatetime         *time.Time              `json:"link_datetime,omitempty"`
+	CheckStatus          string                  `json:"check_status"`
+	LastCheckedAt        *time.Time              `json:"last_checked_at,omitempty"`
+	CandidateCheckStatus *string                 `json:"candidate_check_status,omitempty"`
+	CandidateCheckedAt   *time.Time              `json:"candidate_checked_at,omitempty"`
+	FirstSeenAt          time.Time               `json:"first_seen_at"`
+	LastSeenAt           time.Time               `json:"last_seen_at"`
+	DiscoveryCount       int64                   `json:"discovery_count"`
+	CreatedAt            time.Time               `json:"created_at"`
+	UpdatedAt            time.Time               `json:"updated_at"`
+	SourceCount          int64                   `json:"source_count"`
+	KeywordCount         int64                   `json:"keyword_count"`
+	SourcePreview        []ResourceSourcePreview `json:"source_preview,omitempty"`
+	Sources              []ResourceSource        `json:"sources,omitempty"`
+	Keywords             []ResourceKeyword       `json:"keywords,omitempty"`
 }
 
 type ResourceSourcePreview struct {
@@ -178,11 +180,12 @@ type UpsertResult struct {
 }
 
 type UpsertSummary struct {
-	Seen       int `json:"seen"`
-	Inserted   int `json:"inserted"`
-	Updated    int `json:"updated"`
-	Duplicates int `json:"duplicates"`
-	Skipped    int `json:"skipped"`
+	Seen            int        `json:"seen"`
+	Inserted        int        `json:"inserted"`
+	Updated         int        `json:"updated"`
+	Duplicates      int        `json:"duplicates"`
+	Skipped         int        `json:"skipped"`
+	CheckCandidates []Resource `json:"-"`
 }
 
 type Keyword struct {

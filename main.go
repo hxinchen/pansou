@@ -267,10 +267,12 @@ func startServer() {
 			collectionRepository,
 			integration.LinkChecker{Service: api.SharedCheckService()},
 			collection.LinkCheckQueueConfig{
-				Workers: config.AppConfig.LinkCheckWorkers,
-				Buffer:  1024,
-				Timeout: 30 * time.Second,
-				OnError: func(err error) { log.Printf("链接检测任务: %v", err) },
+				Workers:      config.AppConfig.LinkCheckWorkers,
+				Buffer:       1024,
+				Timeout:      30 * time.Second,
+				PollInterval: time.Minute,
+				BatchSize:    500,
+				OnError:      func(err error) { log.Printf("链接检测任务: %v", err) },
 			},
 		)
 		var sourceProvider collection.SourceProvider = integration.ConfiguredSources(config.AppConfig.DefaultChannels, pluginManager)
@@ -285,7 +287,6 @@ func startServer() {
 			collection.Config{
 				ScheduleInterval: config.AppConfig.CollectionInterval,
 				DefaultCooldown:  config.AppConfig.DefaultCooldown,
-				LinkCheckStale:   collection.DefaultLinkCheckStale,
 				MaxSourceRetries: 2,
 				OnError:          func(err error) { log.Printf("采集任务: %v", err) },
 			},
@@ -294,17 +295,6 @@ func startServer() {
 			store.Close()
 			log.Fatalf("启动采集调度器失败: %v", err)
 		}
-		pending, pendingErr := collectionRepository.PendingLinkChecks(appCtx, 1000)
-		if pendingErr != nil {
-			log.Printf("恢复待检测链接失败: %v", pendingErr)
-		} else {
-			for _, candidate := range pending {
-				if err := linkChecks.Enqueue(appCtx, candidate); err != nil && !errors.Is(err, collection.ErrQueueFull) {
-					log.Printf("恢复链接检测任务失败: %v", err)
-				}
-			}
-		}
-
 		hybrid := service.NewHybridSearchService(liveSearchService, store, config.AppConfig.HybridRefreshAfter)
 		hybrid.SetExternalResultRecorder(func(ctx context.Context, keyword string, response model.SearchResponse) error {
 			_, err := runner.RecordExternal(ctx, keyword, response)

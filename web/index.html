@@ -252,7 +252,13 @@
               <p class="eyebrow">LIBRARY</p>
               <h1 id="resources-title">资源库</h1>
             </div>
-            <span id="resource-total-label" class="total-label">0 条资源</span>
+            <div class="resource-heading-actions">
+              <span id="resource-total-label" class="total-label">0 条资源</span>
+              <button class="button secondary" type="button" data-action="open-link-check-policy" aria-haspopup="dialog" aria-controls="link-check-policy-dialog">
+                <i data-lucide="settings-2" aria-hidden="true"></i>
+                <span>检测策略</span>
+              </button>
+            </div>
           </div>
 
           <form id="resource-filters" class="filter-bar" aria-label="资源筛选">
@@ -915,6 +921,74 @@
       </header>
       <div id="resource-detail" class="dialog-body"></div>
     </div>
+  </dialog>
+
+  <dialog id="link-check-policy-dialog" class="dialog form-dialog link-check-policy-dialog" aria-labelledby="link-check-policy-title" aria-describedby="link-check-policy-note">
+    <form id="link-check-policy-form" class="dialog-shell">
+      <header class="dialog-header">
+        <div>
+          <p class="eyebrow">LINK CHECK</p>
+          <h2 id="link-check-policy-title">检测策略</h2>
+        </div>
+        <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
+      </header>
+      <div class="dialog-body link-check-policy-body">
+        <label class="toggle-field link-check-policy-switch">
+          <span>
+            <strong>启用周期复检</strong>
+            <small>按统一周期重新检测选中的链接状态</small>
+          </span>
+          <input id="link-check-policy-enabled" name="enabled" type="checkbox">
+          <span class="toggle" aria-hidden="true"></span>
+        </label>
+
+        <section class="link-check-policy-section" aria-labelledby="link-check-status-title">
+          <div class="link-check-policy-section-heading">
+            <h3 id="link-check-status-title">参与复检的状态</h3>
+            <p>策略关闭时仍可预先编辑，重新启用后按此范围生效。</p>
+          </div>
+          <div class="link-check-status-grid">
+            <label class="link-check-status-option"><input name="statuses" type="checkbox" value="valid" checked><span><strong>有效</strong><small>valid</small></span></label>
+            <label class="link-check-status-option"><input name="statuses" type="checkbox" value="unknown" checked><span><strong>未知</strong><small>unknown</small></span></label>
+            <label class="link-check-status-option"><input name="statuses" type="checkbox" value="invalid"><span><strong>失效</strong><small>invalid</small></span></label>
+            <label class="link-check-status-option"><input name="statuses" type="checkbox" value="expired"><span><strong>已过期</strong><small>expired</small></span></label>
+            <label class="link-check-status-option"><input name="statuses" type="checkbox" value="cancelled"><span><strong>取消分享</strong><small>cancelled</small></span></label>
+            <label class="link-check-status-option"><input name="statuses" type="checkbox" value="violation"><span><strong>违规</strong><small>violation</small></span></label>
+            <label class="link-check-status-option"><input name="statuses" type="checkbox" value="locked"><span><strong>需提取码</strong><small>locked</small></span></label>
+          </div>
+        </section>
+
+        <section class="link-check-policy-section" aria-labelledby="link-check-interval-title">
+          <div class="link-check-policy-section-heading">
+            <h3 id="link-check-interval-title">统一检测周期</h3>
+            <p>支持 1 小时至 365 天，保存时统一换算为整小时。</p>
+          </div>
+          <div class="link-check-interval-row">
+            <label class="field">
+              <span>周期数值 <em>*</em></span>
+              <input id="link-check-interval-value" name="interval_value" type="number" min="1" max="365" step="1" value="7" inputmode="numeric" required>
+            </label>
+            <label class="field">
+              <span>单位</span>
+              <select id="link-check-interval-unit" name="interval_unit">
+                <option value="hours">小时</option>
+                <option value="days" selected>天</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <div id="link-check-policy-summary" class="link-check-policy-summary" aria-live="polite"></div>
+        <p id="link-check-policy-note" class="link-check-policy-note"><i data-lucide="info" aria-hidden="true"></i><span>新发现链接始终立即检测，以上设置仅控制后续周期复检。</span></p>
+        <p id="link-check-policy-updated" class="link-check-policy-updated" hidden></p>
+        <div id="link-check-policy-error" class="inline-alert error" role="alert" hidden></div>
+      </div>
+      <footer class="dialog-footer">
+        <button class="button secondary" type="button" data-action="close-dialog">取消</button>
+        <button id="link-check-policy-retry" class="button secondary" type="button" data-action="retry-link-check-policy" hidden><i data-lucide="refresh-cw" aria-hidden="true"></i><span>重新加载</span></button>
+        <button id="link-check-policy-save" class="button primary" type="submit"><i data-lucide="save" aria-hidden="true"></i><span>保存策略</span></button>
+      </footer>
+    </form>
   </dialog>
 
   <dialog id="keyword-dialog" class="dialog form-dialog wide-dialog keyword-dialog" aria-labelledby="keyword-dialog-title">

@@ -68,33 +68,21 @@ func TestSourceSummaryJSONMap(t *testing.T) {
 }
 
 func TestShouldQueueLinkCheck(t *testing.T) {
-	now := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
 	base := LinkCheckCandidate{ResourceID: 1, URL: "https://example.test/share"}
-	if !ShouldQueueLinkCheck(LinkCheckCandidate{ResourceID: 1, URL: base.URL, IsNew: true, Status: DetectionPending}, now, DefaultLinkCheckStale) {
+	if !ShouldQueueLinkCheck(LinkCheckCandidate{ResourceID: 1, URL: base.URL, IsNew: true, Status: DetectionPending}) {
 		t.Fatal("new resource should be queued")
 	}
-	recent := now.Add(-6 * 24 * time.Hour)
-	base.Status = DetectionInvalid
-	base.LastCheckedAt = &recent
-	if ShouldQueueLinkCheck(base, now, DefaultLinkCheckStale) {
-		t.Fatal("recent invalid resource should not be rechecked")
-	}
-	stale := now.Add(-7 * 24 * time.Hour)
-	base.LastCheckedAt = &stale
-	if !ShouldQueueLinkCheck(base, now, DefaultLinkCheckStale) {
-		t.Fatal("seven-day-old invalid resource should be rechecked")
-	}
-	base.Status = DetectionExpired
-	if !ShouldQueueLinkCheck(base, now, DefaultLinkCheckStale) {
-		t.Fatal("stale expired resource should be rechecked")
-	}
-	base.Status = DetectionLocked
-	if !ShouldQueueLinkCheck(base, now, DefaultLinkCheckStale) {
-		t.Fatal("stale locked resource should be rechecked")
+	base.Status = DetectionPending
+	if !ShouldQueueLinkCheck(base) {
+		t.Fatal("pending resource should be queued")
 	}
 	base.Status = DetectionValid
-	if ShouldQueueLinkCheck(base, now, DefaultLinkCheckStale) {
-		t.Fatal("valid resource should not be periodically queued")
+	if ShouldQueueLinkCheck(base) {
+		t.Fatal("terminal resources are owned by the policy scheduler")
+	}
+	base.Status = DetectionInvalid
+	if ShouldQueueLinkCheck(base) {
+		t.Fatal("rediscovered failures should not bypass the global policy")
 	}
 }
 

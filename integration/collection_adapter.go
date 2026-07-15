@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -114,19 +113,10 @@ func (r *CollectionRepository) Ingest(ctx context.Context, request collection.In
 	if err != nil {
 		return collection.IngestResult{}, err
 	}
-	due, dueErr := r.Store.ListResourcesDueForCheck(ctx, 500, request.DiscoveredAt.Add(-collection.DefaultLinkCheckStale))
-	if dueErr != nil {
-		log.Printf("list resources awaiting link checks: %v", dueErr)
-	}
-	candidates := make([]collection.LinkCheckCandidate, 0, len(due))
-	for _, resource := range due {
-		candidates = append(candidates, collection.LinkCheckCandidate{
-			ResourceID: resource.ID, URL: resource.URL, Password: resource.Password, Platform: resource.Platform,
-			Status: collection.DetectionStatus(resource.CheckStatus), IsNew: resource.LastCheckedAt == nil,
-			LastCheckedAt: resource.LastCheckedAt,
-		})
-	}
-	return collection.IngestResult{New: summary.Inserted, Duplicate: summary.Duplicates, CheckCandidates: candidates}, nil
+	return collection.IngestResult{
+		New: summary.Inserted, Duplicate: summary.Duplicates,
+		CheckCandidates: toLinkCheckCandidates(summary.CheckCandidates),
+	}, nil
 }
 
 func collectionSourceIdentity(source collection.Source) (string, string) {
@@ -204,14 +194,25 @@ func (r *CollectionRepository) ClaimPending(ctx context.Context) (*collection.Cl
 }
 
 func (r *CollectionRepository) CompleteLinkCheck(ctx context.Context, result collection.LinkCheckResult) error {
-	return r.Store.UpdateResourceCheck(ctx, result.ResourceID, string(result.Status), result.CheckedAt)
+	return r.Store.CompleteResourceCheck(ctx, result.ResourceID, string(result.Status), result.CheckedAt)
 }
 
-func (r *CollectionRepository) PendingLinkChecks(ctx context.Context, limit int) ([]collection.LinkCheckCandidate, error) {
-	resources, err := r.Store.ListResourcesDueForCheck(ctx, limit, time.Now().Add(-collection.DefaultLinkCheckStale))
+func (r *CollectionRepository) DueLinkChecks(ctx context.Context, limit int, at time.Time) ([]collection.LinkCheckCandidate, error) {
+	if r == nil || r.Store == nil {
+		return nil, errors.New("resource library is disabled")
+	}
+	policy, err := r.Store.GetLinkCheckPolicy(ctx)
 	if err != nil {
 		return nil, err
 	}
+	resources, err := r.Store.ListResourcesDueForCheck(ctx, policy, limit, at)
+	if err != nil {
+		return nil, err
+	}
+	return toLinkCheckCandidates(resources), nil
+}
+
+func toLinkCheckCandidates(resources []storage.Resource) []collection.LinkCheckCandidate {
 	result := make([]collection.LinkCheckCandidate, 0, len(resources))
 	for _, resource := range resources {
 		result = append(result, collection.LinkCheckCandidate{
@@ -220,7 +221,7 @@ func (r *CollectionRepository) PendingLinkChecks(ctx context.Context, limit int)
 			LastCheckedAt: resource.LastCheckedAt,
 		})
 	}
-	return result, nil
+	return result
 }
 
 func toCollectionKeyword(keyword storage.Keyword) collection.Keyword {

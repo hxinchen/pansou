@@ -151,11 +151,17 @@ func (f *fakeRunRepository) ClaimPending(context.Context) (*ClaimedRunItem, erro
 type fakeEnqueuer struct {
 	mu         sync.Mutex
 	candidates []LinkCheckCandidate
+	calls      int
+	fullAt     int
 }
 
 func (f *fakeEnqueuer) Enqueue(_ context.Context, candidate LinkCheckCandidate) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
+	if f.fullAt > 0 && f.calls >= f.fullAt {
+		return ErrQueueFull
+	}
 	f.candidates = append(f.candidates, candidate)
 	return nil
 }
@@ -166,6 +172,21 @@ func runnerTestConfig(now time.Time) Config {
 	config.Now = func() time.Time { return now }
 	config.RetryDelay = func(int) time.Duration { return 0 }
 	return config
+}
+
+func TestEnqueueChecksStopsWhenQueueIsFull(t *testing.T) {
+	enqueuer := &fakeEnqueuer{fullAt: 2}
+	runner := &Runner{checks: enqueuer}
+	runner.enqueueChecks(context.Background(), []LinkCheckCandidate{
+		{ResourceID: 1, URL: "https://example.test/1", Status: DetectionPending},
+		{ResourceID: 2, URL: "https://example.test/2", Status: DetectionPending},
+		{ResourceID: 3, URL: "https://example.test/3", Status: DetectionPending},
+	})
+	enqueuer.mu.Lock()
+	defer enqueuer.mu.Unlock()
+	if enqueuer.calls != 2 || len(enqueuer.candidates) != 1 || enqueuer.candidates[0].ResourceID != 1 {
+		t.Fatalf("enqueue calls=%d candidates=%+v", enqueuer.calls, enqueuer.candidates)
+	}
 }
 
 func TestRunnerManualCooldownRetryAndPartialSourceFailure(t *testing.T) {

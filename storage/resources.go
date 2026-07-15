@@ -72,20 +72,31 @@ func sanitizeUTF8Value(value any) any {
 
 const resourceColumns = `
 	id, normalized_url, url, password, platform, title, content,
-	link_datetime, check_status, last_checked_at, first_seen_at, last_seen_at,
+	link_datetime, check_status, last_checked_at, candidate_check_status, candidate_checked_at,
+	first_seen_at, last_seen_at,
 	discovery_count, created_at, updated_at`
 
 const resourceListColumns = `
 	r.id, r.normalized_url, r.url, r.platform, left(r.title, 500),
-	r.link_datetime, r.check_status, r.last_checked_at, r.first_seen_at, r.last_seen_at,
+	r.link_datetime, r.check_status, r.last_checked_at, r.candidate_check_status, r.candidate_checked_at,
+	r.first_seen_at, r.last_seen_at,
 	r.discovery_count, r.created_at, r.updated_at`
+
+const maxImmediateLinkCheckCandidates = 500
+
+func addImmediateLinkCheckCandidate(summary *UpsertSummary, resource Resource) {
+	if resource.CheckStatus == CheckPending && len(summary.CheckCandidates) < maxImmediateLinkCheckCandidates {
+		summary.CheckCandidates = append(summary.CheckCandidates, resource)
+	}
+}
 
 func scanResource(row rowScanner) (Resource, error) {
 	var resource Resource
 	err := row.Scan(
 		&resource.ID, &resource.NormalizedURL, &resource.URL, &resource.Password,
 		&resource.Platform, &resource.Title, &resource.Content, &resource.LinkDatetime,
-		&resource.CheckStatus, &resource.LastCheckedAt, &resource.FirstSeenAt,
+		&resource.CheckStatus, &resource.LastCheckedAt, &resource.CandidateCheckStatus,
+		&resource.CandidateCheckedAt, &resource.FirstSeenAt,
 		&resource.LastSeenAt, &resource.DiscoveryCount, &resource.CreatedAt, &resource.UpdatedAt,
 	)
 	return resource, err
@@ -96,7 +107,8 @@ func scanResourceListItem(row rowScanner) (Resource, error) {
 	err := row.Scan(
 		&resource.ID, &resource.NormalizedURL, &resource.URL, &resource.Platform,
 		&resource.Title, &resource.LinkDatetime, &resource.CheckStatus,
-		&resource.LastCheckedAt, &resource.FirstSeenAt, &resource.LastSeenAt,
+		&resource.LastCheckedAt, &resource.CandidateCheckStatus, &resource.CandidateCheckedAt,
+		&resource.FirstSeenAt, &resource.LastSeenAt,
 		&resource.DiscoveryCount, &resource.CreatedAt, &resource.UpdatedAt,
 	)
 	return resource, err
@@ -159,14 +171,10 @@ func (s *Store) upsertResourceTx(ctx context.Context, tx pgx.Tx, input ResourceI
 				WHEN EXCLUDED.link_datetime IS NULL THEN resources.link_datetime
 				ELSE GREATEST(resources.link_datetime, EXCLUDED.link_datetime)
 			END,
-			check_status = CASE
-				WHEN EXCLUDED.last_checked_at IS NOT NULL THEN EXCLUDED.check_status
-				WHEN resources.check_status IN ('invalid','expired','cancelled','violation','locked','unknown')
-					AND (resources.last_checked_at IS NULL OR resources.last_checked_at <= EXCLUDED.last_seen_at - interval '7 days')
-				THEN 'pending'
-				ELSE resources.check_status
-			END,
+			check_status = CASE WHEN EXCLUDED.last_checked_at IS NOT NULL THEN EXCLUDED.check_status ELSE resources.check_status END,
 			last_checked_at = COALESCE(EXCLUDED.last_checked_at, resources.last_checked_at),
+			candidate_check_status = CASE WHEN EXCLUDED.last_checked_at IS NOT NULL THEN NULL ELSE resources.candidate_check_status END,
+			candidate_checked_at = CASE WHEN EXCLUDED.last_checked_at IS NOT NULL THEN NULL ELSE resources.candidate_checked_at END,
 			first_seen_at = LEAST(resources.first_seen_at, EXCLUDED.first_seen_at),
 			last_seen_at = GREATEST(resources.last_seen_at, EXCLUDED.last_seen_at),
 			discovery_count = resources.discovery_count + 1,
@@ -200,7 +208,8 @@ func scanResourceWithInserted(row rowScanner, inserted *bool) (Resource, error) 
 	err := row.Scan(
 		&resource.ID, &resource.NormalizedURL, &resource.URL, &resource.Password,
 		&resource.Platform, &resource.Title, &resource.Content, &resource.LinkDatetime,
-		&resource.CheckStatus, &resource.LastCheckedAt, &resource.FirstSeenAt,
+		&resource.CheckStatus, &resource.LastCheckedAt, &resource.CandidateCheckStatus,
+		&resource.CandidateCheckedAt, &resource.FirstSeenAt,
 		&resource.LastSeenAt, &resource.DiscoveryCount, &resource.CreatedAt, &resource.UpdatedAt,
 		inserted,
 	)
@@ -348,6 +357,7 @@ func (s *Store) upsertSearchResponse(ctx context.Context, keyword, keywordType, 
 			summary.Seen++
 			if upserted.Inserted {
 				summary.Inserted++
+				addImmediateLinkCheckCandidate(&summary, upserted.Resource)
 			} else {
 				summary.Updated++
 			}
@@ -386,6 +396,7 @@ func (s *Store) upsertSearchResponse(ctx context.Context, keyword, keywordType, 
 			summary.Seen++
 			if upserted.Inserted {
 				summary.Inserted++
+				addImmediateLinkCheckCandidate(&summary, upserted.Resource)
 			} else {
 				summary.Updated++
 			}
@@ -851,7 +862,9 @@ func (s *Store) UpdateResourceCheck(ctx context.Context, id int64, status string
 		checkedAt = s.now()
 	}
 	command, err := s.pool.Exec(ctx, `UPDATE resources
-		SET check_status=$2, last_checked_at=$3, updated_at=now() WHERE id=$1`, id, status, checkedAt)
+		SET check_status=$2, last_checked_at=$3,
+			candidate_check_status=NULL, candidate_checked_at=NULL, updated_at=now()
+		WHERE id=$1`, id, status, checkedAt)
 	if err != nil {
 		return fmt.Errorf("update resource check: %w", err)
 	}
@@ -863,26 +876,106 @@ func (s *Store) UpdateResourceCheck(ctx context.Context, id int64, status string
 
 // CompleteResourceCheck records the terminal result of an asynchronous link check.
 func (s *Store) CompleteResourceCheck(ctx context.Context, id int64, status string, checkedAt time.Time) error {
-	return s.UpdateResourceCheck(ctx, id, status, checkedAt)
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("storage is disabled")
+	}
+	if !validCheckStatus(status) || status == CheckPending {
+		return fmt.Errorf("%w: completed check status %q", ErrInvalid, status)
+	}
+	if checkedAt.IsZero() {
+		checkedAt = s.now()
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin complete resource check: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var currentStatus string
+	var candidateStatus *string
+	var candidateCheckedAt *time.Time
+	err = tx.QueryRow(ctx, `SELECT check_status, candidate_check_status, candidate_checked_at
+		FROM resources WHERE id=$1 FOR UPDATE`, id).Scan(&currentStatus, &candidateStatus, &candidateCheckedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock resource check: %w", err)
+	}
+
+	if !definitiveNegativeCheckStatus(status) || !checkStatusNeedsNegativeConfirmation(currentStatus) {
+		_, err = tx.Exec(ctx, `UPDATE resources
+			SET check_status=$2, last_checked_at=$3,
+				candidate_check_status=NULL, candidate_checked_at=NULL, updated_at=now()
+			WHERE id=$1`, id, status, checkedAt)
+	} else if candidateStatus != nil && candidateCheckedAt != nil && !checkedAt.Before(candidateCheckedAt.Add(time.Hour)) {
+		_, err = tx.Exec(ctx, `UPDATE resources
+			SET check_status=$2, last_checked_at=$3,
+				candidate_check_status=NULL, candidate_checked_at=NULL, updated_at=now()
+			WHERE id=$1`, id, status, checkedAt)
+	} else if candidateStatus != nil && candidateCheckedAt != nil {
+		_, err = tx.Exec(ctx, `UPDATE resources
+			SET last_checked_at=$3, candidate_check_status=$2, updated_at=now()
+			WHERE id=$1`, id, status, checkedAt)
+	} else {
+		_, err = tx.Exec(ctx, `UPDATE resources
+			SET last_checked_at=$3, candidate_check_status=$2,
+				candidate_checked_at=$3, updated_at=now()
+			WHERE id=$1`, id, status, checkedAt)
+	}
+	if err != nil {
+		return fmt.Errorf("complete resource check: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit resource check: %w", err)
+	}
+	return nil
 }
 
-func (s *Store) ListResourcesDueForCheck(ctx context.Context, limit int, staleBefore time.Time) ([]Resource, error) {
+func (s *Store) ListResourcesDueForCheck(ctx context.Context, policy LinkCheckPolicy, limit int, at time.Time) ([]Resource, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("storage is disabled")
 	}
-	if limit <= 0 || limit > 1000 {
+	if limit <= 0 {
 		limit = 100
 	}
-	if staleBefore.IsZero() {
-		staleBefore = s.now().Add(-7 * 24 * time.Hour)
+	if limit > 1000 {
+		limit = 1000
 	}
+	normalizedPolicy, err := normalizeLinkCheckPolicy(policy.Enabled, policy.Statuses, policy.IntervalSeconds)
+	if err != nil {
+		return nil, err
+	}
+	if at.IsZero() {
+		at = s.now()
+	}
+	confirmationDueBefore := at.Add(-time.Hour)
+	regularDueBefore := at.Add(-time.Duration(normalizedPolicy.IntervalSeconds) * time.Second)
 	rows, err := s.pool.Query(ctx, "SELECT "+resourceColumns+` FROM resources
-		WHERE check_status='pending'
-			OR (check_status IN ('invalid','expired','cancelled','violation','locked','unknown')
-				AND (last_checked_at IS NULL OR last_checked_at <= $1)
-				AND (last_checked_at IS NULL OR last_seen_at > last_checked_at))
-		ORDER BY CASE WHEN check_status='pending' THEN 0 ELSE 1 END, last_seen_at DESC
-		LIMIT $2`, staleBefore, limit)
+		WHERE (check_status='pending' AND candidate_check_status IS NULL)
+			OR (check_status='pending'
+				AND candidate_check_status IS NOT NULL
+				AND candidate_checked_at <= $3)
+			OR ($1::boolean
+				AND check_status=ANY($2::text[])
+				AND (
+					(candidate_check_status IS NOT NULL AND candidate_checked_at <= $3)
+					OR (candidate_check_status IS NULL AND (last_checked_at IS NULL OR last_checked_at <= $4))
+				))
+		ORDER BY
+			CASE
+				WHEN check_status='pending' AND candidate_check_status IS NULL THEN 0
+				WHEN candidate_check_status IS NOT NULL THEN 1
+				ELSE 2
+			END,
+			CASE
+				WHEN check_status='pending' AND candidate_check_status IS NULL THEN first_seen_at
+				WHEN candidate_check_status IS NOT NULL THEN candidate_checked_at
+				ELSE last_checked_at
+			END ASC NULLS FIRST,
+			id ASC
+		LIMIT $5`, normalizedPolicy.Enabled, normalizedPolicy.Statuses, confirmationDueBefore, regularDueBefore, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list resources due for check: %w", err)
 	}
@@ -896,6 +989,24 @@ func (s *Store) ListResourcesDueForCheck(ctx context.Context, limit int, staleBe
 		resources = append(resources, resource)
 	}
 	return resources, rows.Err()
+}
+
+func definitiveNegativeCheckStatus(status string) bool {
+	switch status {
+	case CheckInvalid, CheckExpired, CheckCancelled, CheckViolation:
+		return true
+	default:
+		return false
+	}
+}
+
+func checkStatusNeedsNegativeConfirmation(status string) bool {
+	switch status {
+	case CheckPending, CheckValid, CheckUnknown, CheckLocked:
+		return true
+	default:
+		return false
+	}
 }
 
 func validCheckStatus(status string) bool {

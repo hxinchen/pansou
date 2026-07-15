@@ -14,7 +14,6 @@ import (
 type Config struct {
 	ScheduleInterval time.Duration
 	DefaultCooldown  time.Duration
-	LinkCheckStale   time.Duration
 	MaxSourceRetries int
 	DisableScheduler bool
 	Now              func() time.Time
@@ -26,7 +25,6 @@ func DefaultConfig() Config {
 	return Config{
 		ScheduleInterval: DefaultScheduleInterval,
 		DefaultCooldown:  DefaultCooldown,
-		LinkCheckStale:   DefaultLinkCheckStale,
 		MaxSourceRetries: 2,
 		Now:              time.Now,
 		RetryDelay: func(retry int) time.Duration {
@@ -65,9 +63,6 @@ func NewRunner(repository RunRepository, searcher LiveSearcher, sources SourcePr
 	}
 	if config.DefaultCooldown <= 0 {
 		config.DefaultCooldown = defaults.DefaultCooldown
-	}
-	if config.LinkCheckStale <= 0 {
-		config.LinkCheckStale = defaults.LinkCheckStale
 	}
 	if config.MaxSourceRetries <= 0 {
 		config.MaxSourceRetries = defaults.MaxSourceRetries
@@ -747,12 +742,14 @@ func (r *Runner) enqueueChecks(ctx context.Context, candidates []LinkCheckCandid
 	if r.checks == nil {
 		return
 	}
-	now := r.now()
 	for _, candidate := range candidates {
-		if !ShouldQueueLinkCheck(candidate, now, r.config.LinkCheckStale) {
+		if !ShouldQueueLinkCheck(candidate) {
 			continue
 		}
 		if err := r.checks.Enqueue(ctx, candidate); err != nil {
+			if errors.Is(err, ErrQueueFull) {
+				return
+			}
 			r.report(fmt.Errorf("enqueue link check for resource %d: %w", candidate.ResourceID, err))
 		}
 	}

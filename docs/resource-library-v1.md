@@ -45,6 +45,20 @@ Optional collection tuning variables keep conservative defaults:
 | `LINK_CHECK_WORKERS` | `4` | Concurrent asynchronous link checks |
 | `HYBRID_REFRESH_AFTER_MINUTES` | `60` | Age before a database hit triggers a background live refresh |
 
+## Periodic link rechecks
+
+Administrators can open **Resource library → Link-check policy** in `/admin/`
+to select terminal states for periodic rechecking and set one shared interval
+from one hour through 365 days. The policy is stored in PostgreSQL and is
+reloaded by the in-process scheduler within one minute; no external cron or
+service restart is required.
+
+The migrated default is disabled with `valid` and `unknown` selected and a
+seven-day interval. Newly discovered `pending` resources are always checked,
+even when periodic rechecks are disabled. A visible resource must receive two
+definitive negative results at least one hour apart before its persisted state
+changes to `invalid`, `expired`, `cancelled`, or `violation`.
+
 ## Daily backup
 
 `scripts/deploy/update-backend.ps1` installs the following job idempotently on
@@ -70,4 +84,6 @@ docker exec pansou-postgres pg_restore --list /backups/pansou-YYYYMMDDTHHMMSSZ.d
 3. Add a keyword in `/admin/`, run it, and watch the run finish.
 4. Search the same keyword twice and confirm the resource count does not grow
    for duplicate normalized URLs.
-5. Execute `/bin/sh scripts/backup-postgres.sh` once and inspect the generated dump.
+5. Open the resource-library link-check policy and confirm its disabled,
+   seven-day default before explicitly enabling it.
+6. Execute `/bin/sh scripts/backup-postgres.sh` once and inspect the generated dump.

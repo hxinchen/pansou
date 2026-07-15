@@ -89,4 +89,5 @@ func (f LinkCheckerFunc) Check(ctx context.Context, candidate LinkCheckCandidate
 
 type LinkCheckRepository interface {
 	CompleteLinkCheck(context.Context, LinkCheckResult) error
+	DueLinkChecks(context.Context, int, time.Time) ([]LinkCheckCandidate, error)
 }

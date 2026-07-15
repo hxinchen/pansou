@@ -14,7 +14,6 @@ import (
 const (
 	DefaultScheduleInterval = time.Minute
 	DefaultCooldown         = 7 * 24 * time.Hour
-	DefaultLinkCheckStale   = 7 * 24 * time.Hour
 )
 
 var (
@@ -282,28 +281,11 @@ func ResultCount(response model.SearchResponse) int {
 	return count
 }
 
-func ShouldQueueLinkCheck(candidate LinkCheckCandidate, now time.Time, staleAfter time.Duration) bool {
+func ShouldQueueLinkCheck(candidate LinkCheckCandidate) bool {
 	if candidate.ResourceID == 0 || strings.TrimSpace(candidate.URL) == "" {
 		return false
 	}
-	if candidate.IsNew {
-		return true
-	}
-	if candidate.Status != DetectionInvalid &&
-		candidate.Status != DetectionExpired &&
-		candidate.Status != DetectionCancelled &&
-		candidate.Status != DetectionViolation &&
-		candidate.Status != DetectionLocked &&
-		candidate.Status != DetectionUnknown {
-		return false
-	}
-	if candidate.LastCheckedAt == nil {
-		return true
-	}
-	if staleAfter <= 0 {
-		staleAfter = DefaultLinkCheckStale
-	}
-	return !now.Before(candidate.LastCheckedAt.Add(staleAfter))
+	return candidate.IsNew || candidate.Status == DetectionPending
 }
 
 func prepareKeywords(keywords []Keyword, now time.Time, force bool) []Keyword {
