@@ -208,6 +208,19 @@ func upsertResourceKeyword(ctx context.Context, tx pgx.Tx, resourceID int64, see
 }
 
 func (s *Store) UpsertSearchResponse(ctx context.Context, keyword, keywordType, trigger string, response model.SearchResponse) (UpsertSummary, error) {
+	return s.upsertSearchResponse(ctx, keyword, keywordType, trigger, resourceSourceRef{}, response)
+}
+
+// UpsertSearchResponseFromSource persists a collector response using the
+// source that was actually executed. TG and plugin collectors are authoritative
+// because result-level Channel/UniqueID values are optional and not uniformly
+// implemented by plugins. Other callers retain the legacy result-level source
+// inference used by UpsertSearchResponse.
+func (s *Store) UpsertSearchResponseFromSource(ctx context.Context, keyword, keywordType, trigger, sourceType, sourceKey string, response model.SearchResponse) (UpsertSummary, error) {
+	return s.upsertSearchResponse(ctx, keyword, keywordType, trigger, canonicalCollectionSource(sourceType, sourceKey), response)
+}
+
+func (s *Store) upsertSearchResponse(ctx context.Context, keyword, keywordType, trigger string, authoritative resourceSourceRef, response model.SearchResponse) (UpsertSummary, error) {
 	if s == nil || s.pool == nil {
 		return UpsertSummary{}, fmt.Errorf("storage is disabled")
 	}
@@ -228,7 +241,11 @@ func (s *Store) UpsertSearchResponse(ctx context.Context, keyword, keywordType, 
 				continue
 			}
 			sourceType, sourceKey := parseMergedSource(link.Source)
-			explicitSources[normalizedURL] = resourceSourceRef{sourceType: sourceType, sourceKey: sourceKey}
+			explicitSources[normalizedURL] = resourceSourceRef{
+				sourceType: sourceType,
+				sourceKey:  sourceKey,
+				subSource:  strings.TrimSpace(link.SubSource),
+			}
 		}
 	}
 	for _, result := range response.Results {
@@ -246,8 +263,16 @@ func (s *Store) UpsertSearchResponse(ctx context.Context, keyword, keywordType, 
 				summary.Skipped++
 				continue
 			}
-			if explicit, exists := explicitSources[normalizedURL]; exists {
+			explicit := explicitSources[normalizedURL]
+			if authoritative.valid() {
+				sourceType, sourceKey = authoritative.sourceType, authoritative.sourceKey
+			} else if explicit.valid() {
 				sourceType, sourceKey = explicit.sourceType, explicit.sourceKey
+			}
+			subSource := strings.TrimSpace(firstNonEmpty(result.SubSource, explicit.subSource))
+			metadata := map[string]any{"tags": result.Tags, "images": result.Images, "trigger": trigger}
+			if subSource != "" {
+				metadata["sub_source"] = subSource
 			}
 			input := ResourceInput{
 				URL: cleanURLInput(link.URL), Password: link.Password, Platform: link.Type,
@@ -257,7 +282,7 @@ func (s *Store) UpsertSearchResponse(ctx context.Context, keyword, keywordType, 
 					SourceType: sourceType, SourceKey: sourceKey,
 					SourceIdentity: firstNonEmpty(result.UniqueID, result.MessageID), MessageID: result.MessageID,
 					UniqueID: result.UniqueID, Title: result.Title, Content: result.Content,
-					DiscoveredAt: discoveredAt, Metadata: map[string]any{"tags": result.Tags, "images": result.Images, "trigger": trigger},
+					DiscoveredAt: discoveredAt, Metadata: metadata,
 				},
 				Keyword: keyword, KeywordType: keywordType,
 			}
@@ -285,11 +310,18 @@ func (s *Store) UpsertSearchResponse(ctx context.Context, keyword, keywordType, 
 				continue
 			}
 			sourceType, sourceKey := parseMergedSource(link.Source)
+			if authoritative.valid() {
+				sourceType, sourceKey = authoritative.sourceType, authoritative.sourceKey
+			}
+			metadata := map[string]any{"images": link.Images, "trigger": trigger}
+			if subSource := strings.TrimSpace(link.SubSource); subSource != "" {
+				metadata["sub_source"] = subSource
+			}
 			input := ResourceInput{
 				URL: cleanURLInput(link.URL), Password: link.Password, Platform: platform, Title: link.Note,
 				Content: link.Note, LinkDatetime: timePointer(link.Datetime), DiscoveredAt: discoveredAt,
 				Source: ResourceSourceInput{SourceType: sourceType, SourceKey: sourceKey, Title: link.Note,
-					DiscoveredAt: discoveredAt, Metadata: map[string]any{"images": link.Images, "trigger": trigger}},
+					DiscoveredAt: discoveredAt, Metadata: metadata},
 				Keyword: keyword, KeywordType: keywordType,
 			}
 			upserted, err := s.upsertResourceTx(ctx, tx, input)
@@ -315,6 +347,26 @@ func (s *Store) UpsertSearchResponse(ctx context.Context, keyword, keywordType, 
 type resourceSourceRef struct {
 	sourceType string
 	sourceKey  string
+	subSource  string
+}
+
+func (r resourceSourceRef) valid() bool {
+	return strings.TrimSpace(r.sourceType) != "" && strings.TrimSpace(r.sourceKey) != ""
+}
+
+func canonicalCollectionSource(sourceType, sourceKey string) resourceSourceRef {
+	sourceType = strings.ToLower(strings.TrimSpace(sourceType))
+	if sourceType != "tg" && sourceType != "plugin" {
+		return resourceSourceRef{}
+	}
+	sourceKey = strings.TrimSpace(sourceKey)
+	if prefix := sourceType + ":"; strings.HasPrefix(strings.ToLower(sourceKey), prefix) {
+		sourceKey = strings.TrimSpace(sourceKey[len(prefix):])
+	}
+	if sourceKey == "" {
+		return resourceSourceRef{}
+	}
+	return resourceSourceRef{sourceType: sourceType, sourceKey: sourceKey}
 }
 
 func inferResultSource(result model.SearchResult) (string, string) {

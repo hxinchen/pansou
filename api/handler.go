@@ -229,6 +229,7 @@ func SearchHandler(c *gin.Context) {
 		ForceRefresh: req.ForceRefresh, ResultType: req.ResultType, SourceType: req.SourceType,
 		Plugins: req.Plugins, CloudTypes: req.CloudTypes, Ext: req.Ext, Identity: identity,
 	})
+	finalizeSearchCacheStatus(c)
 
 	if err != nil {
 		if errors.Is(err, tgchannel.ErrInvalidChannel) {

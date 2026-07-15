@@ -481,6 +481,9 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 	if err := ctx.Err(); err != nil {
 		return model.SearchResponse{}, err
 	}
+	if request.ForceRefresh {
+		MarkSearchCacheStatus(ctx, SearchCacheRefresh)
+	}
 	normalizedChannels, err := tgchannel.NormalizeList(request.Channels)
 	if err != nil {
 		return model.SearchResponse{}, err
@@ -581,7 +584,7 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			tgResults, tgErr = s.searchTG(keyword, channels, forceRefresh)
+			tgResults, tgErr = s.searchTG(ctx, keyword, channels, forceRefresh)
 		}()
 	}
 	// 如果需要搜索插件（且插件功能已启用）
@@ -1265,12 +1268,13 @@ func mergeResultsByType(results []model.SearchResult, keyword string, cloudTypes
 			}
 
 			mergedLink := model.MergedLink{
-				URL:      link.URL,
-				Password: link.Password,
-				Note:     title, // 使用找到的特定标题
-				Datetime: linkDatetime,
-				Source:   source,        // 添加数据来源字段
-				Images:   result.Images, // 添加TG消息中的图片链接
+				URL:       link.URL,
+				Password:  link.Password,
+				Note:      title, // 使用找到的特定标题
+				Datetime:  linkDatetime,
+				Source:    source, // 添加数据来源字段
+				SubSource: result.SubSource,
+				Images:    result.Images, // 添加TG消息中的图片链接
 			}
 
 			// 检查是否已存在相同URL的链接
@@ -1348,12 +1352,12 @@ func mergeResultsByType(results []model.SearchResult, keyword string, cloudTypes
 }
 
 // searchTG 搜索TG频道
-func (s *SearchService) searchTG(keyword string, channels []string, forceRefresh bool) ([]model.SearchResult, error) {
+func (s *SearchService) searchTG(ctx context.Context, keyword string, channels []string, forceRefresh bool) ([]model.SearchResult, error) {
 	// 生成缓存键
 	cacheKey := cache.GenerateTGCacheKey(keyword, channels)
 
 	// 如果未启用强制刷新，尝试从缓存获取结果
-	if !forceRefresh && cacheInitialized && config.AppConfig.CacheEnabled {
+	if !forceRefresh && cacheInitialized && config.AppConfig.CacheEnabled && enhancedTwoLevelCache != nil {
 		var data []byte
 		var hit bool
 		var err error
@@ -1365,11 +1369,19 @@ func (s *SearchService) searchTG(keyword string, channels []string, forceRefresh
 			if err == nil && hit {
 				var results []model.SearchResult
 				if err := enhancedTwoLevelCache.GetSerializer().Deserialize(data, &results); err == nil {
+					MarkSearchCacheStatus(ctx, SearchCacheHit)
 					// 直接返回缓存数据，不检查新鲜度
 					return results, nil
 				}
+				MarkSearchCacheStatus(ctx, SearchCacheMiss)
+			} else if err != nil {
+				MarkSearchCacheStatus(ctx, SearchCacheBypass)
+			} else {
+				MarkSearchCacheStatus(ctx, SearchCacheMiss)
 			}
 		}
+	} else if !forceRefresh {
+		MarkSearchCacheStatus(ctx, SearchCacheBypass)
 	}
 
 	// 缓存未命中或强制刷新，执行实际搜索
@@ -1514,7 +1526,7 @@ func compactTGTaskResults(values []interface{}, finished []bool) []interface{} {
 }
 
 // searchPlugins 搜索插件
-func (s *SearchService) searchPlugins(keyword string, plugins []string, forceRefresh bool, concurrency int, ext map[string]interface{}) ([]model.SearchResult, error) {
+func (s *SearchService) searchPlugins(ctx context.Context, keyword string, plugins []string, forceRefresh bool, concurrency int, ext map[string]interface{}) ([]model.SearchResult, error) {
 	baseExt := cloneSearchExt(ext)
 	if forceRefresh {
 		baseExt["refresh"] = true
@@ -1524,7 +1536,7 @@ func (s *SearchService) searchPlugins(keyword string, plugins []string, forceRef
 	cacheKey := cache.GeneratePluginCacheKey(keyword, plugins)
 
 	// 如果未启用强制刷新，尝试从缓存获取结果
-	if !forceRefresh && cacheInitialized && config.AppConfig.CacheEnabled {
+	if !forceRefresh && cacheInitialized && config.AppConfig.CacheEnabled && enhancedTwoLevelCache != nil {
 		var data []byte
 		var hit bool
 		var err error
@@ -1539,15 +1551,23 @@ func (s *SearchService) searchPlugins(keyword string, plugins []string, forceRef
 			if err == nil && hit {
 				var results []model.SearchResult
 				if err := enhancedTwoLevelCache.GetSerializer().Deserialize(data, &results); err == nil {
+					MarkSearchCacheStatus(ctx, SearchCacheHit)
 					// 返回缓存数据
 					fmt.Printf("✅ [%s] 命中缓存 结果数: %d\n", keyword, len(results))
 					return results, nil
 				} else {
+					MarkSearchCacheStatus(ctx, SearchCacheMiss)
 					displayKey := cacheKey[:8] + "..."
 					fmt.Printf("[主服务] 缓存反序列化失败: %s(关键词:%s) | 错误: %v\n", displayKey, keyword, err)
 				}
+			} else if err != nil {
+				MarkSearchCacheStatus(ctx, SearchCacheBypass)
+			} else {
+				MarkSearchCacheStatus(ctx, SearchCacheMiss)
 			}
 		}
+	} else if !forceRefresh {
+		MarkSearchCacheStatus(ctx, SearchCacheBypass)
 	}
 
 	// 缓存未命中或强制刷新，执行实际搜索
@@ -1669,7 +1689,7 @@ func (s *SearchService) searchPlugins(keyword string, plugins []string, forceRef
 // background refresh from leaking into another request.
 func (s *SearchService) searchPluginsForIdentity(ctx context.Context, identity SearchIdentity, keyword string, requested []string, forceRefresh bool, concurrency int, ext map[string]interface{}) ([]model.SearchResult, error) {
 	if s == nil || s.credentials == nil || s.pluginManager == nil {
-		return s.searchPlugins(keyword, requested, forceRefresh, concurrency, ext)
+		return s.searchPlugins(ctx, keyword, requested, forceRefresh, concurrency, ext)
 	}
 
 	selected := selectPlugins(s.pluginManager.GetPlugins(), requested)
@@ -1692,13 +1712,16 @@ func (s *SearchService) searchPluginsForIdentity(ctx context.Context, identity S
 	var legacyResults []model.SearchResult
 	if len(legacyNames) > 0 {
 		var err error
-		legacyResults, err = s.searchPlugins(keyword, legacyNames, forceRefresh, concurrency, ext)
+		legacyResults, err = s.searchPlugins(ctx, keyword, legacyNames, forceRefresh, concurrency, ext)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if len(managed) == 0 {
 		return legacyResults, nil
+	}
+	if !forceRefresh {
+		MarkSearchCacheStatus(ctx, SearchCacheBypass)
 	}
 
 	actor := credential.ActorUser

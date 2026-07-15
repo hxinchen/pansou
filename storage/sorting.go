@@ -86,7 +86,7 @@ var apiRequestLogSortFields = map[string]sortField{
 	"status_code":  {Expression: "l.status_code", TieBreaker: "l.id"},
 	"duration_ms":  {Expression: "l.duration_ms", TieBreaker: "l.id"},
 	"result_count": {Expression: "l.result_count", TieBreaker: "l.id"},
-	"cache_status": {Expression: "lower(l.cache_status)", TieBreaker: "l.id", NullsLast: true},
+	"cache_status": {Expression: "COALESCE(NULLIF(lower(btrim(l.cache_status)),''),'not_recorded')", TieBreaker: "l.id", NullsLast: true},
 	"source_ip":    {Expression: "lower(l.source_ip)", TieBreaker: "l.id", NullsLast: true},
 }
 

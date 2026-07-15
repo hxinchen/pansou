@@ -33,9 +33,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy\update-all.ps1
 - `update-backend.ps1` cross-compiles this Go repo for Linux and restarts the
   `pansou-api` Docker container. It also installs an idempotent daily
   PostgreSQL backup job when the host provides `crontab` or `/etc/cron.d`.
-  The script reads the `pansou-network` CIDR and passes it as
-  `TRUSTED_PROXIES`, so forwarded client IP headers are accepted only from the
-  host-side Docker proxy.
+  The script reads the `pansou-network` CIDR and passes it together with
+  `127.0.0.1` and `::1` as `TRUSTED_PROXIES`, so forwarded client IP headers
+  are accepted only from the host-side Docker proxy and local reverse proxies.
 - `update-frontend.ps1` expects the sibling frontend repo at `..\pansou-web`,
   builds it with `--base=/pansou/`, uploads `dist`, and reloads Caddy.
 - Pass `-EnabledPlugins "a,b,c"` to backend or all scripts to change the plugin

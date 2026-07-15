@@ -197,8 +197,17 @@
                   <p class="panel-kicker">采集渠道</p>
                   <h2 id="source-title">来源贡献</h2>
                 </div>
+                <div class="source-contribution-actions">
+                  <div class="source-scope-tabs" role="tablist" aria-label="来源贡献类型">
+                    <button class="active" type="button" role="tab" aria-selected="true" data-source-contribution-scope="plugin">插件</button>
+                    <button type="button" role="tab" aria-selected="false" data-source-contribution-scope="tg">TG</button>
+                    <button type="button" role="tab" aria-selected="false" data-source-contribution-scope="all">全部</button>
+                  </div>
+                  <button class="text-link" type="button" data-action="open-source-contributions">查看全部</button>
+                </div>
               </div>
               <div id="source-chart" class="chart" role="img" aria-label="来源贡献排行图"></div>
+              <div id="source-contribution-caption" class="source-contribution-caption"></div>
             </section>
 
             <section class="panel batch-panel" aria-labelledby="batch-title">
@@ -726,6 +735,9 @@
                     <option value="hit">缓存命中</option>
                     <option value="miss">缓存未命中</option>
                     <option value="refresh">实时刷新</option>
+                    <option value="bypass">绕过缓存</option>
+                    <option value="not_applicable">不适用</option>
+                    <option value="not_recorded">未记录（升级前）</option>
                   </select>
                   <i data-lucide="chevron-down" aria-hidden="true"></i>
                 </label>
@@ -778,6 +790,7 @@
               <button class="active" type="button" role="tab" aria-selected="true" aria-controls="source-panel-tg" data-source-config-tab="tg"><i data-lucide="send" aria-hidden="true"></i><span>TG 频道</span><em id="source-channel-count">0</em></button>
               <button type="button" role="tab" aria-selected="false" aria-controls="source-panel-plugins" data-source-config-tab="plugins"><i data-lucide="plug" aria-hidden="true"></i><span>内置插件</span><em id="source-plugin-count">0</em></button>
               <button type="button" role="tab" aria-selected="false" aria-controls="source-panel-accounts" data-source-config-tab="accounts"><i data-lucide="key-round" aria-hidden="true"></i><span>账号来源</span><em id="source-account-count">0</em></button>
+              <button type="button" role="tab" aria-selected="false" aria-controls="source-panel-search" data-source-config-tab="search"><i data-lucide="search" aria-hidden="true"></i><span>搜索调试</span></button>
             </div>
             <div class="source-module-actions">
               <button class="button secondary" type="button" data-action="validate-sources"><i data-lucide="shield-check" aria-hidden="true"></i><span>校验</span></button>
@@ -852,6 +865,25 @@
               <label id="credential-user-filter-wrap" class="search-field grow" hidden><i data-lucide="search" aria-hidden="true"></i><input id="credential-user-filter" type="search" placeholder="按用户或账号名称筛选" aria-label="按用户或账号名称筛选"></label>
             </div>
             <div id="source-credentials" class="source-card-list credential-list" aria-live="polite"></div>
+          </section>
+
+          <section id="source-panel-search" class="panel source-module-panel source-search-panel" role="tabpanel" data-source-config-panel="search" aria-labelledby="source-search-title" hidden>
+            <header class="source-module-heading source-search-heading">
+              <span class="source-group-icon"><i data-lucide="search" aria-hidden="true"></i></span>
+              <div><h2 id="source-search-title">搜索调试</h2><p>使用当前已生效的来源配置执行正式搜索</p></div>
+              <span id="source-search-version" class="type-badge">配置 —</span>
+            </header>
+            <form id="source-search-form" class="source-search-form">
+              <label class="field source-search-keyword"><span>搜索关键词 <em>*</em></span><input id="source-search-keyword" name="keyword" type="search" maxlength="200" placeholder="输入要测试的资源关键词" required></label>
+              <label class="field"><span>来源范围</span><select id="source-search-scope" name="scope"><option value="all">全部来源</option><option value="plugin">仅插件</option><option value="tg">仅 TG</option></select></label>
+              <label class="toggle-field source-search-refresh"><span><strong>强制实时刷新</strong><small>绕过资源库缓存并执行实时搜索</small></span><input id="source-search-refresh" name="refresh" type="checkbox"><span class="toggle" aria-hidden="true"></span></label>
+              <fieldset class="source-search-picker" data-source-search-picker="plugin"><legend>插件（不选表示全部已启用）</legend><div id="source-search-plugins" class="source-search-options"></div></fieldset>
+              <fieldset class="source-search-picker" data-source-search-picker="tg"><legend>TG 频道（不选表示全部已启用）</legend><div id="source-search-channels" class="source-search-options"></div></fieldset>
+              <fieldset class="source-search-picker"><legend>网盘类型（不选表示全部）</legend><div id="source-search-clouds" class="source-search-options"></div></fieldset>
+              <div class="source-search-submit"><button id="source-search-submit" class="button primary" type="submit"><i data-lucide="search" aria-hidden="true"></i><span>开始搜索</span></button><small>结果会计入管理员 API 调用记录</small></div>
+            </form>
+            <div id="source-search-alert" class="inline-alert error" role="alert" hidden></div>
+            <div id="source-search-results" class="source-search-results" aria-live="polite"><div class="empty-state compact-empty"><i data-lucide="search" aria-hidden="true"></i><h3>等待搜索</h3><p>选择来源并输入关键词，验证当前生效配置。</p></div></div>
           </section>
         </section>
       </main>
@@ -1136,6 +1168,16 @@
         <p id="plugin-qr-message">请使用对应客户端扫码，并在手机上确认登录。</p>
         <button id="plugin-qr-retry" class="button secondary" type="button" data-action="retry-plugin-qr" hidden><i data-lucide="refresh-cw"></i><span>重新生成</span></button>
       </div>
+    </div>
+  </dialog>
+
+  <dialog id="source-contribution-dialog" class="dialog side-drawer-dialog" aria-labelledby="source-contribution-dialog-title">
+    <div class="dialog-shell side-drawer-shell">
+      <header class="dialog-header">
+        <div><p class="eyebrow">SOURCE CONTRIBUTION</p><h2 id="source-contribution-dialog-title">来源贡献明细</h2></div>
+        <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
+      </header>
+      <div id="source-contribution-dialog-body" class="dialog-body source-contribution-dialog-body"></div>
     </div>
   </dialog>
 

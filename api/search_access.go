@@ -2,11 +2,14 @@ package api
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"pansou/service"
 	"pansou/usage"
 )
 
@@ -15,7 +18,10 @@ const (
 	usageResultCountContextKey = "usage_result_count"
 	usageCacheStatusContextKey = "usage_cache_status"
 	usageErrorCodeContextKey   = "usage_error_code"
+	usageSourceIPContextKey    = "usage_source_ip"
 )
+
+const searchCacheStatusHeader = "X-PanSou-Cache-Status"
 
 var (
 	searchLimiter *usage.Limiter
@@ -29,9 +35,11 @@ func SetUsageServices(limiter *usage.Limiter, recorder *usage.Recorder) {
 
 func SearchAccessMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		prepareSearchMonitoring(c)
 		principal, authenticated := currentPrincipal(c)
 		if !authenticated {
 			c.Next()
+			finalizeSearchCacheStatus(c)
 			return
 		}
 
@@ -65,8 +73,36 @@ func SearchAccessMiddleware() gin.HandlerFunc {
 		}
 
 		c.Next()
+		finalizeSearchCacheStatus(c)
 		recordSearchUsage(c, principal.UserID, started)
 	}
+}
+
+func prepareSearchMonitoring(c *gin.Context) {
+	trace := service.NewSearchTrace()
+	c.Request = c.Request.WithContext(service.ContextWithSearchTrace(c.Request.Context(), trace))
+	c.Set(usageSourceIPContextKey, normalizeUsageSourceIP(c.ClientIP()))
+	c.Set(usageCacheStatusContextKey, string(service.SearchCacheNotApplicable))
+	c.Header(searchCacheStatusHeader, string(service.SearchCacheNotApplicable))
+}
+
+func finalizeSearchCacheStatus(c *gin.Context) string {
+	status := service.SearchCacheNotApplicable
+	if trace := service.SearchTraceFromContext(c.Request.Context()); trace != nil {
+		status = trace.Status()
+	}
+	value := string(status)
+	c.Set(usageCacheStatusContextKey, value)
+	c.Header(searchCacheStatusHeader, value)
+	return value
+}
+
+func normalizeUsageSourceIP(value string) string {
+	value = strings.TrimSpace(value)
+	if ip := net.ParseIP(value); ip != nil && ip.IsLoopback() {
+		return "internal"
+	}
+	return value
 }
 
 func setRateLimitHeaders(c *gin.Context, decision usage.LimitDecision) {
@@ -94,10 +130,14 @@ func recordSearchUsage(c *gin.Context, userID int64, started time.Time) {
 		return
 	}
 	authType, _ := c.Get(authTypeContextKey)
+	sourceIP := c.GetString(usageSourceIPContextKey)
+	if sourceIP == "" {
+		sourceIP = normalizeUsageSourceIP(c.ClientIP())
+	}
 	metadata := map[string]interface{}{
 		"auth_type":  authType,
 		"keyword":    c.GetString(usageKeywordContextKey),
-		"source_ip":  c.ClientIP(),
+		"source_ip":  sourceIP,
 		"user_agent": c.Request.UserAgent(),
 	}
 	if value, ok := c.Get(usageResultCountContextKey); ok {

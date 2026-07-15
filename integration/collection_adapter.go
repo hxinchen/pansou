@@ -101,7 +101,16 @@ func (r *CollectionRepository) MarkItemRunning(ctx context.Context, runID, itemI
 }
 
 func (r *CollectionRepository) Ingest(ctx context.Context, request collection.IngestRequest) (collection.IngestResult, error) {
-	summary, err := r.Store.UpsertSearchResponse(ctx, request.Keyword.Value, request.Keyword.KeywordType, string(request.Trigger), request.Response)
+	sourceType, sourceKey := collectionSourceIdentity(request.Source)
+	summary, err := r.Store.UpsertSearchResponseFromSource(
+		ctx,
+		request.Keyword.Value,
+		request.Keyword.KeywordType,
+		string(request.Trigger),
+		sourceType,
+		sourceKey,
+		request.Response,
+	)
 	if err != nil {
 		return collection.IngestResult{}, err
 	}
@@ -118,6 +127,24 @@ func (r *CollectionRepository) Ingest(ctx context.Context, request collection.In
 		})
 	}
 	return collection.IngestResult{New: summary.Inserted, Duplicate: summary.Duplicates, CheckCandidates: candidates}, nil
+}
+
+func collectionSourceIdentity(source collection.Source) (string, string) {
+	sourceType := strings.ToLower(strings.TrimSpace(source.Type))
+	sourceKey := strings.TrimSpace(source.Key)
+	if sourceKey == "" {
+		switch sourceType {
+		case "tg":
+			if len(source.Channels) == 1 {
+				sourceKey = strings.TrimSpace(source.Channels[0])
+			}
+		case "plugin":
+			if len(source.Plugins) == 1 {
+				sourceKey = strings.TrimSpace(source.Plugins[0])
+			}
+		}
+	}
+	return sourceType, sourceKey
 }
 
 func (r *CollectionRepository) CompleteItem(ctx context.Context, _ int64, itemID int64, completion collection.ItemCompletion) error {

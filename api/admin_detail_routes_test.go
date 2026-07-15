@@ -15,6 +15,8 @@ func TestAdminHandlerRegistersPaginatedDetailRoutes(t *testing.T) {
 		routes[route.Method+" "+route.Path] = true
 	}
 	for _, route := range []string{
+		"GET /api/admin/source-contributions",
+		"GET /api/admin/source-contributions/:source_type/:source_key",
 		"GET /api/admin/runs/:id/items",
 		"GET /api/admin/runs/:id/items/:itemId/sources",
 		"GET /api/admin/resources/:id/sources",

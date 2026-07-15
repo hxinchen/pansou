@@ -78,8 +78,10 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 		err                 error
 	}
 	type sourcesResult struct {
-		topSources []SourceContribution
-		err        error
+		topSources       []SourceContribution
+		sourceTypeTotals map[string]SourceContributionTotal
+		topSourcesByType map[string][]SourceContribution
+		err              error
 	}
 
 	resourcesCh := make(chan resourceResult, 1)
@@ -132,7 +134,17 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 	}()
 
 	go func() {
-		result := sourcesResult{topSources: make([]SourceContribution, 0, 10)}
+		result := sourcesResult{
+			topSources: make([]SourceContribution, 0, 10),
+			sourceTypeTotals: map[string]SourceContributionTotal{
+				"plugin": {SourceType: "plugin"},
+				"tg":     {SourceType: "tg"},
+			},
+			topSourcesByType: map[string][]SourceContribution{
+				"plugin": make([]SourceContribution, 0, 10),
+				"tg":     make([]SourceContribution, 0, 10),
+			},
+		}
 		rows, err := s.pool.Query(ctx, `
 			SELECT source_type, source_key, count(DISTINCT resource_id), sum(discovery_count)
 			FROM resource_sources
@@ -158,7 +170,83 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 		}
 		if err := rows.Err(); err != nil {
 			result.err = fmt.Errorf("iterate source contributions: %w", err)
+			sourcesCh <- result
+			return
 		}
+
+		totalRows, err := s.pool.Query(ctx, `
+			SELECT source_type, count(DISTINCT resource_id)::bigint,
+				COALESCE(sum(discovery_count), 0)::bigint
+			FROM resource_sources
+			WHERE source_type IN ('plugin', 'tg')
+			GROUP BY source_type`)
+		if err != nil {
+			result.err = fmt.Errorf("load source type totals: %w", err)
+			sourcesCh <- result
+			return
+		}
+		for totalRows.Next() {
+			var total SourceContributionTotal
+			if err := totalRows.Scan(&total.SourceType, &total.ResourceCount, &total.DiscoveryCount); err != nil {
+				totalRows.Close()
+				result.err = fmt.Errorf("scan source type total: %w", err)
+				sourcesCh <- result
+				return
+			}
+			result.sourceTypeTotals[total.SourceType] = total
+		}
+		if err := totalRows.Err(); err != nil {
+			totalRows.Close()
+			result.err = fmt.Errorf("iterate source type totals: %w", err)
+			sourcesCh <- result
+			return
+		}
+		totalRows.Close()
+
+		typeRows, err := s.pool.Query(ctx, `
+			WITH contributions AS (
+				SELECT source_type, source_key,
+					count(DISTINCT resource_id)::bigint AS resource_count,
+					COALESCE(sum(discovery_count), 0)::bigint AS discovery_count
+				FROM resource_sources
+				WHERE source_type IN ('plugin', 'tg')
+				GROUP BY source_type, source_key
+			), ranked AS (
+				SELECT *, row_number() OVER (
+					PARTITION BY source_type
+					ORDER BY resource_count DESC, discovery_count DESC, lower(source_key), source_key
+				) AS source_rank
+				FROM contributions
+			)
+			SELECT source_type, source_key, resource_count, discovery_count
+			FROM ranked
+			WHERE source_rank <= 10
+			ORDER BY source_type, source_rank`)
+		if err != nil {
+			result.err = fmt.Errorf("load top sources by type: %w", err)
+			sourcesCh <- result
+			return
+		}
+		for typeRows.Next() {
+			var contribution SourceContribution
+			if err := typeRows.Scan(&contribution.SourceType, &contribution.SourceKey,
+				&contribution.ResourceCount, &contribution.DiscoveryCount); err != nil {
+				typeRows.Close()
+				result.err = fmt.Errorf("scan top source by type: %w", err)
+				sourcesCh <- result
+				return
+			}
+			result.topSourcesByType[contribution.SourceType] = append(
+				result.topSourcesByType[contribution.SourceType], contribution,
+			)
+		}
+		if err := typeRows.Err(); err != nil {
+			typeRows.Close()
+			result.err = fmt.Errorf("iterate top sources by type: %w", err)
+			sourcesCh <- result
+			return
+		}
+		typeRows.Close()
 		sourcesCh <- result
 	}()
 
@@ -182,6 +270,8 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 		EnabledKeywordCount: keywords.enabledKeywordCount,
 		StatusCounts:        resources.statusCounts,
 		TopSources:          sources.topSources,
+		SourceTypeTotals:    sources.sourceTypeTotals,
+		TopSourcesByType:    sources.topSourcesByType,
 	}, nil
 }
 

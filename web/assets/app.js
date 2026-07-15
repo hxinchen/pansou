@@ -3,6 +3,7 @@
 
   var API = {
     overview: '/api/admin/overview',
+    search: '/api/search',
     trends: '/api/admin/trends',
     resources: '/api/admin/resources',
     keywords: '/api/admin/keywords',
@@ -14,6 +15,7 @@
     usageOverview: '/api/admin/usage/overview',
     usageTrends: '/api/admin/usage/trends',
     usageLogs: '/api/admin/usage/logs',
+    sourceContributions: '/api/admin/source-contributions',
     sourceCatalog: '/api/admin/search-sources/catalog',
     sourceConfig: '/api/admin/search-sources/config',
     sourceValidate: '/api/admin/search-sources/validate',
@@ -54,6 +56,11 @@
     overview: null,
     overviewTrends: [],
     overviewRecentSort: { sortBy: '', sortDir: '' },
+    sourceContributions: {
+      scope: 'plugin', items: [], page: 1, pageSize: 20, total: 0, pages: 1,
+      sortBy: 'resource_count', sortDir: 'desc', controller: null, mode: 'list',
+      detail: { sourceType: '', sourceKey: '', data: null, page: 1, pageSize: 20, total: 0, pages: 1, sortBy: 'resource_count', sortDir: 'desc', controller: null }
+    },
     overviewRefresh: { timer: null, controller: null, serial: 0, fastRetryCount: 0 },
     resources: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, sortBy: '', sortDir: '' },
     keywords: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, selected: new Set(), query: {}, tab: 'list', sortBy: '', sortDir: '' },
@@ -62,7 +69,7 @@
     runs: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, sortBy: '', sortDir: '' },
     users: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, sortBy: '', sortDir: '' },
     usage: { overview: null, trends: [], logs: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, range: '7d', query: {}, sortBy: '', sortDir: '' },
-    sources: { catalog: [], config: null, credentials: [], adminCredentials: [], tab: 'admin', configTab: 'tg', dirty: false, saving: false, sharedTotal: 0, pluginSearch: '', credentialEditing: null, credentialEditMode: 'login', loginFlow: null, loginFlowTimer: null, credentialQuery: {} },
+    sources: { catalog: [], config: null, activeConfig: null, credentials: [], adminCredentials: [], tab: 'admin', configTab: 'tg', dirty: false, saving: false, sharedTotal: 0, pluginSearch: '', credentialEditing: null, credentialEditMode: 'login', loginFlow: null, loginFlowTimer: null, credentialQuery: {}, search: { controller: null, results: null, elapsedMS: 0, cacheStatus: '', submitted: false, actualSources: [] } },
     runPicker: { items: [], selected: new Set(), search: '', page: 1, pages: 1, total: 0, loading: false, controller: null, searchTimer: null },
     runDetail: { id: null, summary: null, items: [], page: 1, pages: 1, loadedPages: 0, total: 0, loading: false, query: {}, controller: null, itemsController: null, pollController: null, sourceControllers: {}, observer: null },
     pollTimer: null,
@@ -155,6 +162,11 @@
     if (Array.isArray(data)) return data;
     var value = pick(data, keys, []);
     return Array.isArray(value) ? value : [];
+  }
+
+  function cloneJSON(value) {
+    if (value === null || value === undefined) return value;
+    return JSON.parse(JSON.stringify(value));
   }
 
   function numberValue(value, fallback) {
@@ -301,6 +313,7 @@
   function tableSortState(scope) {
     if (scope === 'overviewRuns') return state.overviewRecentSort;
     if (scope === 'usageLogs') return state.usage;
+    if (scope === 'sourceContributionDetails') return state.sourceContributions.detail;
     if (scope === 'keywordSyncIterations') {
       return { sortBy: state.keywordSyncRuns.iterationSortBy, sortDir: state.keywordSyncRuns.iterationSortDir };
     }
@@ -342,7 +355,7 @@
   }
 
   function updateAllSortHeaders() {
-    ['overviewRuns', 'resources', 'keywords', 'keywordSources', 'keywordSyncRuns', 'keywordSyncIterations', 'runs', 'users', 'usageLogs'].forEach(updateSortHeaders);
+    ['overviewRuns', 'resources', 'keywords', 'keywordSources', 'keywordSyncRuns', 'keywordSyncIterations', 'runs', 'users', 'usageLogs', 'sourceContributions', 'sourceContributionDetails'].forEach(updateSortHeaders);
   }
 
   function sortHeaderMarkup(label, scope, key, firstDirection) {
@@ -412,6 +425,10 @@
       state.users.page = 1; state.loaded.users = false; loadUsers(true);
     } else if (scope === 'usageLogs') {
       state.usage.page = 1; loadUsageLogs(true);
+    } else if (scope === 'sourceContributions') {
+      state.sourceContributions.page = 1; loadSourceContributions(true);
+    } else if (scope === 'sourceContributionDetails') {
+      state.sourceContributions.detail.page = 1; loadSourceContributionDetail(true);
     }
   }
 
@@ -469,6 +486,8 @@
       if (error && error.name === 'AbortError') throw error;
       throw new APIError('无法连接到 PanSou 服务', 0, null);
     }
+
+    if (typeof options.onResponse === 'function') options.onResponse(response);
 
     var text = await response.text();
     var payload = null;
@@ -532,7 +551,7 @@
   function setButtonLoading(button, loading, label) {
     if (!button) return;
     if (loading) {
-      button.dataset.originalHtml = button.innerHTML;
+      if (!button.dataset.originalHtml) button.dataset.originalHtml = button.innerHTML;
       button.disabled = true;
       button.innerHTML = icon('loader-circle', 'spin') + '<span>' + escapeHTML(label || '处理中') + '</span>';
     } else {
@@ -1118,7 +1137,7 @@
 
     renderTrendChart(trends);
     renderStatusChart(statusCounts, totalResources);
-    renderSourceChart(pick(data, ['top_sources', 'source_contributions', 'source_stats', 'sources'], []));
+    renderSourceChart(data);
     renderActiveBatch(pick(data, ['active_run', 'active_batch', 'current_run', 'current_batch'], null));
     renderRecentRuns(arrayFrom(pick(data, ['recent_runs', 'runs', 'collection_runs'], []), ['items', 'runs']));
     refreshIcons();
@@ -1241,30 +1260,104 @@
     }).join('');
   }
 
-  function normalizeSources(data) {
+  function normalizeContributionType(value, fallback) {
+    var type = String(value || fallback || '').toLowerCase();
+    if (type === 'telegram') return 'tg';
+    return type === 'plugin' || type === 'tg' ? type : '';
+  }
+
+  function normalizeSources(data, fallbackType) {
+    var items = [];
     if (Array.isArray(data)) {
-      return data.map(function (item) {
+      items = data.map(function (item) {
+        var sourceName = String(pick(item, ['source', 'name', 'label'], '') || '');
+        var sourceType = normalizeContributionType(pick(item, ['source_type', 'type'], ''), fallbackType);
+        var sourceKey = String(pick(item, ['source_key', 'key'], '') || '');
+        var separator = sourceName.indexOf(':');
+        if (!sourceKey && separator > 0) {
+          sourceType = normalizeContributionType(sourceName.slice(0, separator), sourceType);
+          sourceKey = sourceName.slice(separator + 1);
+        }
+        if (!sourceKey) sourceKey = sourceName || '未知来源';
         return {
-          name: pick(item, ['source', 'name', 'label'], '') || ((pick(item, ['source_type'], '') ? pick(item, ['source_type'], '') + ':' : '') + pick(item, ['source_key'], '未知来源')),
-          count: numberValue(pick(item, ['count', 'resource_count', 'total', 'value'], 0))
+          sourceType: sourceType,
+          sourceKey: sourceKey,
+          name: sourceKey,
+          count: numberValue(pick(item, ['resource_count', 'count', 'total', 'value'], 0)),
+          discoveries: numberValue(pick(item, ['discovery_count', 'discoveries'], 0))
         };
-      }).sort(function (a, b) { return b.count - a.count; }).slice(0, 8);
+      });
+    } else if (data && typeof data === 'object') {
+      items = Object.keys(data).map(function (key) {
+        var separator = key.indexOf(':');
+        var sourceType = separator > 0 ? normalizeContributionType(key.slice(0, separator), fallbackType) : normalizeContributionType('', fallbackType);
+        return {
+          sourceType: sourceType,
+          sourceKey: separator > 0 ? key.slice(separator + 1) : key,
+          name: separator > 0 ? key.slice(separator + 1) : key,
+          count: numberValue(data[key]),
+          discoveries: 0
+        };
+      });
     }
-    if (data && typeof data === 'object') {
-      return Object.keys(data).map(function (key) { return { name: key, count: numberValue(data[key]) }; })
-        .sort(function (a, b) { return b.count - a.count; }).slice(0, 8);
+    return items.sort(function (left, right) {
+      return right.count - left.count || right.discoveries - left.discoveries || left.name.localeCompare(right.name, 'zh-CN');
+    }).slice(0, 8);
+  }
+
+  function sourceContributionList(data, scope) {
+    if (scope === 'plugin' || scope === 'tg') {
+      var grouped = pick(data, ['top_sources_by_type'], {}) || {};
+      return normalizeSources(pick(grouped, [scope], []), scope);
     }
-    return [];
+    return normalizeSources(pick(data, ['top_sources', 'source_contributions', 'source_stats', 'sources'], []), '');
+  }
+
+  function sourceContributionTotals(data, scope) {
+    var totals = pick(data, ['source_type_totals'], {}) || {};
+    if (scope === 'plugin' || scope === 'tg') return pick(totals, [scope], {}) || {};
+    return ['plugin', 'tg'].reduce(function (result, type) {
+      var item = pick(totals, [type], {}) || {};
+      result.resource_count += numberValue(pick(item, ['resource_count'], 0));
+      result.discovery_count += numberValue(pick(item, ['discovery_count'], 0));
+      return result;
+    }, { resource_count: 0, discovery_count: 0 });
+  }
+
+  function renderSourceContributionScope() {
+    document.querySelectorAll('[data-source-contribution-scope]').forEach(function (button) {
+      var active = button.dataset.sourceContributionScope === state.sourceContributions.scope;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+      button.tabIndex = active ? 0 : -1;
+    });
   }
 
   function renderSourceChart(data) {
+    data = data || {};
     var chart = chartFor('source-chart');
     if (!chart) return;
-    var sources = normalizeSources(data).reverse();
+    var scope = state.sourceContributions.scope;
+    var sources = sourceContributionList(data, scope).reverse();
+    var scopeLabel = scope === 'plugin' ? '插件' : (scope === 'tg' ? 'TG' : '全部');
+    var totals = sourceContributionTotals(data, scope);
+    renderSourceContributionScope();
+    byId('source-contribution-caption').innerHTML = scope === 'all'
+      ? '<span>全局来源排行</span><strong>展示前 ' + formatNumber(sources.length) + ' · TG / 插件可查看明细</strong>'
+      : '<span>' + escapeHTML(scopeLabel) + '累计贡献</span><strong>独立资源 ' + formatNumber(pick(totals, ['resource_count'], 0)) + ' · 发现 ' + formatNumber(pick(totals, ['discovery_count'], 0)) + '</strong>';
     chart.setOption({
       animationDuration: 420,
       color: ['#1769e0'],
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: '#17191d', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
+      tooltip: {
+        trigger: 'item',
+        backgroundColor: '#17191d',
+        borderWidth: 0,
+        textStyle: { color: '#fff', fontSize: 11 },
+        formatter: function (params) {
+          var item = params.data || {};
+          return escapeHTML(item.label || params.name || '来源') + '<br>独立资源 ' + formatNumber(item.value) + '<br>发现次数 ' + formatNumber(item.discoveryCount);
+        }
+      },
       grid: { left: 8, right: 16, top: 12, bottom: 5, containLabel: true },
       xAxis: {
         type: 'value',
@@ -1283,9 +1376,155 @@
         type: 'bar',
         barMaxWidth: 13,
         itemStyle: { borderRadius: [0, 3, 3, 0] },
-        data: sources.map(function (source) { return source.count; })
+        data: sources.map(function (source) {
+          return { value: source.count, label: source.name, discoveryCount: source.discoveries, sourceType: source.sourceType, sourceKey: source.sourceKey };
+        })
       }]
     }, true);
+    chart.off('click');
+    chart.on('click', function (params) {
+      var item = params && params.data;
+      if (item && (item.sourceType === 'plugin' || item.sourceType === 'tg')) openSourceContributionDetail(item.sourceType, item.sourceKey);
+    });
+  }
+
+  function setSourceContributionScope(scope) {
+    if (['plugin', 'tg', 'all'].indexOf(scope) < 0) scope = 'plugin';
+    state.sourceContributions.scope = scope;
+    state.sourceContributions.page = 1;
+    renderSourceChart(state.overview || {});
+    if (byId('source-contribution-dialog').open && state.sourceContributions.mode === 'list') loadSourceContributions(true);
+  }
+
+  function contributionTypeLabel(type) {
+    return type === 'plugin' ? '插件' : (type === 'tg' ? 'TG' : type || '—');
+  }
+
+  async function loadSourceContributions() {
+    var contributionState = state.sourceContributions;
+    if (contributionState.controller) contributionState.controller.abort();
+    var controller = new AbortController();
+    contributionState.controller = controller;
+    contributionState.mode = 'list';
+    byId('source-contribution-dialog-title').textContent = '来源贡献明细';
+    byId('source-contribution-dialog-body').innerHTML = '<div class="dialog-loading">' + icon('loader-circle', 'spin') + '<span>正在加载来源贡献</span></div>';
+    refreshIcons(byId('source-contribution-dialog-body'));
+    try {
+      var data = await apiRequest(API.sourceContributions, {
+        query: {
+          source_type: contributionState.scope,
+          page: contributionState.page,
+          page_size: contributionState.pageSize,
+          sort_by: contributionState.sortBy,
+          sort_dir: contributionState.sortDir
+        },
+        signal: controller.signal
+      });
+      if (contributionState.controller !== controller) return;
+      var items = arrayFrom(data, ['items', 'sources']);
+      var meta = paginationMeta(data, items, contributionState.page, contributionState.pageSize);
+      contributionState.items = items;
+      Object.assign(contributionState, meta);
+      renderSourceContributions();
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      byId('source-contribution-dialog-body').innerHTML = '<div class="empty-state compact-empty"><h3>来源贡献加载失败</h3><p>' + escapeHTML(error.message || '请稍后重试') + '</p><button class="button secondary" type="button" data-action="retry-source-contributions">重新加载</button></div>';
+    } finally {
+      if (contributionState.controller === controller) contributionState.controller = null;
+    }
+  }
+
+  function renderSourceContributions() {
+    var contributionState = state.sourceContributions;
+    var showType = contributionState.scope === 'all';
+    var body = byId('source-contribution-dialog-body');
+    var rows = contributionState.items.map(function (item) {
+      var type = normalizeContributionType(pick(item, ['source_type'], ''), contributionState.scope);
+      var key = String(pick(item, ['source_key', 'source', 'name'], '未知来源'));
+      return '<tr data-contribution-key="' + escapeHTML(key) + '">' +
+        '<td><button class="text-link contribution-source-link" type="button" data-action="open-source-contribution-detail" data-source-type="' + escapeHTML(type) + '" data-source-key="' + escapeHTML(key) + '">' + escapeHTML(key) + '</button>' + (showType ? ' <span class="type-badge">' + escapeHTML(contributionTypeLabel(type)) + '</span>' : '') + '</td>' +
+        '<td>' + formatNumber(pick(item, ['resource_count'], 0)) + '</td>' +
+        '<td>' + formatNumber(pick(item, ['discovery_count'], 0)) + '</td>' +
+      '</tr>';
+    }).join('');
+    body.innerHTML = '<div class="contribution-toolbar"><div><strong>' + escapeHTML(contributionState.scope === 'all' ? '全部来源' : contributionTypeLabel(contributionState.scope) + '来源') + '</strong><small> 共 ' + formatNumber(contributionState.total) + ' 项</small></div><div class="source-scope-tabs" role="tablist" aria-label="贡献明细类型"><button type="button" data-source-contribution-list-scope="plugin">插件</button><button type="button" data-source-contribution-list-scope="tg">TG</button><button type="button" data-source-contribution-list-scope="all">全部</button></div></div>' +
+      '<div class="contribution-table-wrap"><table class="contribution-table"><thead><tr>' + sortHeaderMarkup('来源', 'sourceContributions', 'source_key', 'asc') + sortHeaderMarkup('独立资源', 'sourceContributions', 'resource_count', 'desc') + sortHeaderMarkup('发现次数', 'sourceContributions', 'discovery_count', 'desc') + '</tr></thead><tbody>' + (rows || '<tr class="table-empty"><td colspan="3">暂无贡献数据</td></tr>') + '</tbody></table></div><div id="source-contribution-pagination" class="contribution-footer pagination"></div>';
+    document.querySelectorAll('[data-source-contribution-list-scope]').forEach(function (button) {
+      var active = button.dataset.sourceContributionListScope === contributionState.scope;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    renderPagination('source-contribution-pagination', contributionState.page, contributionState.pages, 'sourceContributions');
+    updateSortHeaders('sourceContributions');
+    refreshIcons(body);
+  }
+
+  function openSourceContributions() {
+    var dialog = byId('source-contribution-dialog');
+    if (!dialog.open) dialog.showModal();
+    state.sourceContributions.page = 1;
+    loadSourceContributions(true);
+  }
+
+  async function openSourceContributionDetail(sourceType, sourceKey) {
+    sourceType = normalizeContributionType(sourceType, '');
+    if (!sourceType || !sourceKey) return;
+    var dialog = byId('source-contribution-dialog');
+    if (!dialog.open) dialog.showModal();
+    var detail = state.sourceContributions.detail;
+    detail.sourceType = sourceType;
+    detail.sourceKey = String(sourceKey);
+    detail.page = 1;
+    state.sourceContributions.mode = 'detail';
+    await loadSourceContributionDetail(true);
+  }
+
+  async function loadSourceContributionDetail() {
+    var detail = state.sourceContributions.detail;
+    if (!detail.sourceType || !detail.sourceKey) return;
+    if (detail.controller) detail.controller.abort();
+    var controller = new AbortController();
+    detail.controller = controller;
+    byId('source-contribution-dialog-title').textContent = contributionTypeLabel(detail.sourceType) + ' · ' + detail.sourceKey;
+    byId('source-contribution-dialog-body').innerHTML = '<div class="dialog-loading">' + icon('loader-circle', 'spin') + '<span>正在加载来源详情</span></div>';
+    refreshIcons(byId('source-contribution-dialog-body'));
+    try {
+      var data = await apiRequest(API.sourceContributions + '/' + encodeURIComponent(detail.sourceType) + '/' + encodeURIComponent(detail.sourceKey), {
+        query: { page: detail.page, page_size: detail.pageSize, sort_by: detail.sortBy, sort_dir: detail.sortDir },
+        signal: controller.signal
+      });
+      if (detail.controller !== controller) return;
+      detail.data = data || {};
+      var subSources = pick(detail.data, ['sub_sources'], {}) || {};
+      var items = arrayFrom(subSources, ['items', 'sources']);
+      var meta = paginationMeta(subSources, items, detail.page, detail.pageSize);
+      detail.items = items;
+      Object.assign(detail, meta);
+      renderSourceContributionDetail();
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      byId('source-contribution-dialog-body').innerHTML = '<div class="empty-state compact-empty"><h3>来源详情加载失败</h3><p>' + escapeHTML(error.message || '请稍后重试') + '</p><button class="button secondary" type="button" data-action="back-source-contributions">返回来源列表</button></div>';
+    } finally {
+      if (detail.controller === controller) detail.controller = null;
+    }
+  }
+
+  function renderSourceContributionDetail() {
+    var detail = state.sourceContributions.detail;
+    var data = detail.data || {};
+    var coverage = numberValue(pick(data, ['sub_source_coverage'], 0));
+    var pairCount = numberValue(pick(data, ['sub_source_pair_count'], 0));
+    var rows = (detail.items || []).map(function (item) {
+      return '<tr><td><strong>' + escapeHTML(pick(item, ['sub_source'], '未识别')) + '</strong></td><td>' + formatNumber(pick(item, ['resource_count'], 0)) + '</td><td>' + formatNumber(pick(item, ['discovery_count'], 0)) + '<small class="table-cell-note">归因对占比 ' + formatPercent(pick(item, ['pair_share'], 0)) + '</small></td></tr>';
+    }).join('');
+    var body = byId('source-contribution-dialog-body');
+    body.innerHTML = '<div class="contribution-toolbar"><button class="button secondary" type="button" data-action="back-source-contributions">' + icon('arrow-left') + '<span>返回列表</span></button><span class="type-badge">' + escapeHTML(contributionTypeLabel(detail.sourceType)) + '</span></div>' +
+      '<section class="contribution-detail-hero"><h3>' + escapeHTML(detail.sourceKey) + '</h3><div class="contribution-metrics"><div><strong>' + formatNumber(pick(data, ['resource_count'], 0)) + '</strong><span>独立资源 · 同类占比 ' + formatPercent(pick(data, ['resource_share'], 0)) + '</span></div><div><strong>' + formatNumber(pick(data, ['discovery_count'], 0)) + '</strong><span>发现次数 · 同类占比 ' + formatPercent(pick(data, ['discovery_share'], 0)) + '</span></div><div><strong>' + formatPercent(coverage) + '</strong><span>内部来源识别覆盖率</span></div></div></section>' +
+      '<div class="contribution-toolbar"><div><strong>内部来源</strong><small> ' + formatNumber(pairCount) + ' 个已识别归因对</small></div><span class="muted-text">历史未知数据不会推测回填</span></div>' +
+      '<div class="contribution-table-wrap"><table class="contribution-table"><thead><tr>' + sortHeaderMarkup('内部来源', 'sourceContributionDetails', 'sub_source', 'asc') + sortHeaderMarkup('独立资源', 'sourceContributionDetails', 'resource_count', 'desc') + sortHeaderMarkup('发现次数 / 占比', 'sourceContributionDetails', 'discovery_count', 'desc') + '</tr></thead><tbody>' + (rows || '<tr class="table-empty"><td colspan="3">暂未识别到插件内部来源</td></tr>') + '</tbody></table></div><div id="source-contribution-detail-pagination" class="contribution-footer pagination"></div>';
+    renderPagination('source-contribution-detail-pagination', detail.page, detail.pages, 'sourceContributionDetails');
+    updateSortHeaders('sourceContributionDetails');
+    refreshIcons(body);
   }
 
   function renderActiveBatch(run) {
@@ -3748,13 +3987,18 @@
     var average = numberValue(pick(data, ['average_duration_ms', 'avg_duration_ms', 'average_latency_ms'], 0));
     var p95 = numberValue(pick(data, ['p95_duration_ms', 'p95_latency_ms'], 0));
     var limited = numberValue(pick(data, ['rate_limited_count', 'limited_count', 'status_429_count'], 0));
+    var cacheHitRate = pick(data, ['cache_hit_rate'], 0);
+    var cacheHits = numberValue(pick(data, ['cache_hits'], 0));
+    var totalResults = numberValue(pick(data, ['total_results', 'result_count'], 0));
     var cards = [
       { label: '总调用量', value: formatNumber(requestCount), icon: 'waypoints', tone: 'blue', foot: state.usage.range === '24h' ? '最近 24 小时' : state.usage.range === '30d' ? '最近 30 天' : '最近 7 天' },
       { label: '活跃用户', value: formatNumber(activeUsers), icon: 'users', tone: 'violet', foot: '产生过调用的用户' },
       { label: '成功率', value: formatPercent(successRate), icon: 'circle-check-big', tone: 'green', foot: 'HTTP 2xx 请求' },
       { label: '平均耗时', value: Math.round(average) + ' ms', icon: 'timer', tone: 'amber', foot: '端到端响应时间' },
       { label: 'P95 耗时', value: Math.round(p95) + ' ms', icon: 'gauge', tone: 'violet', foot: '95% 请求低于此值' },
-      { label: '限流次数', value: formatNumber(limited), icon: 'shield-alert', tone: limited ? 'amber' : 'green', foot: 'HTTP 429 响应' }
+      { label: '限流次数', value: formatNumber(limited), icon: 'shield-alert', tone: limited ? 'amber' : 'green', foot: 'HTTP 429 响应' },
+      { label: '缓存命中率', value: formatPercent(cacheHitRate), icon: 'database-zap', tone: 'blue', foot: formatNumber(cacheHits) + ' 次命中，仅统计 hit / miss' },
+      { label: '返回结果', value: formatNumber(totalResults), icon: 'list-checks', tone: 'green', foot: '搜索接口累计返回' }
     ];
     byId('usage-stat-grid').innerHTML = cards.map(function (card) {
       return '<article class="stat-card"><div class="stat-head"><span>' + escapeHTML(card.label) + '</span><span class="stat-icon ' + card.tone + '">' + icon(card.icon) + '</span></div><div class="stat-value">' + escapeHTML(card.value) + '</div><div class="stat-foot">' + escapeHTML(card.foot) + '</div></article>';
@@ -3907,7 +4151,7 @@
       var endpoint = pick(log, ['endpoint', 'path'], '/api/search');
       var method = pick(log, ['method'], 'POST');
       var keyword = pick(log, ['keyword', 'query'], '');
-      var cache = String(pick(log, ['cache_status', 'cache'], 'unknown')).toLowerCase();
+      var cache = String(pick(log, ['cache_status', 'cache'], '') || 'not_recorded').toLowerCase();
       return '<tr>' +
         '<td>' + escapeHTML(formatDate(pick(log, ['created_at', 'timestamp', 'time'], null), true)) + '</td>' +
         '<td><div class="keyword-name"><strong>' + escapeHTML(username) + '</strong><small>' + (authType === 'api_key' ? 'API Key' : '网页 JWT') + '</small></div></td>' +
@@ -3916,7 +4160,7 @@
         '<td><span class="http-status status-' + (status >= 200 && status < 300 ? 'ok' : status === 429 ? 'limited' : 'error') + '">' + status + '</span></td>' +
         '<td class="mono">' + formatNumber(pick(log, ['duration_ms'], 0)) + ' ms</td>' +
         '<td>' + formatNumber(pick(log, ['result_count'], 0)) + '</td>' +
-        '<td><span class="type-badge cache-' + escapeHTML(cache) + '">' + escapeHTML(cache === 'hit' ? '命中' : cache === 'miss' ? '未命中' : cache === 'refresh' ? '刷新' : cache) + '</span></td>' +
+        '<td><span class="type-badge cache-' + escapeHTML(cache) + '">' + escapeHTML(sourceSearchCacheLabel(cache)) + '</span></td>' +
         '<td class="mono">' + escapeHTML(pick(log, ['source_ip', 'ip'], '—')) + '</td>' +
       '</tr>';
     }).join('');
@@ -3952,7 +4196,9 @@
         apiRequest(API.sourceConfig)
       ]);
       state.sources.catalog = arrayFrom(results[0], ['items', 'plugins', 'catalog']);
-      state.sources.config = pick(results[1], ['config'], results[1] || {});
+      var activeConfig = pick(results[1], ['config'], results[1] || {});
+      state.sources.activeConfig = cloneJSON(activeConfig);
+      state.sources.config = cloneJSON(activeConfig);
       state.sources.version = numberValue(pick(results[1], ['version'], 0));
       state.sources.updatedAt = pick(results[1], ['updated_at'], null);
       state.sources.snapshot = pick(results[1], ['snapshot', 'runtime'], {});
@@ -4171,6 +4417,8 @@
     filter.value = selectedFilter;
     byId('source-shared-total').textContent = String(state.sources.sharedTotal || 0);
     renderSourceCredentials();
+    renderSourceSearchOptions();
+    renderSourceSearchResults();
     refreshIcons(byId('view-sources'));
   }
 
@@ -4254,6 +4502,182 @@
       plugins[pluginKey] = Object.assign({}, existing, { config: runtimeConfig });
     });
     return { schema_version: 1, async_plugins_enabled: byId('source-plugin-master').checked, channels: channels, plugins: plugins };
+  }
+
+  function selectedSourceSearchValues(name) {
+    return Array.from(document.querySelectorAll('#source-search-form input[name="' + name + '"]:checked')).map(function (input) { return input.value; });
+  }
+
+  function sourceSearchOptionMarkup(name, value, label, checked) {
+    return '<label class="source-search-option"><input type="checkbox" name="' + escapeHTML(name) + '" value="' + escapeHTML(value) + '" ' + (checked ? 'checked' : '') + '><span>' + escapeHTML(label) + '</span></label>';
+  }
+
+  function renderSourceSearchOptions() {
+    var activeConfig = state.sources.activeConfig || { channels: [], plugins: {}, async_plugins_enabled: false };
+    var selectedPlugins = new Set(selectedSourceSearchValues('search_plugins'));
+    var selectedChannels = new Set(selectedSourceSearchValues('search_channels'));
+    var selectedClouds = new Set(selectedSourceSearchValues('search_cloud_types'));
+    var plugins = activeConfig.plugins || {};
+    var pluginRuntimeEnabled = boolValue(pick(activeConfig, ['async_plugins_enabled'], false), false);
+    var enabledPlugins = (state.sources.catalog || []).filter(function (descriptor) {
+      var key = descriptor.key || descriptor.name;
+      return pluginRuntimeEnabled && boolValue((plugins[key] || {}).enabled, false);
+    });
+    var channels = arrayFrom(activeConfig, ['channels']).filter(function (channel) { return boolValue(channel.enabled, true); });
+    var pluginTarget = byId('source-search-plugins');
+    var channelTarget = byId('source-search-channels');
+    var cloudTarget = byId('source-search-clouds');
+    if (!pluginTarget || !channelTarget || !cloudTarget) return;
+    pluginTarget.innerHTML = enabledPlugins.length ? enabledPlugins.map(function (descriptor) {
+      var key = descriptor.key || descriptor.name;
+      return sourceSearchOptionMarkup('search_plugins', key, descriptor.display_name ? descriptor.display_name + ' · ' + key : key, selectedPlugins.has(String(key)));
+    }).join('') : '<span class="source-search-options-empty">当前生效配置未启用插件</span>';
+    channelTarget.innerHTML = channels.length ? channels.map(function (channel) {
+      var key = channel.key || channel.name;
+      var label = channel.display_name && channel.display_name !== key ? channel.display_name + ' · @' + key : '@' + key;
+      return sourceSearchOptionMarkup('search_channels', key, label, selectedChannels.has(String(key)));
+    }).join('') : '<span class="source-search-options-empty">当前生效配置未启用 TG 频道</span>';
+    cloudTarget.innerHTML = Object.keys(diskLabels).map(function (key) {
+      return sourceSearchOptionMarkup('search_cloud_types', key, diskLabels[key], selectedClouds.has(String(key)));
+    }).join('');
+    byId('source-search-version').textContent = state.sources.version ? '配置 v' + state.sources.version : '配置 —';
+    syncSourceSearchScope();
+  }
+
+  function syncSourceSearchScope() {
+    var scope = byId('source-search-scope') ? byId('source-search-scope').value : 'all';
+    document.querySelectorAll('[data-source-search-picker]').forEach(function (picker) {
+      var type = picker.dataset.sourceSearchPicker;
+      picker.hidden = (scope === 'plugin' && type === 'tg') || (scope === 'tg' && type === 'plugin');
+    });
+  }
+
+  function sourceSearchCacheLabel(status) {
+    var labels = {
+      hit: '缓存命中',
+      miss: '缓存未命中',
+      refresh: '强制刷新',
+      bypass: '绕过缓存',
+      not_applicable: '不适用',
+      not_recorded: '未记录（升级前）'
+    };
+    return labels[status] || status || '未返回';
+  }
+
+  function sourceSearchLinkHost(value) {
+    try { return new URL(String(value || '')).host || '未知域名'; }
+    catch (error) { return '未知域名'; }
+  }
+
+  function collectActualSearchSources(data) {
+    var values = new Set();
+    var merged = pick(data, ['merged_by_type'], {}) || {};
+    Object.keys(merged).forEach(function (type) {
+      arrayFrom(merged[type], ['items', 'links']).forEach(function (item) {
+        var source = String(pick(item, ['source'], '') || '').trim();
+        if (source) values.add(source);
+      });
+    });
+    arrayFrom(data, ['results']).forEach(function (item) {
+      var channel = String(pick(item, ['channel', 'source'], '') || '').trim();
+      if (channel) values.add(channel.indexOf(':') > 0 ? channel : 'tg:' + channel);
+    });
+    return Array.from(values).sort(function (left, right) { return left.localeCompare(right, 'zh-CN'); });
+  }
+
+  function renderSourceSearchResults() {
+    var target = byId('source-search-results');
+    if (!target) return;
+    var searchState = state.sources.search;
+    if (!searchState.submitted) {
+      target.innerHTML = '<div class="empty-state compact-empty">' + icon('search') + '<h3>等待搜索</h3><p>选择来源并输入关键词，验证当前生效配置。</p></div>';
+      refreshIcons(target);
+      return;
+    }
+    var data = searchState.results || {};
+    var merged = pick(data, ['merged_by_type'], {}) || {};
+    var types = Object.keys(merged).filter(function (type) { return arrayFrom(merged[type], ['items', 'links']).length > 0; });
+    var computedTotal = types.reduce(function (total, type) { return total + arrayFrom(merged[type], ['items', 'links']).length; }, 0);
+    var total = numberValue(pick(data, ['total'], computedTotal), computedTotal);
+    var sourcePreview = searchState.actualSources.slice(0, 4).join('、');
+    var sourceText = searchState.actualSources.length ? sourcePreview + (searchState.actualSources.length > 4 ? ' 等 ' + searchState.actualSources.length + ' 个' : '') : '未返回来源标记';
+    var summary = '<div class="source-search-summary"><strong>' + formatNumber(total) + '</strong><span>条结果</span><span class="type-badge">' + formatNumber(searchState.elapsedMS) + ' ms</span><span class="type-badge cache-' + escapeHTML(searchState.cacheStatus || 'not_recorded') + '">' + escapeHTML(sourceSearchCacheLabel(searchState.cacheStatus)) + '</span><span class="type-badge" title="' + escapeHTML(searchState.actualSources.join('\n')) + '">实际来源：' + escapeHTML(sourceText) + '</span></div>';
+    if (!types.length) {
+      target.innerHTML = summary + '<div class="empty-state compact-empty">' + icon('package-open') + '<h3>没有找到匹配资源</h3><p>可调整来源、网盘类型或启用强制刷新后重试。</p></div>';
+      refreshIcons(target);
+      return;
+    }
+    target.innerHTML = summary + types.map(function (type) {
+      var items = arrayFrom(merged[type], ['items', 'links']);
+      var cards = items.map(function (item) {
+        var url = String(pick(item, ['url', 'link'], '') || '');
+        var title = String(pick(item, ['note', 'title', 'name'], '') || sourceSearchLinkHost(url));
+        var source = String(pick(item, ['source'], '') || '来源未标记');
+        var subSource = String(pick(item, ['sub_source'], '') || '');
+        var password = String(pick(item, ['password', 'pwd', 'code'], '') || '');
+        var externalURL = safeExternalURL(url);
+        return '<article class="source-search-card"><div class="source-search-card-title"><strong title="' + escapeHTML(title) + '">' + escapeHTML(title) + '</strong><span class="type-badge">' + escapeHTML(diskLabels[type] || type) + '</span></div><div class="source-search-card-meta"><span>' + escapeHTML(source) + '</span>' + (subSource ? '<span>内部：' + escapeHTML(subSource) + '</span>' : '') + '<time>' + escapeHTML(formatDate(pick(item, ['datetime', 'created_at'], null), true)) + '</time></div><div class="source-search-card-link" title="' + escapeHTML(url) + '">' + escapeHTML(sourceSearchLinkHost(url)) + ' · ' + escapeHTML(url) + '</div>' + (password ? '<div class="source-search-password">提取码 <strong>' + escapeHTML(password) + '</strong></div>' : '') + '<details class="source-search-detail"><summary>完整详情</summary><dl><div><dt>来源</dt><dd>' + escapeHTML(source) + (subSource ? ' / ' + escapeHTML(subSource) : '') + '</dd></div><div><dt>链接</dt><dd>' + escapeHTML(url) + '</dd></div>' + (password ? '<div><dt>提取码</dt><dd>' + escapeHTML(password) + '</dd></div>' : '') + '</dl></details><div class="source-search-card-actions"><button type="button" data-action="copy-source-search-result" data-url="' + escapeHTML(url) + '" data-password="' + escapeHTML(password) + '">' + icon('copy') + '<span>复制</span></button>' + (externalURL ? '<a href="' + escapeHTML(externalURL) + '" target="_blank" rel="noopener noreferrer">' + icon('external-link') + '<span>打开</span></a>' : '') + '</div></article>';
+      }).join('');
+      return '<section class="source-search-disk-group"><div class="source-search-disk-heading"><h3>' + escapeHTML(diskLabels[type] || type) + '</h3><span>' + formatNumber(items.length) + ' 条</span></div><div class="source-search-card-list">' + cards + '</div></section>';
+    }).join('');
+    refreshIcons(target);
+  }
+
+  async function submitSourceSearch(event) {
+    event.preventDefault();
+    var keyword = byId('source-search-keyword').value.trim();
+    if (!keyword) {
+      showAlert('source-search-alert', '请输入搜索关键词');
+      return;
+    }
+    var searchState = state.sources.search;
+    if (searchState.controller) searchState.controller.abort();
+    var controller = new AbortController();
+    searchState.controller = controller;
+    var button = byId('source-search-submit');
+    setButtonLoading(button, true, '搜索中');
+    showAlert('source-search-alert', '');
+    byId('source-search-results').innerHTML = '<div class="source-search-loading"><span class="search-result-skeleton"></span><span class="search-result-skeleton"></span><span class="search-result-skeleton"></span></div>';
+    var scope = byId('source-search-scope').value;
+    var query = { kw: keyword, src: scope, res: 'merge' };
+    var plugins = selectedSourceSearchValues('search_plugins');
+    var channels = selectedSourceSearchValues('search_channels');
+    var cloudTypes = selectedSourceSearchValues('search_cloud_types');
+    if (plugins.length && scope !== 'tg') query.plugins = plugins.join(',');
+    if (channels.length && scope !== 'plugin') query.channels = channels.join(',');
+    if (cloudTypes.length) query.cloud_types = cloudTypes.join(',');
+    if (byId('source-search-refresh').checked) query.refresh = 'true';
+    var startedAt = performance.now();
+    var cacheStatus = '';
+    try {
+      var data = await apiRequest(API.search, {
+        query: query,
+        signal: controller.signal,
+        onResponse: function (response) { cacheStatus = String(response.headers.get('X-PanSou-Cache-Status') || '').toLowerCase(); }
+      });
+      if (searchState.controller !== controller) return;
+      searchState.results = data || {};
+      searchState.elapsedMS = Math.max(0, Math.round(performance.now() - startedAt));
+      searchState.cacheStatus = cacheStatus || 'not_recorded';
+      searchState.actualSources = collectActualSearchSources(searchState.results);
+      searchState.submitted = true;
+      renderSourceSearchResults();
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      if (searchState.controller !== controller) return;
+      showAlert('source-search-alert', error.message || '搜索失败');
+      searchState.results = {};
+      searchState.elapsedMS = Math.max(0, Math.round(performance.now() - startedAt));
+      searchState.cacheStatus = cacheStatus || '';
+      searchState.actualSources = [];
+      searchState.submitted = true;
+      renderSourceSearchResults();
+    } finally {
+      if (searchState.controller === controller) {
+        searchState.controller = null;
+        setButtonLoading(button, false);
+      }
+    }
   }
 
   async function validateSources() {
@@ -4364,7 +4788,7 @@
   }
 
   function switchSourceConfigTab(tab) {
-    var allowed = ['tg', 'plugins', 'accounts'];
+    var allowed = ['tg', 'plugins', 'accounts', 'search'];
     state.sources.configTab = allowed.indexOf(tab) >= 0 ? tab : 'tg';
     document.querySelectorAll('[data-source-config-tab]').forEach(function (button) {
       var active = button.dataset.sourceConfigTab === state.sources.configTab;
@@ -4375,6 +4799,12 @@
     document.querySelectorAll('[data-source-config-panel]').forEach(function (panel) {
       panel.hidden = panel.dataset.sourceConfigPanel !== state.sources.configTab;
     });
+    var actions = document.querySelector('.source-module-actions');
+    if (actions) actions.hidden = state.sources.configTab === 'search';
+    if (state.sources.configTab === 'search') {
+      renderSourceSearchOptions();
+      renderSourceSearchResults();
+    }
   }
 
   function accountPluginDescriptors() {
@@ -4731,10 +5161,25 @@
       switchSourceConfigTab(sourceConfigTab.dataset.sourceConfigTab);
       return;
     }
+    var contributionScope = event.target.closest('[data-source-contribution-scope]');
+    if (contributionScope) {
+      setSourceContributionScope(contributionScope.dataset.sourceContributionScope);
+      return;
+    }
+    var contributionListScope = event.target.closest('[data-source-contribution-list-scope]');
+    if (contributionListScope) {
+      setSourceContributionScope(contributionListScope.dataset.sourceContributionListScope);
+      return;
+    }
     var actionElement = event.target.closest('[data-action]');
     if (!actionElement) return;
     var action = actionElement.dataset.action;
     if (action === 'sort-table') handleTableSort(actionElement);
+    else if (action === 'open-source-contributions') openSourceContributions();
+    else if (action === 'retry-source-contributions') loadSourceContributions(true);
+    else if (action === 'open-source-contribution-detail') openSourceContributionDetail(actionElement.dataset.sourceType, actionElement.dataset.sourceKey);
+    else if (action === 'back-source-contributions') loadSourceContributions(true);
+    else if (action === 'copy-source-search-result') copyText(actionElement.dataset.url + (actionElement.dataset.password ? ' 提取码: ' + actionElement.dataset.password : ''), '搜索结果');
     else if (action === 'open-menu') openMenu();
     else if (action === 'close-menu') closeMenu();
     else if (action === 'logout') logout();
@@ -4838,6 +5283,7 @@
     else if (target.id === 'run-status-filter' || target.id === 'run-trigger-filter') updateRunFilters();
     else if (target.id === 'user-role-filter' || target.id === 'user-status-filter') updateUserFilters();
     else if (target.id === 'usage-range') changeUsageRange();
+    else if (target.id === 'source-search-scope') syncSourceSearchScope();
     else if (target.id === 'credential-plugin-filter' || target.id === 'credential-status-filter') updateCredentialFilters();
     else if (target.matches('#plugin-credential-form [name="plugin_key"]')) renderPluginCredentialLoginFields();
     else if (target.id === 'usage-user-filter' || target.id === 'usage-auth-filter' || target.id === 'usage-status-filter' || target.id === 'usage-cache-filter') updateUsageFilters();
@@ -4865,10 +5311,10 @@
     if (!button || button.disabled) return;
     var page = numberValue(button.dataset.page, 1);
     var scope = button.dataset.pageScope;
-    var pageState = scope === 'usageLogs' ? state.usage : state[scope];
+    var pageState = scope === 'usageLogs' ? state.usage : (scope === 'sourceContributionDetails' ? state.sourceContributions.detail : state[scope]);
     if (!pageState || page < 1 || page > pageState.pages) return;
     pageState.page = page;
-    if (scope !== 'usageLogs') state.loaded[scope] = false;
+    if (scope !== 'usageLogs' && scope !== 'sourceContributions' && scope !== 'sourceContributionDetails') state.loaded[scope] = false;
     if (scope === 'runs') loadRuns({ force: true });
     else if (scope === 'resources') loadResources(true);
     else if (scope === 'keywords') loadKeywords(true);
@@ -4881,6 +5327,8 @@
       state.usage.page = page;
       loadUsageLogs(true);
     }
+    else if (scope === 'sourceContributions') loadSourceContributions(true);
+    else if (scope === 'sourceContributionDetails') loadSourceContributionDetail(true);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
@@ -4890,6 +5338,7 @@
     byId('run-form').addEventListener('submit', submitRun);
     byId('user-form').addEventListener('submit', saveUser);
     byId('plugin-credential-form').addEventListener('submit', submitPluginCredential);
+    byId('source-search-form').addEventListener('submit', submitSourceSearch);
     byId('confirm-submit').addEventListener('click', function () { settleConfirm(true); });
     document.addEventListener('click', handleActionClick);
     document.addEventListener('click', handlePagination);
@@ -4935,6 +5384,12 @@
       clearTimeout(state.sources.loginFlowTimer);
       state.sources.loginFlowTimer = null;
       state.sources.loginFlow = null;
+    });
+    byId('source-contribution-dialog').addEventListener('close', function () {
+      if (state.sourceContributions.controller) state.sourceContributions.controller.abort();
+      if (state.sourceContributions.detail.controller) state.sourceContributions.detail.controller.abort();
+      state.sourceContributions.controller = null;
+      state.sourceContributions.detail.controller = null;
     });
     byId('run-keyword-search').addEventListener('input', function (event) {
       state.runPicker.search = event.target.value.trim();

@@ -387,18 +387,77 @@ type SourceContribution struct {
 	DiscoveryCount int64  `json:"discovery_count"`
 }
 
+type SourceContributionTotal struct {
+	SourceType     string `json:"source_type"`
+	ResourceCount  int64  `json:"resource_count"`
+	DiscoveryCount int64  `json:"discovery_count"`
+}
+
+type SourceContributionFilter struct {
+	SourceType string
+	Page       int
+	PageSize   int
+	SortBy     string
+	SortDir    string
+}
+
+type SourceContributionPage struct {
+	Items    []SourceContribution `json:"items"`
+	Total    int64                `json:"total"`
+	Page     int                  `json:"page"`
+	PageSize int                  `json:"page_size"`
+}
+
+type SubSourceContribution struct {
+	SubSource      string  `json:"sub_source"`
+	ResourceCount  int64   `json:"resource_count"`
+	DiscoveryCount int64   `json:"discovery_count"`
+	PairShare      float64 `json:"pair_share"`
+}
+
+type SubSourceContributionPage struct {
+	Items    []SubSourceContribution `json:"items"`
+	Total    int64                   `json:"total"`
+	Page     int                     `json:"page"`
+	PageSize int                     `json:"page_size"`
+}
+
+type SourceContributionDetailFilter struct {
+	Page     int
+	PageSize int
+	SortBy   string
+	SortDir  string
+}
+
+type SourceContributionDetail struct {
+	SourceType              string                    `json:"source_type"`
+	SourceKey               string                    `json:"source_key"`
+	ResourceCount           int64                     `json:"resource_count"`
+	DiscoveryCount          int64                     `json:"discovery_count"`
+	TypeResourceCount       int64                     `json:"type_resource_count"`
+	TypeDiscoveryCount      int64                     `json:"type_discovery_count"`
+	ResourceShare           float64                   `json:"resource_share"`
+	DiscoveryShare          float64                   `json:"discovery_share"`
+	IdentifiedResourceCount int64                     `json:"identified_resource_count"`
+	SubSourcePairCount      int64                     `json:"sub_source_pair_count"`
+	SubSourceCoverage       float64                   `json:"sub_source_coverage"`
+	SubSources              SubSourceContributionPage `json:"sub_sources"`
+}
+
 type StatusCounts map[string]int64
 
 type OverviewStats struct {
-	ResourceCount       int64                `json:"resource_count"`
-	TodayNew            int64                `json:"today_new"`
-	LastSevenDaysNew    int64                `json:"last_seven_days_new"`
-	KeywordCount        int64                `json:"keyword_count"`
-	EnabledKeywordCount int64                `json:"enabled_keyword_count"`
-	StatusCounts        StatusCounts         `json:"status_counts"`
-	ActiveRun           *CollectionRun       `json:"active_run,omitempty"`
-	TopSources          []SourceContribution `json:"top_sources"`
-	RecentRuns          []CollectionRun      `json:"recent_runs"`
+	ResourceCount       int64                              `json:"resource_count"`
+	TodayNew            int64                              `json:"today_new"`
+	LastSevenDaysNew    int64                              `json:"last_seven_days_new"`
+	KeywordCount        int64                              `json:"keyword_count"`
+	EnabledKeywordCount int64                              `json:"enabled_keyword_count"`
+	StatusCounts        StatusCounts                       `json:"status_counts"`
+	ActiveRun           *CollectionRun                     `json:"active_run,omitempty"`
+	TopSources          []SourceContribution               `json:"top_sources"`
+	SourceTypeTotals    map[string]SourceContributionTotal `json:"source_type_totals"`
+	TopSourcesByType    map[string][]SourceContribution    `json:"top_sources_by_type"`
+	RecentRuns          []CollectionRun                    `json:"recent_runs"`
 }
 
 type TrendPoint struct {
@@ -412,16 +471,18 @@ type TrendPoint struct {
 
 func (r Resource) ToMergedLink() model.MergedLink {
 	source := ""
+	subSource := ""
 	images := []string(nil)
 	if len(r.Sources) > 0 {
 		source = r.Sources[0].SourceType + ":" + r.Sources[0].SourceKey
+		subSource = metadataString(r.Sources[0].SourceMetadata, "sub_source")
 		images = stringSlice(r.Sources[0].SourceMetadata["images"])
 	}
 	dt := r.LastSeenAt
 	if r.LinkDatetime != nil {
 		dt = *r.LinkDatetime
 	}
-	return model.MergedLink{URL: r.URL, Password: r.Password, Note: firstNonEmpty(r.Title, r.Content), Datetime: dt, Source: source, Images: images}
+	return model.MergedLink{URL: r.URL, Password: r.Password, Note: firstNonEmpty(r.Title, r.Content), Datetime: dt, Source: source, SubSource: subSource, Images: images}
 }
 
 func (r Resource) ToSearchResult() model.SearchResult {
@@ -445,6 +506,7 @@ func (r Resource) ToSearchResult() model.SearchResult {
 		MessageID: source.MessageID,
 		UniqueID:  uniqueID,
 		Channel:   channel,
+		SubSource: metadataString(source.SourceMetadata, "sub_source"),
 		Datetime:  dt,
 		Title:     r.Title,
 		Content:   r.Content,
@@ -497,6 +559,14 @@ func stringSlice(value any) []string {
 	default:
 		return nil
 	}
+}
+
+func metadataString(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	value, _ := metadata[key].(string)
+	return value
 }
 
 func firstNonEmpty(values ...string) string {

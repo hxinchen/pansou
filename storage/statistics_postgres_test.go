@@ -155,6 +155,22 @@ func TestPostgresOverviewSnapshotActivityAndTrends(t *testing.T) {
 	}) {
 		t.Fatalf("snapshot top sources = %+v", snapshot.TopSources)
 	}
+	if got := snapshot.SourceTypeTotals["plugin"]; got != (SourceContributionTotal{
+		SourceType: "plugin", ResourceCount: 1, DiscoveryCount: 10,
+	}) {
+		t.Fatalf("plugin source total = %+v", got)
+	}
+	if got := snapshot.SourceTypeTotals["tg"]; got != (SourceContributionTotal{
+		SourceType: "tg", ResourceCount: 2, DiscoveryCount: 5,
+	}) {
+		t.Fatalf("tg source total = %+v", got)
+	}
+	if got := snapshot.TopSourcesByType["plugin"]; len(got) != 1 || got[0].SourceKey != "beta" {
+		t.Fatalf("plugin top sources = %+v", got)
+	}
+	if got := snapshot.TopSourcesByType["tg"]; len(got) != 1 || got[0].SourceKey != "alpha" {
+		t.Fatalf("tg top sources = %+v", got)
+	}
 
 	active, recent, err := store.OverviewActivity(ctx)
 	if err != nil {

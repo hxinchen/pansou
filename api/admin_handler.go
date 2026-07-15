@@ -51,6 +51,8 @@ func NewAdminHandler(store *storage.Store, runner *collection.Runner, sources ..
 func (h *AdminHandler) Register(group *gin.RouterGroup) {
 	group.GET("/overview", h.overview)
 	group.GET("/trends", h.trends)
+	group.GET("/source-contributions", h.listSourceContributions)
+	group.GET("/source-contributions/:source_type/:source_key", h.getSourceContribution)
 	group.GET("/resources", h.listResources)
 	group.GET("/resources/:id", h.getResource)
 	group.GET("/resources/:id/sources", h.listResourceSources)

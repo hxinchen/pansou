@@ -166,6 +166,17 @@ func mustTrustedProxies(raw string) []string {
 	if err != nil {
 		panic(err)
 	}
+	seen := make(map[string]struct{}, len(proxies)+2)
+	for _, proxy := range proxies {
+		seen[proxy] = struct{}{}
+	}
+	for _, loopback := range []string{"127.0.0.1", "::1"} {
+		if _, exists := seen[loopback]; exists {
+			continue
+		}
+		proxies = append(proxies, loopback)
+		seen[loopback] = struct{}{}
+	}
 	return proxies
 }
 

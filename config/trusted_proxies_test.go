@@ -22,6 +22,20 @@ func TestParseTrustedProxiesRejectsInvalidValue(t *testing.T) {
 	}
 }
 
+func TestMustTrustedProxiesAlwaysIncludesLoopback(t *testing.T) {
+	got := mustTrustedProxies("192.168.16.0/20")
+	want := []string{"192.168.16.0/20", "127.0.0.1", "::1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("proxies = %#v, want %#v", got, want)
+	}
+
+	got = mustTrustedProxies("127.0.0.1,::1")
+	want = []string{"127.0.0.1", "::1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("deduplicated proxies = %#v, want %#v", got, want)
+	}
+}
+
 func TestInvalidTrustedProxyFailsStartupParsing(t *testing.T) {
 	defer func() {
 		if recover() == nil {

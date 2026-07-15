@@ -85,6 +85,9 @@ func (s *HybridSearchService) SearchContext(ctx context.Context, request Context
 	}
 
 	if forceRefresh || request.requiresLiveTG {
+		if forceRefresh {
+			MarkSearchCacheStatus(ctx, SearchCacheRefresh)
+		}
 		request.ForceRefresh = forceRefresh
 		response, err := SearchWithContext(ctx, s.live, request)
 		if err != nil {
@@ -98,6 +101,7 @@ func (s *HybridSearchService) SearchContext(ctx context.Context, request Context
 	databaseResponse, latestSeen, err := s.searchDatabase(dbCtx, keyword, resultType, sourceType, channels, plugins, cloudTypes)
 	cancel()
 	if err == nil && databaseResponse.Total > 0 {
+		MarkSearchCacheStatus(ctx, SearchCacheHit)
 		if latestSeen.IsZero() || time.Since(latestSeen) > s.refreshAfter {
 			request.ResultType = "all"
 			request.Ext = cloneExt(ext)
@@ -106,7 +110,10 @@ func (s *HybridSearchService) SearchContext(ctx context.Context, request Context
 		return databaseResponse, nil
 	}
 	if err != nil {
+		MarkSearchCacheStatus(ctx, SearchCacheBypass)
 		log.Printf("resource library search unavailable, falling back to live search: %v", err)
+	} else {
+		MarkSearchCacheStatus(ctx, SearchCacheMiss)
 	}
 
 	request.ForceRefresh = false

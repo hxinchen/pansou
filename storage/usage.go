@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -23,7 +24,27 @@ func scanAPIRequestLog(row rowScanner) (APIRequestLog, error) {
 		&log.ResultCount, &log.CacheStatus, &log.ErrorCode, &log.SourceIP,
 		&log.UserAgent, &log.CreatedAt,
 	)
+	if err == nil {
+		log.CacheStatus = normalizeAPIRequestLogCacheStatus(log.CacheStatus)
+		log.SourceIP = normalizeAPIRequestLogSourceIP(log.SourceIP)
+	}
 	return log, err
+}
+
+func normalizeAPIRequestLogCacheStatus(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "not_recorded"
+	}
+	return value
+}
+
+func normalizeAPIRequestLogSourceIP(value string) string {
+	value = strings.TrimSpace(value)
+	if ip := net.ParseIP(value); ip != nil && ip.IsLoopback() {
+		return "internal"
+	}
+	return value
 }
 
 func (s *Store) InsertAPIRequestLogs(ctx context.Context, logs []APIRequestLogInput) (int64, error) {
@@ -170,6 +191,37 @@ func buildAPIRequestLogWhere(filter APIRequestLogFilter) (string, []any, error) 
 		}
 		conditions = append(conditions, "l.status_code=ANY("+addArg(statuses)+"::int[])")
 	}
+	if families := normalizeStringList(filter.StatusFamilies); len(families) > 0 {
+		familyConditions := make([]string, 0, len(families))
+		for _, family := range families {
+			switch strings.ToLower(family) {
+			case "2xx":
+				familyConditions = append(familyConditions, "(l.status_code>=200 AND l.status_code<300)")
+			case "4xx":
+				familyConditions = append(familyConditions, "(l.status_code>=400 AND l.status_code<500)")
+			case "5xx":
+				familyConditions = append(familyConditions, "(l.status_code>=500 AND l.status_code<600)")
+			case "429":
+				familyConditions = append(familyConditions, "l.status_code=429")
+			default:
+				return "", nil, fmt.Errorf("%w: invalid status family %q", ErrInvalid, family)
+			}
+		}
+		conditions = append(conditions, "("+strings.Join(familyConditions, " OR ")+")")
+	}
+	if statuses := normalizeStringList(filter.CacheStatuses); len(statuses) > 0 {
+		normalized := make([]string, 0, len(statuses))
+		for _, status := range statuses {
+			status = strings.ToLower(status)
+			switch status {
+			case "hit", "miss", "refresh", "bypass", "not_applicable", "not_recorded":
+				normalized = append(normalized, status)
+			default:
+				return "", nil, fmt.Errorf("%w: invalid cache status %q", ErrInvalid, status)
+			}
+		}
+		conditions = append(conditions, "COALESCE(NULLIF(lower(btrim(l.cache_status)),''),'not_recorded')=ANY("+addArg(normalized)+"::text[])")
+	}
 	if query := strings.TrimSpace(filter.Query); query != "" {
 		placeholder := addArg("%" + query + "%")
 		conditions = append(conditions, "(l.keyword ILIKE "+placeholder+
@@ -212,6 +264,7 @@ func (s *Store) UsageOverview(ctx context.Context, filter UsageStatsFilter) (Usa
 		From: from, To: to, StatusCounts: make(map[string]int64), ErrorCounts: make(map[string]int64),
 		TopUsers: make([]UserUsageSummary, 0), RecentRequests: make([]APIRequestLog, 0),
 	}
+	var cacheMisses int64
 	if err := s.pool.QueryRow(ctx, `SELECT
 		count(*),
 		count(*) FILTER (WHERE l.status_code>=200 AND l.status_code<400),
@@ -219,21 +272,22 @@ func (s *Store) UsageOverview(ctx context.Context, filter UsageStatsFilter) (Usa
 		count(DISTINCT l.user_id),
 		COALESCE(avg(l.duration_ms),0)::float8,
 		COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY l.duration_ms),0)::float8,
-		count(*) FILTER (WHERE l.cache_status='hit'),
+		count(*) FILTER (WHERE lower(btrim(l.cache_status))='hit'),
+		count(*) FILTER (WHERE lower(btrim(l.cache_status))='miss'),
 		COALESCE(sum(l.result_count),0),
 		count(*) FILTER (WHERE l.duration_ms>=`+slowPlaceholder+`)
 		FROM api_request_logs l WHERE `+where, args...).Scan(
 		&result.TotalRequests, &result.SuccessfulRequests, &result.RateLimitedRequests,
 		&result.ActiveUsers, &result.AvgDurationMS, &result.P95DurationMS,
-		&result.CacheHits, &result.TotalResults, &result.SlowRequests,
+		&result.CacheHits, &cacheMisses, &result.TotalResults, &result.SlowRequests,
 	); err != nil {
 		return UsageOverviewStats{}, fmt.Errorf("load usage overview: %w", err)
 	}
 	result.FailedRequests = result.TotalRequests - result.SuccessfulRequests
 	if result.TotalRequests > 0 {
 		result.SuccessRate = float64(result.SuccessfulRequests) / float64(result.TotalRequests)
-		result.CacheHitRate = float64(result.CacheHits) / float64(result.TotalRequests)
 	}
+	result.CacheHitRate = cacheHitRate(result.CacheHits, cacheMisses)
 
 	rows, err := s.pool.Query(ctx, `SELECT l.status_code, count(*)
 		FROM api_request_logs l WHERE `+where+` GROUP BY l.status_code ORDER BY l.status_code`, args[:len(args)-1]...)
@@ -319,6 +373,13 @@ func (s *Store) UsageOverview(ctx context.Context, filter UsageStatsFilter) (Usa
 	}
 	result.RecentRequests = recent.Items
 	return result, nil
+}
+
+func cacheHitRate(hits, misses int64) float64 {
+	if eligible := hits + misses; eligible > 0 {
+		return float64(hits) / float64(eligible)
+	}
+	return 0
 }
 
 func (s *Store) UserUsageTrends(ctx context.Context, userID int64, filter UsageStatsFilter) ([]UsageTrendPoint, error) {

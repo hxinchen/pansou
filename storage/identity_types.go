@@ -143,18 +143,20 @@ type APIRequestLogInput struct {
 }
 
 type APIRequestLogFilter struct {
-	UserID      *int64
-	AuthTypes   []string
-	Methods     []string
-	Endpoints   []string
-	StatusCodes []int
-	Query       string
-	From        *time.Time
-	To          *time.Time
-	Page        int
-	PageSize    int
-	SortBy      string
-	SortDir     string
+	UserID         *int64
+	AuthTypes      []string
+	Methods        []string
+	Endpoints      []string
+	StatusCodes    []int
+	StatusFamilies []string
+	CacheStatuses  []string
+	Query          string
+	From           *time.Time
+	To             *time.Time
+	Page           int
+	PageSize       int
+	SortBy         string
+	SortDir        string
 }
 
 type APIRequestLogPage struct {

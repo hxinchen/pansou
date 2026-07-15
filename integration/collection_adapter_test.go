@@ -57,4 +57,26 @@ func TestClaimPendingRejectsDisabledRepository(t *testing.T) {
 	}
 }
 
+func TestCollectionSourceIdentityUsesExecutedSource(t *testing.T) {
+	tests := []struct {
+		name       string
+		source     collection.Source
+		wantType   string
+		wantSource string
+	}{
+		{name: "configured plugin key", source: collection.Source{Type: "plugin", Key: "plugin:xdyh"}, wantType: "plugin", wantSource: "plugin:xdyh"},
+		{name: "single channel fallback", source: collection.Source{Type: " TG ", Channels: []string{" channel-a "}}, wantType: "tg", wantSource: "channel-a"},
+		{name: "single plugin fallback", source: collection.Source{Type: "plugin", Plugins: []string{" pansearch "}}, wantType: "plugin", wantSource: "pansearch"},
+		{name: "ambiguous plugins stay empty", source: collection.Source{Type: "plugin", Plugins: []string{"one", "two"}}, wantType: "plugin"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotType, gotSource := collectionSourceIdentity(test.source)
+			if gotType != test.wantType || gotSource != test.wantSource {
+				t.Fatalf("collectionSourceIdentity() = %q, %q, want %q, %q", gotType, gotSource, test.wantType, test.wantSource)
+			}
+		})
+	}
+}
+
 func pointer[T any](value T) *T { return &value }

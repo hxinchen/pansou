@@ -128,7 +128,7 @@ cd pansou
 | **HTTPS_PROXY/HTTP_PROXY** | HTTPS/HTTP代理 | 无 | 如：`HTTPS_PROXY=http://127.0.0.1:1080`,`HTTP_PROXY=http://127.0.0.1:1080` |
 | **CHANNELS** | 默认搜索的TG频道 | `tgsearchers3` | 多个频道用逗号分隔 |
 | **ENABLED_PLUGINS** | 指定启用插件，多个插件用逗号分隔 | 无 | 必须显式指定 |
-| **TRUSTED_PROXIES** | 可信反向代理 IP/CIDR，多个值用逗号分隔 | 无 | 仅来自这些地址的 `X-Forwarded-For` / `X-Real-IP` 会用于来源 IP；未设置时一律使用直连地址 |
+| **TRUSTED_PROXIES** | 可信反向代理 IP/CIDR，多个值用逗号分隔 | 本机回环 | 仅来自这些地址及 `127.0.0.1` / `::1` 的 `X-Forwarded-For` / `X-Real-IP` 会用于来源 IP |
 
 #### 认证配置（可选）
 

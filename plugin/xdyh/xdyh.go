@@ -254,6 +254,7 @@ func (p *XdyhAsyncPlugin) convertToSearchResults(apiResp APIResponse, keyword st
 			UniqueID:  fmt.Sprintf("%s-%d", pluginName, i),
 			Title:     item.Title,
 			Content:   content,
+			SubSource: strings.TrimSpace(item.SourceSite),
 			Datetime:  datetime,
 			Tags:      tags,
 			Links:     links,

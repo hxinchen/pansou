@@ -51,11 +51,14 @@ func GetSearchResult() *model.SearchResult {
 // ReleaseSearchResult 释放SearchResult对象回对象池
 func ReleaseSearchResult(sr *model.SearchResult) {
 	sr.MessageID = ""
+	sr.UniqueID = ""
 	sr.Channel = ""
+	sr.SubSource = ""
 	sr.Title = ""
 	sr.Content = ""
 	sr.Links = sr.Links[:0]
 	sr.Tags = sr.Tags[:0]
+	sr.Images = sr.Images[:0]
 	// 不重置时间，因为会被重新赋值
 	SearchResultPool.Put(sr)
 }
@@ -70,6 +73,9 @@ func ReleaseMergedLink(ml *model.MergedLink) {
 	ml.URL = ""
 	ml.Password = ""
 	ml.Note = ""
+	ml.Source = ""
+	ml.SubSource = ""
+	ml.Images = ml.Images[:0]
 	// 不重置时间，因为会被重新赋值
 	MergedLinkPool.Put(ml)
-} 
+}

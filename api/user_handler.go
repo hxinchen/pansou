@@ -155,10 +155,12 @@ func (h *UserHandler) usageLogs(c *gin.Context) {
 		return
 	}
 	filter := storage.APIRequestLogFilter{
-		AuthTypes: queryList(c, "auth_type", "auth_types"),
-		Query:     strings.TrimSpace(c.Query("q")),
-		Page:      queryInt(c, "page", 1),
-		PageSize:  queryInt(c, "page_size", 20),
+		AuthTypes:      queryList(c, "auth_type", "auth_types"),
+		StatusFamilies: queryList(c, "status", "status_family", "status_families"),
+		CacheStatuses:  queryList(c, "cache_status", "cache_statuses"),
+		Query:          strings.TrimSpace(c.Query("q")),
+		Page:           queryInt(c, "page", 1),
+		PageSize:       queryInt(c, "page_size", 20),
 	}
 	page, err := h.store.ListUserAPIRequestLogs(c.Request.Context(), principal.UserID, filter)
 	if err != nil {

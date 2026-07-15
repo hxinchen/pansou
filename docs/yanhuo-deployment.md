@@ -26,7 +26,7 @@
 - 前端：本地构建 `pansou-web`，以 `/pansou/` 为 base path，上传静态文件到服务器。`/pansou/report.html` 是静态监控页，会轮询 `/api/health`。
 - Caddy：托管 `/pansou/` 前端页面，并将 `/api/*` 反代到 `127.0.0.1:8889`。
 - 管理台：Caddy 将 `/pansou-admin/*` 重写到后端内置 `/admin/*`，避免与服务器上其他系统的 `/admin` 冲突。
-- 来源 IP：部署脚本从 `pansou-network` 读取 CIDR 并作为 `TRUSTED_PROXIES` 注入后端；Gin 只信任该 Docker 网络转发的真实 IP Header。
+- 来源 IP：部署脚本将 `pansou-network` CIDR、`127.0.0.1` 和 `::1` 作为 `TRUSTED_PROXIES` 注入后端；Gin 只信任 Docker 网络或本机反向代理转发的真实 IP Header。
 
 服务器关键路径：
 
@@ -95,7 +95,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy\update-all.ps1
 3. 在服务器上构建 `local/pansou-api:latest` 镜像。
 4. 重建并启动 `pansou-api` 容器。
 5. 默认读取 `docker-compose.yml` 里的完整 `CHANNELS`，并保留 `PROXY=socks5h://192.168.0.1:7890`。
-6. 自动读取 `pansou-network` CIDR 并设置 `TRUSTED_PROXIES`。
+6. 自动读取 `pansou-network` CIDR，并连同 IPv4/IPv6 回环地址设置 `TRUSTED_PROXIES`。
 7. 检查本机和公网 `/api/health`。
 
 `scripts/deploy/update-frontend.ps1` 会执行：

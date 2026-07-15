@@ -167,11 +167,12 @@ chmod 600 "`$DATABASE_SECRETS_FILE"
 if ! docker network inspect pansou-network >/dev/null 2>&1; then
   docker network create pansou-network >/dev/null
 fi
-TRUSTED_PROXIES_VALUE=`$(docker network inspect --format '{{(index .IPAM.Config 0).Subnet}}' pansou-network)
-if [ -z "`$TRUSTED_PROXIES_VALUE" ]; then
+TRUSTED_PROXY_SUBNET=`$(docker network inspect --format '{{(index .IPAM.Config 0).Subnet}}' pansou-network)
+if [ -z "`$TRUSTED_PROXY_SUBNET" ]; then
   echo 'Unable to determine pansou-network CIDR for TRUSTED_PROXIES.' >&2
   exit 1
 fi
+TRUSTED_PROXIES_VALUE="`$TRUSTED_PROXY_SUBNET,127.0.0.1,::1"
 echo "Trusted reverse-proxy network: `$TRUSTED_PROXIES_VALUE"
 if ! docker volume inspect pansou-postgres >/dev/null 2>&1; then
   docker volume create pansou-postgres >/dev/null

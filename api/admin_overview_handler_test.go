@@ -18,13 +18,15 @@ import (
 type adminOverviewAPIPayload struct {
 	Code int `json:"code"`
 	Data struct {
-		ResourceCount int64                   `json:"resource_count"`
-		ActiveRun     *storage.CollectionRun  `json:"active_run"`
-		RecentRuns    []storage.CollectionRun `json:"recent_runs"`
-		Trends        []storage.TrendPoint    `json:"trends"`
-		GeneratedAt   time.Time               `json:"generated_at"`
-		Stale         bool                    `json:"stale"`
-		Refreshing    bool                    `json:"refreshing"`
+		ResourceCount    int64                                      `json:"resource_count"`
+		SourceTypeTotals map[string]storage.SourceContributionTotal `json:"source_type_totals"`
+		TopSourcesByType map[string][]storage.SourceContribution    `json:"top_sources_by_type"`
+		ActiveRun        *storage.CollectionRun                     `json:"active_run"`
+		RecentRuns       []storage.CollectionRun                    `json:"recent_runs"`
+		Trends           []storage.TrendPoint                       `json:"trends"`
+		GeneratedAt      time.Time                                  `json:"generated_at"`
+		Stale            bool                                       `json:"stale"`
+		Refreshing       bool                                       `json:"refreshing"`
 	} `json:"data"`
 }
 
@@ -50,7 +52,17 @@ func TestAdminOverviewAPIIncludesTrendsMetadataAndSupportsForce(t *testing.T) {
 	resourceCount.Store(10)
 	store := &fakeAdminOverviewStore{
 		snapshotFn: func(context.Context) (storage.OverviewStats, error) {
-			return storage.OverviewStats{ResourceCount: resourceCount.Load()}, nil
+			return storage.OverviewStats{
+				ResourceCount: resourceCount.Load(),
+				SourceTypeTotals: map[string]storage.SourceContributionTotal{
+					"plugin": {SourceType: "plugin", ResourceCount: 8, DiscoveryCount: 12},
+					"tg":     {SourceType: "tg", ResourceCount: 5, DiscoveryCount: 7},
+				},
+				TopSourcesByType: map[string][]storage.SourceContribution{
+					"plugin": {{SourceType: "plugin", SourceKey: "xdyh", ResourceCount: 8, DiscoveryCount: 12}},
+					"tg":     {},
+				},
+			}, nil
 		},
 		activityFn: func(context.Context) (*storage.CollectionRun, []storage.CollectionRun, error) {
 			return &storage.CollectionRun{ID: 3, Status: "running"}, []storage.CollectionRun{{ID: 2}}, nil
@@ -73,6 +85,10 @@ func TestAdminOverviewAPIIncludesTrendsMetadataAndSupportsForce(t *testing.T) {
 	}
 	if first.Code != 0 || first.Data.ResourceCount != 10 || len(first.Data.Trends) != 1 || first.Data.Trends[0].NewCount != 7 {
 		t.Fatalf("unexpected first response: %+v", first)
+	}
+	if first.Data.SourceTypeTotals["plugin"].ResourceCount != 8 ||
+		len(first.Data.TopSourcesByType["plugin"]) != 1 || first.Data.TopSourcesByType["plugin"][0].SourceKey != "xdyh" {
+		t.Fatalf("unexpected source contribution response: %+v", first.Data)
 	}
 	if first.Data.GeneratedAt != clock.Time() || first.Data.Stale || first.Data.Refreshing {
 		t.Fatalf("unexpected cache metadata: %+v", first.Data)
