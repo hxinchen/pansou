@@ -2,8 +2,10 @@ package api
 
 import (
 	// "fmt"
+	"context"
 	"errors"
 	"net/http"
+	"time"
 	// "os"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +17,18 @@ import (
 	jsonutil "pansou/util/json"
 	"strings"
 )
+
+const (
+	defaultSearchResponseTimeout = 10 * time.Second
+	statusClientClosedRequest    = 499
+)
+
+func searchResponseTimeout() time.Duration {
+	if config.AppConfig != nil && config.AppConfig.SearchResponseTimeout > 0 {
+		return config.AppConfig.SearchResponseTimeout
+	}
+	return defaultSearchResponseTimeout
+}
 
 // 保存搜索服务的实例
 var searchService service.SearchProvider
@@ -224,7 +238,10 @@ func SearchHandler(c *gin.Context) {
 		identity.UserID = principal.UserID
 		identity.Role = principal.Role
 	}
-	result, err := service.SearchWithContext(c.Request.Context(), searchService, service.ContextSearchRequest{
+	requestCtx := c.Request.Context()
+	responseCtx, cancelResponse := context.WithTimeout(requestCtx, searchResponseTimeout())
+	defer cancelResponse()
+	result, err := service.SearchWithContext(responseCtx, searchService, service.ContextSearchRequest{
 		Keyword: req.Keyword, Channels: req.Channels, Concurrency: req.Concurrency,
 		ForceRefresh: req.ForceRefresh, ResultType: req.ResultType, SourceType: req.SourceType,
 		Plugins: req.Plugins, CloudTypes: req.CloudTypes, Ext: req.Ext, Identity: identity,
@@ -237,6 +254,30 @@ func SearchHandler(c *gin.Context) {
 			response := model.NewErrorResponse(http.StatusBadRequest, "TG 频道格式无效: "+err.Error())
 			jsonData, _ := jsonutil.Marshal(response)
 			c.Data(http.StatusBadRequest, "application/json", jsonData)
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) && requestCtx.Err() == nil && responseCtx.Err() == context.DeadlineExceeded {
+			c.Set(usageResultCountContextKey, 0)
+			c.Header("Retry-After", "2")
+			response := model.NewSuccessResponse(model.SearchResponse{
+				Total:        0,
+				MergedByType: model.MergedLinks{},
+				Completion:   model.SearchCompletionProcessing,
+			})
+			jsonData, _ := jsonutil.Marshal(response)
+			c.Data(http.StatusAccepted, "application/json", jsonData)
+			return
+		}
+		if errors.Is(err, context.Canceled) && requestCtx.Err() != nil {
+			c.Set(usageErrorCodeContextKey, "SEARCH_CLIENT_CANCELED")
+			c.Status(statusClientClosedRequest)
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			c.Set(usageErrorCodeContextKey, "SEARCH_UPSTREAM_TIMEOUT")
+			response := model.NewErrorResponse(http.StatusGatewayTimeout, "搜索上游响应超时")
+			jsonData, _ := jsonutil.Marshal(response)
+			c.Data(http.StatusGatewayTimeout, "application/json", jsonData)
 			return
 		}
 		c.Set(usageErrorCodeContextKey, "SEARCH_FAILED")
@@ -258,6 +299,7 @@ func SearchHandler(c *gin.Context) {
 	statusCode := http.StatusOK
 	if result.IsPartial() {
 		statusCode = http.StatusPartialContent
+		c.Header("Retry-After", "2")
 	}
 	c.Data(statusCode, "application/json", jsonData)
 }

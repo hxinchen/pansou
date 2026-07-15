@@ -44,8 +44,9 @@ type MergedLinks map[string][]MergedLink
 type SearchCompletion string
 
 const (
-	SearchCompletionComplete SearchCompletion = "complete"
-	SearchCompletionPartial  SearchCompletion = "partial"
+	SearchCompletionComplete   SearchCompletion = "complete"
+	SearchCompletionPartial    SearchCompletion = "partial"
+	SearchCompletionProcessing SearchCompletion = "processing"
 )
 
 // SearchResponse 搜索响应

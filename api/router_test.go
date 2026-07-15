@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"pansou/config"
 	"pansou/model"
 	"pansou/plugin"
+	"pansou/service"
 	"pansou/tgchannel"
 	"pansou/util"
 
@@ -28,6 +30,20 @@ func (s routerTestSearch) Search(string, []string, int, bool, string, string, []
 }
 
 func (routerTestSearch) GetPluginManager() *plugin.PluginManager { return nil }
+
+type contextRouterTestSearch struct {
+	search func(context.Context) (model.SearchResponse, error)
+}
+
+func (s contextRouterTestSearch) Search(string, []string, int, bool, string, string, []string, []string, map[string]interface{}) (model.SearchResponse, error) {
+	return s.search(context.Background())
+}
+
+func (s contextRouterTestSearch) SearchContext(ctx context.Context, _ service.ContextSearchRequest) (model.SearchResponse, error) {
+	return s.search(ctx)
+}
+
+func (contextRouterTestSearch) GetPluginManager() *plugin.PluginManager { return nil }
 
 type managedRouterTestSearch struct {
 	channels    []string
@@ -133,6 +149,9 @@ func TestPartialSearchReturns206AndCompletionMetadata(t *testing.T) {
 	if response.Code != http.StatusPartialContent {
 		t.Fatalf("status = %d, want 206; body=%s", response.Code, response.Body.String())
 	}
+	if got := response.Header().Get("Retry-After"); got != "2" {
+		t.Fatalf("Retry-After = %q, want 2", got)
+	}
 	var payload struct {
 		Data model.SearchResponse `json:"data"`
 	}
@@ -141,6 +160,79 @@ func TestPartialSearchReturns206AndCompletionMetadata(t *testing.T) {
 	}
 	if payload.Data.Completion != model.SearchCompletionPartial || len(payload.Data.PartialSources) != 1 {
 		t.Fatalf("partial response = %+v", payload.Data)
+	}
+}
+
+func TestSearchSoftDeadlineReturnsProcessingResponse(t *testing.T) {
+	previous := config.AppConfig
+	config.AppConfig = testConfig(false)
+	config.AppConfig.SearchResponseTimeout = 20 * time.Millisecond
+	defer func() { config.AppConfig = previous }()
+
+	provider := contextRouterTestSearch{search: func(ctx context.Context) (model.SearchResponse, error) {
+		<-ctx.Done()
+		return model.SearchResponse{}, ctx.Err()
+	}}
+	router := SetupRouter(provider)
+	request := httptest.NewRequest(http.MethodGet, "/api/search?kw=test", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Retry-After"); got != "2" {
+		t.Fatalf("Retry-After = %q, want 2", got)
+	}
+	var payload struct {
+		Data model.SearchResponse `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Data.Completion != model.SearchCompletionProcessing || payload.Data.Total != 0 {
+		t.Fatalf("processing response = %+v", payload.Data)
+	}
+}
+
+func TestSearchUpstreamDeadlineReturnsGatewayTimeout(t *testing.T) {
+	previous := config.AppConfig
+	config.AppConfig = testConfig(false)
+	config.AppConfig.SearchResponseTimeout = time.Second
+	defer func() { config.AppConfig = previous }()
+
+	provider := contextRouterTestSearch{search: func(context.Context) (model.SearchResponse, error) {
+		return model.SearchResponse{}, context.DeadlineExceeded
+	}}
+	router := SetupRouter(provider)
+	request := httptest.NewRequest(http.MethodGet, "/api/search?kw=test", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want 504; body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestCanceledSearchRequestIsNotReportedAsServerError(t *testing.T) {
+	previous := config.AppConfig
+	config.AppConfig = testConfig(false)
+	config.AppConfig.SearchResponseTimeout = time.Second
+	defer func() { config.AppConfig = previous }()
+
+	provider := contextRouterTestSearch{search: func(ctx context.Context) (model.SearchResponse, error) {
+		<-ctx.Done()
+		return model.SearchResponse{}, ctx.Err()
+	}}
+	router := SetupRouter(provider)
+	requestCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "/api/search?kw=test", nil).WithContext(requestCtx)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != statusClientClosedRequest {
+		t.Fatalf("status = %d, want 499; body=%s", response.Code, response.Body.String())
 	}
 }
 

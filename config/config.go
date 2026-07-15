@@ -45,10 +45,11 @@ type Config struct {
 	AsyncCacheTTLHours        int           // 异步缓存有效期（小时）
 	AsyncLogEnabled           bool          // 是否启用异步插件详细日志
 	// HTTP服务器配置
-	HTTPReadTimeout  time.Duration // 读取超时
-	HTTPWriteTimeout time.Duration // 写入超时
-	HTTPIdleTimeout  time.Duration // 空闲超时
-	HTTPMaxConns     int           // 最大连接数
+	HTTPReadTimeout       time.Duration // 读取超时
+	HTTPWriteTimeout      time.Duration // 写入超时
+	HTTPIdleTimeout       time.Duration // 空闲超时
+	HTTPMaxConns          int           // 最大连接数
+	SearchResponseTimeout time.Duration // 搜索接口前台软响应预算
 	// 认证相关配置
 	AuthEnabled     bool              // 是否启用认证
 	AuthUsers       map[string]string // 用户名:密码映射
@@ -109,10 +110,11 @@ func Init() {
 		AsyncCacheTTLHours:        getAsyncCacheTTLHours(),
 		AsyncLogEnabled:           getAsyncLogEnabled(),
 		// HTTP服务器配置
-		HTTPReadTimeout:  getHTTPReadTimeout(),
-		HTTPWriteTimeout: getHTTPWriteTimeout(),
-		HTTPIdleTimeout:  getHTTPIdleTimeout(),
-		HTTPMaxConns:     getHTTPMaxConns(),
+		HTTPReadTimeout:       getHTTPReadTimeout(),
+		HTTPWriteTimeout:      getHTTPWriteTimeout(),
+		HTTPIdleTimeout:       getHTTPIdleTimeout(),
+		HTTPMaxConns:          getHTTPMaxConns(),
+		SearchResponseTimeout: getDurationSeconds("SEARCH_RESPONSE_TIMEOUT_SECONDS", 10*time.Second),
 		// 认证相关配置
 		AuthEnabled:     getAuthEnabled(),
 		AuthUsers:       getAuthUsers(),
