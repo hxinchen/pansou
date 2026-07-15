@@ -25,6 +25,13 @@ const (
 	MaxIterationRandomDelaySeconds = 3600
 )
 
+type IterationStopMode string
+
+const (
+	IterationStopModeNormal IterationStopMode = "normal"
+	IterationStopModeStrict IterationStopMode = "strict"
+)
+
 type IterationLocation string
 
 const (
@@ -45,8 +52,17 @@ type IterationConfig struct {
 	DelaySeconds          int               `json:"delay_seconds"`
 	Unlimited             bool              `json:"unlimited"`
 	NoKeywordStopCount    int               `json:"no_keyword_stop_count"`
+	StopMode              IterationStopMode `json:"stop_mode"`
 	RandomDelayMinSeconds int               `json:"random_delay_min_seconds"`
 	RandomDelayMaxSeconds int               `json:"random_delay_max_seconds"`
+}
+
+func NormalizeIterationStopMode(mode IterationStopMode) IterationStopMode {
+	normalized := IterationStopMode(strings.ToLower(strings.TrimSpace(string(mode))))
+	if normalized == "" {
+		return IterationStopModeNormal
+	}
+	return normalized
 }
 
 func canonicalIterationLocation(location IterationLocation) IterationLocation {
@@ -70,6 +86,11 @@ func ValidateIterationConfig(base RequestConfig, iteration IterationConfig) erro
 	}
 	if iteration.NoKeywordStopCount < MinIterationNoKeywordStopCount || iteration.NoKeywordStopCount > MaxIterationNoKeywordStopCount {
 		return fmt.Errorf("%w: iteration no-keyword stop count must be between 0 and 100", ErrInvalidConfig)
+	}
+	switch NormalizeIterationStopMode(iteration.StopMode) {
+	case IterationStopModeNormal, IterationStopModeStrict:
+	default:
+		return fmt.Errorf("%w: iteration stop mode must be normal or strict", ErrInvalidConfig)
 	}
 	if iteration.Unlimited && iteration.NoKeywordStopCount < 1 {
 		return fmt.Errorf("%w: unlimited iteration requires a no-keyword stop count between 1 and 100", ErrInvalidConfig)

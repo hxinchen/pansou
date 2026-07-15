@@ -196,7 +196,7 @@ func (q *LinkCheckQueue) report(err error) {
 
 func isFinalDetectionStatus(status DetectionStatus) bool {
 	switch status {
-	case DetectionValid, DetectionInvalid, DetectionUnknown, DetectionUnsupported:
+	case DetectionValid, DetectionInvalid, DetectionExpired, DetectionCancelled, DetectionViolation, DetectionLocked, DetectionUnknown, DetectionUnsupported:
 		return true
 	default:
 		return false

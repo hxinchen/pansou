@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -36,6 +37,25 @@ type contextAwareLiveSearch struct {
 	fakeLiveSearch
 	contextErr error
 }
+
+type blockingLiveSearch struct {
+	mu       sync.Mutex
+	calls    int
+	started  chan struct{}
+	release  chan struct{}
+	startOne sync.Once
+}
+
+func (s *blockingLiveSearch) Search(string, []string, int, bool, string, string, []string, []string, map[string]interface{}) (model.SearchResponse, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	s.startOne.Do(func() { close(s.started) })
+	<-s.release
+	return sampleLiveResponse(), nil
+}
+
+func (*blockingLiveSearch) GetPluginManager() *plugin.PluginManager { return nil }
 
 type resolvingLiveSearch struct {
 	fakeLiveSearch
@@ -144,6 +164,81 @@ func TestHybridSearchDatabaseHitReturnsWithoutLiveSearch(t *testing.T) {
 	}
 	if live.calls != 0 {
 		t.Fatalf("live calls = %d, want 0", live.calls)
+	}
+}
+
+func TestHybridSearchCoalescesConcurrentIdenticalRequests(t *testing.T) {
+	live := &blockingLiveSearch{started: make(chan struct{}), release: make(chan struct{})}
+	store := &fakeResourceStore{pages: []storage.ResourcePage{{}}}
+	hybrid := NewHybridSearchService(live, store, time.Hour)
+
+	const callers = 8
+	start := make(chan struct{})
+	errorsByCaller := make(chan error, callers)
+	var wait sync.WaitGroup
+	for index := 0; index < callers; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			_, err := hybrid.Search("sample", []string{"channel-a"}, 1, false, "all", "tg", nil, nil, nil)
+			errorsByCaller <- err
+		}()
+	}
+	close(start)
+	<-live.started
+	time.Sleep(25 * time.Millisecond)
+	close(live.release)
+	wait.Wait()
+	close(errorsByCaller)
+	for err := range errorsByCaller {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	live.mu.Lock()
+	calls := live.calls
+	live.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("live calls = %d, want 1", calls)
+	}
+	if store.upserts != 1 {
+		t.Fatalf("upserts = %d, want 1", store.upserts)
+	}
+}
+
+func TestHybridDatabaseSearchFiltersBeforePagingAndReadsEveryPage(t *testing.T) {
+	now := time.Now()
+	resources := make([]storage.Resource, 201)
+	for index := range resources {
+		url := fmt.Sprintf("https://pan.quark.cn/s/%03d", index)
+		resources[index] = storage.Resource{
+			ID: int64(index + 1), URL: url, NormalizedURL: url, Platform: "quark",
+			Title: "sample resource", CheckStatus: storage.CheckValid, LastSeenAt: now,
+			Sources: []storage.ResourceSource{{SourceType: "tg", SourceKey: "channel-a"}},
+		}
+	}
+	store := &fakeResourceStore{pages: []storage.ResourcePage{
+		{Total: 201, Page: 1, PageSize: 200, Items: resources[:200]},
+		{Total: 201, Page: 2, PageSize: 200, Items: resources[200:]},
+	}}
+	hybrid := NewHybridSearchService(&fakeLiveSearch{response: sampleLiveResponse()}, store, time.Hour)
+
+	response, err := hybrid.Search("sample", []string{"channel-a"}, 1, false, "merged_by_type", "tg", nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != 201 {
+		t.Fatalf("total = %d, want 201", response.Total)
+	}
+	if response.Completion != model.SearchCompletionComplete {
+		t.Fatalf("completion = %q", response.Completion)
+	}
+	if len(store.queries) != 2 || store.queries[0].Page != 1 || store.queries[1].Page != 2 {
+		t.Fatalf("database queries = %#v", store.queries)
+	}
+	if store.queries[0].TitleQuery != "sample" {
+		t.Fatalf("title query = %q", store.queries[0].TitleQuery)
 	}
 }
 

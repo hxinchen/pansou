@@ -20,7 +20,7 @@ const keywordAPISourceColumns = `
 	sync_interval_seconds, default_keyword_type, default_keyword_enabled,
 	default_priority, default_cooldown_seconds, iteration_enabled, iteration_location,
 	iteration_path, iteration_start, iteration_step, iteration_count, iteration_delay_seconds,
-	iteration_unlimited, iteration_no_keyword_stop_count,
+	iteration_unlimited, iteration_no_keyword_stop_count, iteration_stop_mode,
 	iteration_random_delay_min_seconds, iteration_random_delay_max_seconds,
 	next_sync_at, last_synced_at, last_status, last_error, last_item_count,
 	last_request_count, last_success_count, last_failure_count,
@@ -39,7 +39,7 @@ func scanKeywordAPISource(row rowScanner) (KeywordAPISource, error) {
 		&source.DefaultKeywordType, &source.DefaultKeywordEnabled, &source.DefaultPriority,
 		&cooldown, &source.IterationEnabled, &source.IterationLocation, &source.IterationPath,
 		&source.IterationStart, &source.IterationStep, &source.IterationCount,
-		&source.IterationDelaySeconds, &source.IterationUnlimited, &source.IterationNoKeywordStopCount,
+		&source.IterationDelaySeconds, &source.IterationUnlimited, &source.IterationNoKeywordStopCount, &source.IterationStopMode,
 		&source.IterationRandomDelayMinSeconds, &source.IterationRandomDelayMaxSeconds,
 		&nextSync, &lastSynced, &source.LastStatus,
 		&source.LastError, &source.LastItemCount, &source.LastRequestCount,
@@ -74,10 +74,10 @@ func (s *Store) CreateKeywordAPISource(ctx context.Context, input CreateKeywordA
 		sync_interval_seconds, default_keyword_type, default_keyword_enabled,
 		default_priority, default_cooldown_seconds, iteration_enabled, iteration_location,
 		iteration_path, iteration_start, iteration_step, iteration_count, iteration_delay_seconds,
-		iteration_unlimited, iteration_no_keyword_stop_count,
+		iteration_unlimited, iteration_no_keyword_stop_count, iteration_stop_mode,
 		iteration_random_delay_min_seconds, iteration_random_delay_max_seconds,
 		next_sync_at
-	) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+	) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
 	RETURNING `+keywordAPISourceColumns,
 		source.Name, source.Enabled, source.RequestExecutor, source.RequestMethod, source.RequestURL,
 		encodeStringMap(source.RequestHeaders), encodeStringMap(source.QueryParams),
@@ -86,7 +86,7 @@ func (s *Store) CreateKeywordAPISource(ctx context.Context, input CreateKeywordA
 		source.DefaultKeywordEnabled, source.DefaultPriority, source.DefaultCooldownSeconds,
 		source.IterationEnabled, source.IterationLocation, source.IterationPath,
 		source.IterationStart, source.IterationStep, source.IterationCount,
-		source.IterationDelaySeconds, source.IterationUnlimited, source.IterationNoKeywordStopCount,
+		source.IterationDelaySeconds, source.IterationUnlimited, source.IterationNoKeywordStopCount, source.IterationStopMode,
 		source.IterationRandomDelayMinSeconds, source.IterationRandomDelayMaxSeconds,
 		source.NextSyncAt,
 	))
@@ -203,9 +203,9 @@ func (s *Store) UpdateKeywordAPISource(ctx context.Context, id int64, input Upda
 		default_cooldown_seconds=$18, iteration_enabled=$19, iteration_location=$20,
 		iteration_path=$21, iteration_start=$22, iteration_step=$23, iteration_count=$24,
 		iteration_delay_seconds=$25, iteration_unlimited=$26,
-		iteration_no_keyword_stop_count=$27, iteration_random_delay_min_seconds=$28,
-		iteration_random_delay_max_seconds=$29, next_sync_at=$30,
-		sync_config_revision=$31, result_stale=$32, updated_at=now()
+		iteration_no_keyword_stop_count=$27, iteration_stop_mode=$28,
+		iteration_random_delay_min_seconds=$29, iteration_random_delay_max_seconds=$30, next_sync_at=$31,
+		sync_config_revision=$32, result_stale=$33, updated_at=now()
 	WHERE id=$1 RETURNING `+keywordAPISourceColumns,
 		id, updated.Name, updated.Enabled, updated.RequestExecutor, updated.RequestMethod, updated.RequestURL,
 		encodeStringMap(updated.RequestHeaders), encodeStringMap(updated.QueryParams),
@@ -214,7 +214,7 @@ func (s *Store) UpdateKeywordAPISource(ctx context.Context, id int64, input Upda
 		updated.DefaultKeywordEnabled, updated.DefaultPriority, updated.DefaultCooldownSeconds,
 		updated.IterationEnabled, updated.IterationLocation, updated.IterationPath,
 		updated.IterationStart, updated.IterationStep, updated.IterationCount,
-		updated.IterationDelaySeconds, updated.IterationUnlimited, updated.IterationNoKeywordStopCount,
+		updated.IterationDelaySeconds, updated.IterationUnlimited, updated.IterationNoKeywordStopCount, updated.IterationStopMode,
 		updated.IterationRandomDelayMinSeconds, updated.IterationRandomDelayMaxSeconds,
 		updated.NextSyncAt, updated.SyncConfigRevision, updated.ResultStale,
 	))
@@ -237,7 +237,7 @@ func (s *Store) CopyKeywordAPISource(ctx context.Context, id int64) (KeywordAPIS
 		sync_interval_seconds, default_keyword_type, default_keyword_enabled,
 		default_priority, default_cooldown_seconds, iteration_enabled, iteration_location,
 		iteration_path, iteration_start, iteration_step, iteration_count, iteration_delay_seconds,
-		iteration_unlimited, iteration_no_keyword_stop_count,
+		iteration_unlimited, iteration_no_keyword_stop_count, iteration_stop_mode,
 		iteration_random_delay_min_seconds, iteration_random_delay_max_seconds,
 		next_sync_at, last_synced_at, last_status, last_error, last_item_count,
 		last_request_count, last_success_count, last_failure_count
@@ -246,7 +246,7 @@ func (s *Store) CopyKeywordAPISource(ctx context.Context, id int64) (KeywordAPIS
 		sync_interval_seconds, default_keyword_type, default_keyword_enabled,
 		default_priority, default_cooldown_seconds, iteration_enabled, iteration_location,
 		iteration_path, iteration_start, iteration_step, iteration_count, iteration_delay_seconds,
-		iteration_unlimited, iteration_no_keyword_stop_count,
+		iteration_unlimited, iteration_no_keyword_stop_count, iteration_stop_mode,
 		iteration_random_delay_min_seconds, iteration_random_delay_max_seconds,
 		NULL, NULL, 'pending', '', 0, 0, 0, 0
 	FROM keyword_api_sources WHERE id=$1
@@ -304,6 +304,7 @@ func keywordAPISourceConfigChanged(before, after KeywordAPISource) bool {
 		before.IterationStart != after.IterationStart || before.IterationStep != after.IterationStep ||
 		before.IterationCount != after.IterationCount || before.IterationDelaySeconds != after.IterationDelaySeconds ||
 		before.IterationUnlimited != after.IterationUnlimited || before.IterationNoKeywordStopCount != after.IterationNoKeywordStopCount ||
+		before.IterationStopMode != after.IterationStopMode ||
 		before.IterationRandomDelayMinSeconds != after.IterationRandomDelayMinSeconds ||
 		before.IterationRandomDelayMaxSeconds != after.IterationRandomDelayMaxSeconds {
 		return true
@@ -611,6 +612,10 @@ func normalizeKeywordAPISourceCreate(input CreateKeywordAPISourceInput, now time
 	if !input.IterationEnabled && input.IterationLocation == "" && input.IterationPath == "" && input.IterationCount == 0 && input.IterationDelaySeconds == 0 && input.IterationStart == 0 && input.IterationStep == 0 {
 		iterationStep = 20
 	}
+	iterationStopMode := strings.ToLower(strings.TrimSpace(input.IterationStopMode))
+	if iterationStopMode == "" {
+		iterationStopMode = KeywordAPIIterationStopModeDefault
+	}
 	source := KeywordAPISource{
 		Name: strings.TrimSpace(input.Name), Enabled: input.Enabled, RequestExecutor: executor, RequestMethod: method,
 		RequestURL: strings.TrimSpace(input.RequestURL), RequestHeaders: cloneStringMap(input.RequestHeaders),
@@ -625,6 +630,7 @@ func normalizeKeywordAPISourceCreate(input CreateKeywordAPISourceInput, now time
 		IterationDelaySeconds:          input.IterationDelaySeconds,
 		IterationUnlimited:             input.IterationUnlimited,
 		IterationNoKeywordStopCount:    input.IterationNoKeywordStopCount,
+		IterationStopMode:              iterationStopMode,
 		IterationRandomDelayMinSeconds: input.IterationRandomDelayMinSeconds,
 		IterationRandomDelayMaxSeconds: input.IterationRandomDelayMaxSeconds,
 		NextSyncAt:                     nextSync, LastStatus: KeywordAPISourceStatusPending,
@@ -715,6 +721,9 @@ func applyKeywordAPISourceUpdate(source KeywordAPISource, input UpdateKeywordAPI
 	if input.IterationNoKeywordStopCount != nil {
 		source.IterationNoKeywordStopCount = *input.IterationNoKeywordStopCount
 	}
+	if input.IterationStopMode != nil {
+		source.IterationStopMode = strings.ToLower(strings.TrimSpace(*input.IterationStopMode))
+	}
 	if input.IterationRandomDelayMinSeconds != nil {
 		source.IterationRandomDelayMinSeconds = *input.IterationRandomDelayMinSeconds
 	}
@@ -765,6 +774,11 @@ func validateKeywordAPISource(source KeywordAPISource) error {
 	}
 	if source.IterationNoKeywordStopCount < 0 || source.IterationNoKeywordStopCount > 100 {
 		return fmt.Errorf("%w: iteration no-keyword stop count", ErrInvalid)
+	}
+	switch source.IterationStopMode {
+	case KeywordAPIIterationStopModeNormal, KeywordAPIIterationStopModeStrict:
+	default:
+		return fmt.Errorf("%w: iteration stop mode", ErrInvalid)
 	}
 	if source.IterationRandomDelayMinSeconds < -3600 || source.IterationRandomDelayMinSeconds > 3600 ||
 		source.IterationRandomDelayMaxSeconds < -3600 || source.IterationRandomDelayMaxSeconds > 3600 {

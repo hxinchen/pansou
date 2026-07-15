@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestNormalizeURLRemovesCodeAndTracking(t *testing.T) {
@@ -62,9 +63,56 @@ func TestBuildResourceWhereIncludeUsesOR(t *testing.T) {
 	}
 }
 
+func TestBuildResourceWhereAppliesTitleQueryBeforePagination(t *testing.T) {
+	t.Parallel()
+	where, args := buildResourceWhere(ResourceFilter{Keyword: "sample", TitleQuery: "sample"})
+	if !strings.Contains(where, "r.title ILIKE") {
+		t.Fatalf("missing title predicate: %s", where)
+	}
+	if len(args) != 2 || args[1] != "%sample%" {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
+func TestSanitizeResourceInputRemovesInvalidUTF8Recursively(t *testing.T) {
+	t.Parallel()
+	broken := "title" + string([]byte{0xe5, 0x2e, 0x2e})
+	input := sanitizeResourceInput(ResourceInput{
+		URL:     "https://example.com/" + broken,
+		Title:   broken,
+		Content: broken,
+		Keyword: broken,
+		Source: ResourceSourceInput{
+			Title:    broken,
+			Metadata: map[string]any{"tags": []string{broken}, "nested": map[string]any{"value": broken}},
+		},
+	})
+	values := []string{input.URL, input.Title, input.Content, input.Keyword, input.Source.Title}
+	for _, value := range values {
+		if !utf8.ValidString(value) {
+			t.Fatalf("value remains invalid UTF-8: %q", value)
+		}
+	}
+	tags := input.Source.Metadata["tags"].([]string)
+	nested := input.Source.Metadata["nested"].(map[string]any)
+	if !utf8.ValidString(tags[0]) || !utf8.ValidString(nested["value"].(string)) {
+		t.Fatalf("metadata was not sanitized: %#v", input.Source.Metadata)
+	}
+}
+
 func TestStatusValidators(t *testing.T) {
 	t.Parallel()
-	for _, status := range []string{CheckPending, CheckValid, CheckInvalid, CheckUnknown, CheckUnsupported} {
+	for _, status := range []string{
+		CheckPending,
+		CheckValid,
+		CheckInvalid,
+		CheckExpired,
+		CheckCancelled,
+		CheckViolation,
+		CheckLocked,
+		CheckUnknown,
+		CheckUnsupported,
+	} {
 		if !IsValidCheckStatus(status) {
 			t.Errorf("IsValidCheckStatus(%q) = false", status)
 		}

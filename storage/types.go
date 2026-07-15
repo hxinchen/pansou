@@ -15,6 +15,10 @@ const (
 	CheckPending     = "pending"
 	CheckValid       = "valid"
 	CheckInvalid     = "invalid"
+	CheckExpired     = "expired"
+	CheckCancelled   = "cancelled"
+	CheckViolation   = "violation"
+	CheckLocked      = "locked"
 	CheckUnknown     = "unknown"
 	CheckUnsupported = "unsupported"
 
@@ -125,6 +129,7 @@ type ResourceFilter struct {
 	Keyword        string
 	KeywordType    string
 	Query          string
+	TitleQuery     string
 	Platforms      []string
 	CheckStatuses  []string
 	SourceTypes    []string

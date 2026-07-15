@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"pansou/model"
 	"pansou/plugin"
 	"pansou/storage"
@@ -32,6 +34,7 @@ type HybridSearchService struct {
 
 	refreshMu sync.Mutex
 	refreshes map[string]struct{}
+	flights   singleflight.Group
 }
 
 func NewHybridSearchService(live SearchProvider, store ResourceSearchRepository, refreshAfter time.Duration) *HybridSearchService {
@@ -78,6 +81,12 @@ func (s *HybridSearchService) SearchContext(ctx context.Context, request Context
 		return model.SearchResponse{}, err
 	}
 	request = resolved
+	return executeSearchFlight(ctx, &s.flights, "hybrid", request, func(sharedCtx context.Context) (model.SearchResponse, error) {
+		return s.searchContextUncoalesced(sharedCtx, request)
+	})
+}
+
+func (s *HybridSearchService) searchContextUncoalesced(ctx context.Context, request ContextSearchRequest) (model.SearchResponse, error) {
 	keyword, channels, forceRefresh := request.Keyword, request.Channels, request.ForceRefresh
 	resultType, sourceType, plugins, cloudTypes, ext := request.ResultType, request.SourceType, request.Plugins, request.CloudTypes, request.Ext
 	if s.store == nil {
@@ -97,7 +106,7 @@ func (s *HybridSearchService) SearchContext(ctx context.Context, request Context
 		return response, nil
 	}
 
-	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	dbCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	databaseResponse, latestSeen, err := s.searchDatabase(dbCtx, keyword, resultType, sourceType, channels, plugins, cloudTypes)
 	cancel()
 	if err == nil && databaseResponse.Total > 0 {
@@ -130,24 +139,24 @@ func formatSearchResponse(response model.SearchResponse, resultType string) mode
 	if response.MergedByType == nil {
 		response.MergedByType = mergeResultsByType(response.Results, "", nil)
 	}
-	if response.Total == 0 {
-		if resultType == "merged_by_type" || resultType == "merge" || resultType == "" {
-			for _, links := range response.MergedByType {
-				response.Total += len(links)
-			}
-		} else {
-			response.Total = len(response.Results)
+	response.Total = 0
+	if resultType == "merged_by_type" || resultType == "merge" || resultType == "" {
+		for _, links := range response.MergedByType {
+			response.Total += len(links)
 		}
+	} else {
+		response.Total = len(response.Results)
 	}
 	return filterResponseByType(response, resultType)
 }
 
 func (s *HybridSearchService) searchDatabase(ctx context.Context, keyword, resultType, sourceType string, channels, plugins, cloudTypes []string) (model.SearchResponse, time.Time, error) {
 	base := storage.ResourceFilter{
-		Keyword:   keyword,
-		Platforms: cloudTypes,
-		Page:      1,
-		PageSize:  200,
+		Keyword:    keyword,
+		TitleQuery: keyword,
+		Platforms:  cloudTypes,
+		Page:       1,
+		PageSize:   200,
 	}
 
 	filters := make([]storage.ResourceFilter, 0, 2)
@@ -159,11 +168,7 @@ func (s *HybridSearchService) searchDatabase(ctx context.Context, keyword, resul
 			filters = append(filters, base)
 		}
 	case "plugin":
-		if len(plugins) > 0 {
-			base.SourceTypes = []string{"plugin"}
-			base.SourceKeys = plugins
-			filters = append(filters, base)
-		}
+		filters = append(filters, s.databasePluginFilters(base, plugins)...)
 	default:
 		if len(channels) > 0 {
 			tgFilter := base
@@ -171,32 +176,34 @@ func (s *HybridSearchService) searchDatabase(ctx context.Context, keyword, resul
 			tgFilter.SourceKeys = channels
 			filters = append(filters, tgFilter)
 		}
-		if len(plugins) > 0 {
-			pluginFilter := base
-			pluginFilter.SourceTypes = []string{"plugin"}
-			pluginFilter.SourceKeys = plugins
-			filters = append(filters, pluginFilter)
-		}
+		filters = append(filters, s.databasePluginFilters(base, plugins)...)
 	}
 
 	allResults := make([]model.SearchResult, 0)
 	latestSeen := time.Time{}
 	for _, filter := range filters {
-		page, err := s.store.SearchResources(ctx, filter)
-		if err != nil {
-			return model.SearchResponse{}, time.Time{}, err
-		}
-		for _, resource := range page.Items {
-			if resource.LastSeenAt.After(latestSeen) {
-				latestSeen = resource.LastSeenAt
+		for pageNumber := 1; ; pageNumber++ {
+			filter.Page = pageNumber
+			page, err := s.store.SearchResources(ctx, filter)
+			if err != nil {
+				return model.SearchResponse{}, time.Time{}, err
+			}
+			for _, resource := range page.Items {
+				if resource.LastSeenAt.After(latestSeen) {
+					latestSeen = resource.LastSeenAt
+				}
+			}
+			allResults = mergeDatabaseSearchResults(allResults, page.ToSearchResponse().Results)
+			if len(page.Items) == 0 || len(page.Items) < filter.PageSize || int64(pageNumber*filter.PageSize) >= page.Total {
+				break
 			}
 		}
-		allResults = mergeDatabaseSearchResults(allResults, page.ToSearchResponse().Results)
 	}
 
 	response := model.SearchResponse{
 		Results:      allResults,
 		MergedByType: mergeResultsByType(allResults, keyword, cloudTypes),
+		Completion:   model.SearchCompletionComplete,
 	}
 	if resultType == "merged_by_type" || resultType == "merge" || resultType == "" {
 		for _, links := range response.MergedByType {
@@ -206,6 +213,43 @@ func (s *HybridSearchService) searchDatabase(ctx context.Context, keyword, resul
 		response.Total = len(response.Results)
 	}
 	return filterResponseByType(response, resultType), latestSeen, nil
+}
+
+func (s *HybridSearchService) databasePluginFilters(base storage.ResourceFilter, names []string) []storage.ResourceFilter {
+	if len(names) == 0 {
+		return nil
+	}
+	strict := make([]string, 0, len(names))
+	broad := make([]string, 0)
+	instances := make(map[string]plugin.AsyncSearchPlugin)
+	if manager := s.GetPluginManager(); manager != nil {
+		for _, instance := range manager.GetPlugins() {
+			instances[strings.ToLower(instance.Name())] = instance
+		}
+	}
+	for _, name := range names {
+		instance := instances[strings.ToLower(name)]
+		if instance != nil && instance.SkipServiceFilter() {
+			broad = append(broad, name)
+		} else {
+			strict = append(strict, name)
+		}
+	}
+	filters := make([]storage.ResourceFilter, 0, 2)
+	if len(strict) > 0 {
+		filter := base
+		filter.SourceTypes = []string{"plugin"}
+		filter.SourceKeys = strict
+		filters = append(filters, filter)
+	}
+	if len(broad) > 0 {
+		filter := base
+		filter.TitleQuery = ""
+		filter.SourceTypes = []string{"plugin"}
+		filter.SourceKeys = broad
+		filters = append(filters, filter)
+	}
+	return filters
 }
 
 func mergeDatabaseSearchResults(existing, incoming []model.SearchResult) []model.SearchResult {
@@ -267,6 +311,10 @@ func (s *HybridSearchService) refreshInBackground(request ContextSearchRequest) 
 }
 
 func (s *HybridSearchService) persist(keyword string, response model.SearchResponse) {
+	if response.IsPartial() {
+		log.Printf("skip persisting partial live search for %q (%d results)", keyword, response.Total)
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if s.recorder != nil {

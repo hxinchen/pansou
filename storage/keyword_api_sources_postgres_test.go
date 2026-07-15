@@ -14,31 +14,31 @@ func TestPostgresKeywordAPISourcesLifecycleAndSync(t *testing.T) {
 	ctx := context.Background()
 
 	var migrated bool
-	if err := store.pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version=7)").Scan(&migrated); err != nil || !migrated {
-		t.Fatalf("migration 7: migrated=%v err=%v", migrated, err)
+	if err := store.pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version=13)").Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("migration 13: migrated=%v err=%v", migrated, err)
 	}
 	var defaultID int64
 	var iterationEnabled, iterationUnlimited bool
-	var iterationLocation, iterationPath, lastStatus string
+	var iterationLocation, iterationPath, iterationStopMode, lastStatus string
 	var iterationStart, iterationStep int64
 	var iterationCount, iterationDelay, noKeywordStopCount, randomDelayMin, randomDelayMax int
 	var requestCount, successCount, failureCount int
 	if err := store.pool.QueryRow(ctx, `INSERT INTO keyword_api_sources (name) VALUES ('Migration defaults')
 		RETURNING id, iteration_enabled, iteration_location, iteration_path, iteration_start,
 		iteration_step, iteration_count, iteration_delay_seconds, iteration_unlimited,
-		iteration_no_keyword_stop_count, iteration_random_delay_min_seconds,
+		iteration_no_keyword_stop_count, iteration_stop_mode, iteration_random_delay_min_seconds,
 		iteration_random_delay_max_seconds, last_status,
 		last_request_count, last_success_count, last_failure_count`).Scan(
 		&defaultID, &iterationEnabled, &iterationLocation, &iterationPath, &iterationStart,
 		&iterationStep, &iterationCount, &iterationDelay, &iterationUnlimited,
-		&noKeywordStopCount, &randomDelayMin, &randomDelayMax, &lastStatus,
+		&noKeywordStopCount, &iterationStopMode, &randomDelayMin, &randomDelayMax, &lastStatus,
 		&requestCount, &successCount, &failureCount,
 	); err != nil {
 		t.Fatalf("migration 7 defaults: %v", err)
 	}
 	if iterationEnabled || iterationLocation != "query" || iterationPath != "" || iterationStart != 0 ||
 		iterationStep != 20 || iterationCount != 1 || iterationDelay != 0 || iterationUnlimited ||
-		noKeywordStopCount != 0 || randomDelayMin != 0 || randomDelayMax != 0 || lastStatus != KeywordAPISourceStatusPending ||
+		noKeywordStopCount != 0 || iterationStopMode != KeywordAPIIterationStopModeStrict || randomDelayMin != 0 || randomDelayMax != 0 || lastStatus != KeywordAPISourceStatusPending ||
 		requestCount != 0 || successCount != 0 || failureCount != 0 {
 		t.Fatalf("migration 7 defaults = enabled:%v location:%q path:%q start:%d step:%d count:%d delay:%d unlimited:%v stop:%d random:%d..%d status:%q stats:%d/%d/%d",
 			iterationEnabled, iterationLocation, iterationPath, iterationStart, iterationStep, iterationCount, iterationDelay,
@@ -58,6 +58,10 @@ func TestPostgresKeywordAPISourcesLifecycleAndSync(t *testing.T) {
 		(name, iteration_no_keyword_stop_count) VALUES ('Invalid stop count', 101)`); err == nil {
 		t.Fatal("migration allowed an out-of-range no-keyword stop count")
 	}
+	if _, err := store.pool.Exec(ctx, `INSERT INTO keyword_api_sources
+		(name, iteration_stop_mode) VALUES ('Invalid stop mode', 'aggressive')`); err == nil {
+		t.Fatal("migration allowed an invalid stop mode")
+	}
 	if _, err := store.pool.Exec(ctx, "DELETE FROM keyword_api_sources WHERE id=$1", defaultID); err != nil {
 		t.Fatalf("delete migration default row: %v", err)
 	}
@@ -70,7 +74,7 @@ func TestPostgresKeywordAPISourcesLifecycleAndSync(t *testing.T) {
 		DefaultPriority: 23, DefaultCooldownSeconds: &cooldown, IterationEnabled: true,
 		IterationLocation: "body", IterationPath: "pagination.offset", IterationStart: 0,
 		IterationStep: 20, IterationCount: 10, IterationDelaySeconds: 1,
-		IterationUnlimited: true, IterationNoKeywordStopCount: 3,
+		IterationUnlimited: true, IterationNoKeywordStopCount: 3, IterationStopMode: KeywordAPIIterationStopModeStrict,
 		IterationRandomDelayMinSeconds: -1, IterationRandomDelayMaxSeconds: 2,
 	})
 	if err != nil {
@@ -79,26 +83,27 @@ func TestPostgresKeywordAPISourcesLifecycleAndSync(t *testing.T) {
 	if source.NextSyncAt == nil || !source.NextSyncAt.Equal(now) || source.RequestHeaders["Authorization"] != "Bearer secret" ||
 		!source.IterationEnabled || source.IterationLocation != "body" || source.IterationPath != "pagination.offset" ||
 		source.IterationStep != 20 || source.IterationCount != 10 || source.IterationDelaySeconds != 1 ||
-		!source.IterationUnlimited || source.IterationNoKeywordStopCount != 3 ||
+		!source.IterationUnlimited || source.IterationNoKeywordStopCount != 3 || source.IterationStopMode != KeywordAPIIterationStopModeStrict ||
 		source.IterationRandomDelayMinSeconds != -1 || source.IterationRandomDelayMaxSeconds != 2 {
 		t.Fatalf("created source = %+v", source)
 	}
 	newName := "Updated API"
 	updatedStopCount, updatedRandomDelayMin, updatedRandomDelayMax := 4, -2, 3
+	updatedStopMode := KeywordAPIIterationStopModeNormal
 	updated, err := store.UpdateKeywordAPISource(ctx, source.ID, UpdateKeywordAPISourceInput{
-		Name: &newName, IterationNoKeywordStopCount: &updatedStopCount,
+		Name: &newName, IterationNoKeywordStopCount: &updatedStopCount, IterationStopMode: &updatedStopMode,
 		IterationRandomDelayMinSeconds: &updatedRandomDelayMin,
 		IterationRandomDelayMaxSeconds: &updatedRandomDelayMax,
 	})
 	if err != nil || updated.Name != newName || updated.DefaultPriority != 23 ||
-		updated.IterationNoKeywordStopCount != updatedStopCount ||
+		updated.IterationNoKeywordStopCount != updatedStopCount || updated.IterationStopMode != updatedStopMode ||
 		updated.IterationRandomDelayMinSeconds != updatedRandomDelayMin ||
 		updated.IterationRandomDelayMaxSeconds != updatedRandomDelayMax {
 		t.Fatalf("UpdateKeywordAPISource() = %+v, %v", updated, err)
 	}
 	page, err := store.ListKeywordAPISources(ctx, KeywordAPISourceFilter{Query: "Updated", Page: 1, PageSize: 10})
 	if err != nil || page.Total != 1 || len(page.Items) != 1 ||
-		page.Items[0].IterationNoKeywordStopCount != updatedStopCount ||
+		page.Items[0].IterationNoKeywordStopCount != updatedStopCount || page.Items[0].IterationStopMode != updatedStopMode ||
 		page.Items[0].IterationRandomDelayMinSeconds != updatedRandomDelayMin ||
 		page.Items[0].IterationRandomDelayMaxSeconds != updatedRandomDelayMax {
 		t.Fatalf("ListKeywordAPISources() = %+v, %v", page, err)
@@ -112,6 +117,13 @@ func TestPostgresKeywordAPISourcesLifecycleAndSync(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("CreateKeyword(manual): %v", err)
+	}
+	existing, err := store.ExistingNormalizedKeywords(ctx, []string{" Alpha ", "missing", "alpha"})
+	if err != nil || len(existing) != 1 {
+		t.Fatalf("ExistingNormalizedKeywords() = %#v, %v", existing, err)
+	}
+	if _, ok := existing["alpha"]; !ok {
+		t.Fatalf("ExistingNormalizedKeywords() omitted alpha: %#v", existing)
 	}
 
 	claims := make(chan *KeywordAPISource, 2)
@@ -220,7 +232,7 @@ func TestPostgresKeywordAPISourcesLifecycleAndSync(t *testing.T) {
 		copy.LastRequestCount != 0 || copy.LastSuccessCount != 0 || copy.LastFailureCount != 0 ||
 		copy.RequestURL != source.RequestURL || copy.RequestHeaders["Authorization"] != "Bearer secret" ||
 		!copy.IterationEnabled || copy.IterationPath != source.IterationPath || copy.IterationCount != source.IterationCount ||
-		!copy.IterationUnlimited || copy.IterationNoKeywordStopCount != updatedStopCount ||
+		!copy.IterationUnlimited || copy.IterationNoKeywordStopCount != updatedStopCount || copy.IterationStopMode != updatedStopMode ||
 		copy.IterationRandomDelayMinSeconds != updatedRandomDelayMin ||
 		copy.IterationRandomDelayMaxSeconds != updatedRandomDelayMax {
 		t.Fatalf("copied source = %+v", copy)

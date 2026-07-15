@@ -139,6 +139,60 @@ type cachedResponse struct {
 	AccessCount int                  `json:"access_count"`
 }
 
+var pluginCacheLocks [64]sync.Mutex
+
+func pluginCacheLock(key string) *sync.Mutex {
+	hash := uint32(2166136261)
+	for index := 0; index < len(key); index++ {
+		hash ^= uint32(key[index])
+		hash *= 16777619
+	}
+	return &pluginCacheLocks[hash%uint32(len(pluginCacheLocks))]
+}
+
+func storeCompletedPluginResponse(key string, incoming []model.SearchResult, completedAt time.Time) cachedResponse {
+	lock := pluginCacheLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+
+	merged := append([]model.SearchResult(nil), incoming...)
+	seen := make(map[string]struct{}, len(incoming))
+	for _, result := range incoming {
+		seen[pluginResultCacheKey(result)] = struct{}{}
+	}
+	accessCount := 1
+	lastAccess := completedAt
+	if value, ok := apiResponseCache.Load(key); ok {
+		cached := value.(cachedResponse)
+		accessCount = cached.AccessCount
+		lastAccess = cached.LastAccess
+		for _, result := range cached.Results {
+			cacheKey := pluginResultCacheKey(result)
+			if _, exists := seen[cacheKey]; exists {
+				continue
+			}
+			seen[cacheKey] = struct{}{}
+			merged = append(merged, result)
+		}
+	}
+	response := cachedResponse{
+		Results: merged, Timestamp: completedAt, Complete: true,
+		LastAccess: lastAccess, AccessCount: accessCount,
+	}
+	apiResponseCache.Store(key, response)
+	return response
+}
+
+func pluginResultCacheKey(result model.SearchResult) string {
+	if result.UniqueID != "" {
+		return "id:" + result.UniqueID
+	}
+	if len(result.Links) > 0 && result.Links[0].URL != "" {
+		return "url:" + result.Links[0].URL
+	}
+	return "title:" + result.Title
+}
+
 // ============================================================
 // 第三部分：插件注册和管理
 // ============================================================
@@ -727,7 +781,6 @@ func (p *BaseAsyncPlugin) AsyncSearch(
 				}
 				return
 			}
-
 			select {
 			case resultChan <- results:
 			default:
@@ -895,7 +948,7 @@ func (p *BaseAsyncPlugin) AsyncSearch(
 		}
 
 		// 创建空的临时缓存，以便后台处理完成后可以更新
-		apiResponseCache.Store(pluginSpecificCacheKey, cachedResponse{
+		apiResponseCache.LoadOrStore(pluginSpecificCacheKey, cachedResponse{
 			Results:     []model.SearchResult{},
 			Timestamp:   now,
 			Complete:    false, // 标记为不完整
@@ -981,6 +1034,11 @@ func (p *BaseAsyncPlugin) AsyncSearchWithResult(
 	resultChan := make(chan []model.SearchResult, 1)
 	errorChan := make(chan error, 1)
 	doneChan := make(chan struct{})
+	storeCompleted := func(results []model.SearchResult) {
+		completedAt := time.Now()
+		cached := storeCompletedPluginResponse(pluginSpecificCacheKey, results, completedAt)
+		p.updateMainCacheWithFinal(mainCacheKey, cached.Results, true)
+	}
 
 	// 启动后台处理
 	go func() {
@@ -1003,7 +1061,7 @@ func (p *BaseAsyncPlugin) AsyncSearchWithResult(
 				}
 				return
 			}
-
+			storeCompleted(results)
 			select {
 			case resultChan <- results:
 			default:
@@ -1020,6 +1078,7 @@ func (p *BaseAsyncPlugin) AsyncSearchWithResult(
 			default:
 			}
 		} else {
+			storeCompleted(results)
 			select {
 			case resultChan <- results:
 			default:
@@ -1035,26 +1094,6 @@ func (p *BaseAsyncPlugin) AsyncSearchWithResult(
 
 	select {
 	case results := <-resultChan:
-		// 不直接关闭，让defer处理
-
-		// 缓存结果
-		apiResponseCache.Store(pluginSpecificCacheKey, cachedResponse{
-			Results:     results,
-			Timestamp:   now,
-			Complete:    true, // 🔥 及时完成，标记为完整结果
-			LastAccess:  now,
-			AccessCount: 1,
-		})
-
-		// 🔧 恢复主缓存更新：使用统一的GOB序列化
-		// 传递原始数据，由主程序负责序列化
-		if mainCacheKey != "" && p.mainCacheUpdater != nil {
-			err := p.mainCacheUpdater(mainCacheKey, results, p.cacheTTL, true, p.currentKeyword)
-			if err != nil {
-				fmt.Printf("❌ [%s] 及时完成缓存更新失败: %s | 错误: %v\n", p.name, mainCacheKey, err)
-			}
-		}
-
 		return model.PluginSearchResult{
 			Results:   results,
 			IsFinal:   true, // 🔥 及时完成，最终结果
@@ -1068,16 +1107,11 @@ func (p *BaseAsyncPlugin) AsyncSearchWithResult(
 		return model.PluginSearchResult{}, err
 
 	case <-time.After(responseTimeout):
-		// 🔥 超时处理：返回空结果，后台继续处理
-		go p.completeSearchInBackground(keyword, searchFunc, pluginSpecificCacheKey, mainCacheKey, doneChan, ext)
-
-		// 存储临时缓存（标记为不完整）
-		apiResponseCache.Store(pluginSpecificCacheKey, cachedResponse{
-			Results:     []model.SearchResult{},
-			Timestamp:   now,
-			Complete:    false, // 🔥 标记为不完整
-			LastAccess:  now,
-			AccessCount: 1,
+		// The original search keeps running and stores its completed result. Do
+		// not launch a duplicate request after the response deadline.
+		apiResponseCache.LoadOrStore(pluginSpecificCacheKey, cachedResponse{
+			Results: []model.SearchResult{}, Timestamp: now, Complete: false,
+			LastAccess: now, AccessCount: 1,
 		})
 
 		return model.PluginSearchResult{

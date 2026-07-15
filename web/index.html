@@ -298,7 +298,11 @@
                 <option value="">全部状态</option>
                 <option value="pending">待检测</option>
                 <option value="valid">有效</option>
+                <option value="locked">需提取码</option>
                 <option value="invalid">失效</option>
+                <option value="expired">已过期</option>
+                <option value="cancelled">取消分享</option>
+                <option value="violation">违规</option>
                 <option value="unknown">未知</option>
                 <option value="unsupported">不支持</option>
               </select>
@@ -974,7 +978,8 @@
               <div id="api-iteration-fields" class="api-iteration-fields" hidden>
                 <div class="form-grid api-iteration-targets"><label class="field"><span>参数位置</span><select id="api-iteration-location" name="iteration_location"><option value="query">Query</option><option value="header">Header</option><option value="body">Body</option></select></label><label class="field"><span>参数路径 <em>*</em></span><input id="api-iteration-path" name="iteration_path" type="text" placeholder="offset 或 pagination.offset"></label></div>
                 <p id="api-iteration-hint" class="api-iteration-hint">将覆盖 Query 中对应键的值。</p>
-                <div class="api-iteration-mode"><label class="toggle-field api-unlimited-toggle"><span><strong>无限迭代</strong><small>由连续无关键词轮数停止</small></span><input id="api-iteration-unlimited" name="iteration_unlimited" type="checkbox"><span class="toggle" aria-hidden="true"></span></label><label class="field"><span>连续无关键词停止</span><input id="api-iteration-no-keyword-stop-count" name="iteration_no_keyword_stop_count" type="number" min="0" max="100" step="1" value="0"><small class="api-field-note">有限模式填 0 关闭；无限模式需填 1–100。</small></label></div>
+                <div class="api-iteration-mode"><label class="toggle-field api-unlimited-toggle"><span><strong>无限迭代</strong><small>由连续停止轮数结束</small></span><input id="api-iteration-unlimited" name="iteration_unlimited" type="checkbox"><span class="toggle" aria-hidden="true"></span></label><label class="field"><span id="api-iteration-stop-count-label">连续无新增关键词停止</span><input id="api-iteration-no-keyword-stop-count" name="iteration_no_keyword_stop_count" type="number" min="0" max="100" step="1" value="0" aria-labelledby="api-iteration-stop-count-label"><small class="api-field-note">有限模式填 0 关闭；无限模式需填 1–100。</small></label></div>
+                <fieldset class="api-stop-mode-field" aria-describedby="api-stop-mode-description"><legend>停止判定</legend><div class="segmented api-stop-mode" role="radiogroup" aria-label="连续停止判定模式"><label title="本轮没有提取到有效关键词时累计"><input name="iteration_stop_mode" type="radio" value="normal"><span>普通</span></label><label title="本轮没有产生资源库新词时累计，并排除本次同步已见词"><input name="iteration_stop_mode" type="radio" value="strict" checked><span>严格</span></label></div><small id="api-stop-mode-description">本轮没有产生资源库新词时累计，并排除本次同步已见词。</small></fieldset>
                 <div class="api-iteration-numbers"><label class="field"><span>起始值</span><input id="api-iteration-start" name="iteration_start" type="number" step="1" value="0"></label><label class="field"><span>步长</span><input id="api-iteration-step" name="iteration_step" type="number" step="1" value="20"></label><label class="field"><span>请求次数</span><input id="api-iteration-count" name="iteration_count" type="number" min="1" max="100" step="1" value="1"></label><label class="field"><span>固定间隔（秒）</span><input id="api-iteration-delay" name="iteration_delay_seconds" type="number" min="0" max="3600" step="1" value="0"></label><label class="field"><span>随机最小（秒）</span><input id="api-iteration-random-delay-min" name="iteration_random_delay_min_seconds" type="number" min="-3600" max="3600" step="1" value="0"></label><label class="field"><span>随机最大（秒）</span><input id="api-iteration-random-delay-max" name="iteration_random_delay_max_seconds" type="number" min="-3600" max="3600" step="1" value="0"></label></div>
                 <p class="api-iteration-hint">单轮等待为固定间隔与随机秒数之和，结果小于 0 时按 0 秒执行。</p>
                 <div id="api-iteration-preview" class="api-iteration-preview" aria-live="polite"><div><span>有限序列 · 共 1 轮</span><strong>0</strong></div><div><span>理论总等待</span><strong>0 秒</strong><small>不含网络请求时间</small></div></div>

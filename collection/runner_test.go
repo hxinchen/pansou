@@ -695,7 +695,7 @@ func TestRecordExternalUpdatesManagedKeywordCooldown(t *testing.T) {
 	}
 }
 
-func TestRecordExternalWithDataIsSuccessfulWhenIngestReportsError(t *testing.T) {
+func TestRecordExternalWithDataFailsWhenIngestReportsError(t *testing.T) {
 	now := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
 	repository := &fakeRunRepository{ingestErr: errors.New("partial write report")}
 	runner := NewRunner(repository, nil, nil, nil, runnerTestConfig(now))
@@ -708,13 +708,13 @@ func TestRecordExternalWithDataIsSuccessfulWhenIngestReportsError(t *testing.T) 
 	if err == nil {
 		t.Fatal("RecordExternal() did not report ingest error")
 	}
-	if batch == nil || batch.Status != StatusSuccess {
+	if batch == nil || batch.Status != StatusFailed {
 		t.Fatalf("external batch with returned data = %+v", batch)
 	}
 	repository.mu.Lock()
 	completion := repository.itemCompletions[0]
 	repository.mu.Unlock()
-	if completion.Status != StatusSuccess || completion.NextEligibleAt != nil {
+	if completion.Status != StatusFailed || completion.NextEligibleAt != nil {
 		t.Fatalf("unmanaged external completion = %+v", completion)
 	}
 	if err := runner.Stop(ctx); err != nil {

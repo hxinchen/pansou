@@ -23,6 +23,9 @@ type fakeKeywordSourceStore struct {
 	failedMessage      string
 	failedRequestCount int
 	failedFailureCount int
+	existingKeywords   map[string]struct{}
+	existingErr        error
+	existingCalls      int
 }
 
 type fakeTrackedKeywordSourceStore struct {
@@ -113,6 +116,20 @@ func (f *fakeKeywordSourceStore) FailKeywordAPISourceSyncWithStats(_ context.Con
 	f.failedRequestCount = requestCount
 	f.failedFailureCount = failureCount
 	return storage.KeywordAPISource{}, nil
+}
+
+func (f *fakeKeywordSourceStore) ExistingNormalizedKeywords(_ context.Context, values []string) (map[string]struct{}, error) {
+	f.existingCalls++
+	if f.existingErr != nil {
+		return nil, f.existingErr
+	}
+	result := make(map[string]struct{})
+	for _, value := range values {
+		if _, exists := f.existingKeywords[value]; exists {
+			result[value] = struct{}{}
+		}
+	}
+	return result, nil
 }
 
 func TestRequestConfigDecodesStoredFormBody(t *testing.T) {
@@ -277,6 +294,102 @@ func TestSyncClaimedStopsAfterConsecutiveEmptyIterationsAndResetsOnDuplicates(t 
 	}
 	if len(input.Values) != 1 || input.Values[0] != "shared" || input.Status != storage.KeywordAPISourceStatusSuccess {
 		t.Fatalf("unexpected completion: %+v", input)
+	}
+	if store.existingCalls != 0 {
+		t.Fatalf("normal mode made %d keyword existence queries", store.existingCalls)
+	}
+}
+
+func TestSyncClaimedStrictStopsOnGlobalAndRunDuplicates(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		page, _ := strconv.Atoi(request.URL.Query().Get("page"))
+		w.Header().Set("Content-Type", "application/json")
+		values := map[int]string{0: "global", 1: "fresh", 2: "fresh", 3: "known", 4: "too-late"}
+		_, _ = fmt.Fprintf(w, `{"items":[{"title":%q}]}`, values[page])
+	}))
+	defer server.Close()
+
+	store := &fakeKeywordSourceStore{existingKeywords: map[string]struct{}{"global": {}, "known": {}}}
+	service := newService(store, Config{})
+	service.waitDelay = func(context.Context, time.Duration) error { return nil }
+	_, err := service.syncClaimed(context.Background(), storage.KeywordAPISource{
+		ID: 20, RequestMethod: http.MethodGet, RequestURL: server.URL, BodyType: "none", TimeoutSeconds: 5,
+		ResponsePath: "items[].title", IterationEnabled: true, IterationLocation: "query",
+		IterationPath: "page", IterationStep: 1, IterationCount: 1, IterationUnlimited: true, IterationNoKeywordStopCount: 2,
+		IterationStopMode: storage.KeywordAPIIterationStopModeStrict,
+	})
+	if err != nil {
+		t.Fatalf("syncClaimed: %v", err)
+	}
+	if requests.Load() != 4 || store.existingCalls != 3 {
+		t.Fatalf("requests=%d existence queries=%d", requests.Load(), store.existingCalls)
+	}
+	if got := store.completed.Values; len(got) != 3 || got[0] != "global" || got[1] != "fresh" || got[2] != "known" {
+		t.Fatalf("values = %#v", got)
+	}
+}
+
+func TestStrictStopModeSkipsLookupWhenEarlyStopIsDisabled(t *testing.T) {
+	store := &fakeKeywordSourceStore{existingErr: errors.New("must not be queried")}
+	progress, err := evaluateIterationKeywordProgress(context.Background(), store, keywordsource.IterationConfig{
+		StopMode: keywordsource.IterationStopModeStrict,
+	}, []keywordsource.KeywordValue{{Value: "Alpha", Normalized: "alpha"}}, map[string]struct{}{})
+	if err != nil || !progress.hasProgress || len(progress.newValues) != 1 || store.existingCalls != 0 {
+		t.Fatalf("progress=%+v calls=%d err=%v", progress, store.existingCalls, err)
+	}
+}
+
+func TestExecuteTrackedRunStrictUsesSameStopRule(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		page, _ := strconv.Atoi(request.URL.Query().Get("page"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"items":[{"title":"known-%d"}]}`, page)
+	}))
+	defer server.Close()
+
+	sourceID := int64(21)
+	store := &fakeTrackedKeywordSourceStore{}
+	store.existingKeywords = map[string]struct{}{"known-0": {}, "known-1": {}}
+	claim := storage.KeywordAPISyncClaim{
+		Run: storage.KeywordAPISyncRun{ID: 84, SourceID: &sourceID, Status: storage.KeywordAPISyncRunStatusRunning},
+		Source: storage.KeywordAPISource{
+			ID: sourceID, RequestMethod: http.MethodGet, RequestURL: server.URL, BodyType: "none", TimeoutSeconds: 5,
+			ResponsePath: "items[].title", IterationEnabled: true, IterationLocation: "query", IterationPath: "page",
+			IterationStep: 1, IterationCount: 10, IterationNoKeywordStopCount: 2,
+			IterationStopMode: storage.KeywordAPIIterationStopModeStrict,
+		},
+	}
+	service := newService(store, Config{})
+	service.waitDelay = func(context.Context, time.Duration) error { return nil }
+	if err := service.executeTrackedRun(context.Background(), store, claim, "lease-token"); err != nil {
+		t.Fatalf("executeTrackedRun: %v", err)
+	}
+	if len(store.iterations) != 2 || store.existingCalls != 2 || store.finalized.RequestCount != 2 {
+		t.Fatalf("iterations=%d existence queries=%d finalized=%+v", len(store.iterations), store.existingCalls, store.finalized)
+	}
+}
+
+func TestSyncClaimedStrictFailsWhenExistenceLookupFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"items":[{"title":"value"}]}`)
+	}))
+	defer server.Close()
+
+	store := &fakeKeywordSourceStore{existingErr: errors.New("database unavailable")}
+	service := newService(store, Config{})
+	_, err := service.syncClaimed(context.Background(), storage.KeywordAPISource{
+		ID: 22, RequestMethod: http.MethodGet, RequestURL: server.URL, BodyType: "none", TimeoutSeconds: 5,
+		ResponsePath: "items[].title", IterationEnabled: true, IterationLocation: "query", IterationPath: "page",
+		IterationCount: 1, IterationNoKeywordStopCount: 1, IterationStopMode: storage.KeywordAPIIterationStopModeStrict,
+	})
+	if err == nil || !strings.Contains(err.Error(), "database unavailable") {
+		t.Fatalf("syncClaimed error = %v", err)
+	}
+	if store.existingCalls != 1 || store.failedRequestCount != 1 || store.failedFailureCount != 1 {
+		t.Fatalf("lookup failure accounting = %+v", store)
 	}
 }
 

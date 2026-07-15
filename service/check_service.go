@@ -30,6 +30,10 @@ import (
 const (
 	checkStateOK          = "ok"
 	checkStateBad         = "bad"
+	checkStateInvalid     = "invalid"
+	checkStateExpired     = "expired"
+	checkStateCancelled   = "cancelled"
+	checkStateViolation   = "violation"
 	checkStateLocked      = "locked"
 	checkStateUnsupported = "unsupported"
 	checkStateUncertain   = "uncertain"
@@ -52,6 +56,16 @@ type checkHTTPClientContextKey struct{}
 type cachedCheckDiskEntry struct {
 	Result    model.CheckResult
 	ExpiresAt int64
+}
+
+type quarkShareFile struct {
+	FID          string `json:"fid"`
+	FileName     string `json:"file_name"`
+	Status       int    `json:"status"`
+	RiskType     int    `json:"risk_type"`
+	Ban          bool   `json:"ban"`
+	Dir          bool   `json:"dir"`
+	IncludeItems int    `json:"include_items"`
 }
 
 type CheckService struct {
@@ -278,14 +292,13 @@ func (s *CheckService) checkAliyun(item model.CheckItem, normalized string, clie
 
 	code := strings.TrimSpace(parsed.Code)
 	if code != "" {
-		codeLower := strings.ToLower(code)
 		message := coalesce(parsed.Message, code)
+		if state := classifyKnownFailureState(code, parsed.Message, parsed.ShareStatus); state != "" {
+			return s.buildResult(item, normalized, state, false, failureSummary(state, message)), nil
+		}
+
 		switch {
-		case strings.Contains(codeLower, "sharelink"):
-			return s.buildResult(item, normalized, checkStateBad, false, message), nil
-		case containsAny(codeLower, []string{"notfound", "cancelled", "canceled", "forbidden", "expired"}):
-			return s.buildResult(item, normalized, checkStateBad, false, message), nil
-		case containsAny(codeLower, []string{"exceed", "frequency", "limit"}):
+		case containsAny(code, []string{"exceed", "frequency", "limit"}):
 			return s.buildResult(item, normalized, checkStateUncertain, false, message), nil
 		default:
 			return s.buildResult(item, normalized, checkStateUncertain, false, message), nil
@@ -293,13 +306,13 @@ func (s *CheckService) checkAliyun(item model.CheckItem, normalized string, clie
 	}
 
 	if parsed.FileCount != nil && *parsed.FileCount == 0 && parsed.ShareName == "" {
-		return s.buildResult(item, normalized, checkStateBad, false, "分享内容为空(file_count=0)"), nil
+		return s.buildResult(item, normalized, checkStateInvalid, false, "分享内容为空(file_count=0)"), nil
 	}
 
 	shareStatus := strings.ToLower(strings.TrimSpace(parsed.ShareStatus))
 	if shareStatus != "" && shareStatus != "enabled" && shareStatus != "normal" {
-		if containsAny(shareStatus, []string{"forbidden", "cancel", "expired", "illegal", "invalid", "disabled"}) {
-			return s.buildResult(item, normalized, checkStateBad, false, coalesce(parsed.Message, "链接失效")), nil
+		if state := classifyKnownFailureState(shareStatus, parsed.Message); state != "" {
+			return s.buildResult(item, normalized, state, false, failureSummary(state, parsed.Message)), nil
 		}
 	}
 
@@ -351,19 +364,21 @@ func (s *CheckService) checkQuark(item model.CheckItem, normalized string, clien
 	case 41008:
 		return s.buildResult(item, normalized, checkStateLocked, false, "需要提取码"), nil
 	case 41004, 41010, 41011:
-		return s.buildResult(item, normalized, checkStateBad, false, "链接失效"), nil
+		state := classifyFailureState(tokenResp.Message)
+		return s.buildResult(item, normalized, state, false, failureSummary(state, tokenResp.Message)), nil
 	default:
-		if containsAny(strings.ToLower(tokenResp.Message), []string{"不存在", "失效", "违规", "过期", "取消"}) {
-			return s.buildResult(item, normalized, checkStateBad, false, tokenResp.Message), nil
+		if state := classifyKnownFailureState(tokenResp.Message); state != "" {
+			return s.buildResult(item, normalized, state, false, failureSummary(state, tokenResp.Message)), nil
 		}
-		if containsAny(strings.ToLower(tokenResp.Message), []string{"提取码", "密码"}) {
+		if isLockedMessage(tokenResp.Message) {
 			return s.buildResult(item, normalized, checkStateLocked, false, tokenResp.Message), nil
 		}
 		return s.buildResult(item, normalized, checkStateUncertain, false, tokenResp.Message), nil
 	}
 
 	if tokenResp.Status != 0 && tokenResp.Status != http.StatusOK {
-		return s.buildResult(item, normalized, checkStateBad, false, coalesce(tokenResp.Message, "分享链接失效或不存在")), nil
+		state := classifyFailureState(tokenResp.Message)
+		return s.buildResult(item, normalized, state, false, failureSummary(state, tokenResp.Message)), nil
 	}
 
 	if tokenResp.Data.Stoken == "" {
@@ -386,7 +401,7 @@ func (s *CheckService) checkQuark(item model.CheckItem, normalized string, clien
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 		Data    struct {
-			List  []any `json:"list"`
+			List  []quarkShareFile `json:"list"`
 			Share struct {
 				Status           int   `json:"status"`
 				PartialViolation bool  `json:"partial_violation"`
@@ -400,47 +415,123 @@ func (s *CheckService) checkQuark(item model.CheckItem, normalized string, clien
 
 	if detailResp.Code != 0 {
 		message := coalesce(detailResp.Message, "无法确认链接状态")
-		messageLower := strings.ToLower(message)
 		switch {
-		case containsAny(messageLower, []string{"提取码", "密码", "passcode"}):
+		case isLockedMessage(message):
 			return s.buildResult(item, normalized, checkStateLocked, false, message), nil
-		case containsAny(messageLower, []string{"不存在", "失效", "违规", "过期", "取消"}):
-			return s.buildResult(item, normalized, checkStateBad, false, message), nil
+		case classifyKnownFailureState(message) != "":
+			state := classifyFailureState(message)
+			return s.buildResult(item, normalized, state, false, failureSummary(state, message)), nil
 		default:
 			return s.buildResult(item, normalized, checkStateUncertain, false, message), nil
 		}
 	}
 
 	share := detailResp.Data.Share
+	filtered := hasQuarkFilteredFile(detailResp.Data.List) || s.hasQuarkFilteredChild(ctx, resourceID, tokenResp.Data.Stoken, detailResp.Data.List)
 	if len(detailResp.Data.List) == 0 {
 		switch {
-		case share.Status > 1 && share.PartialViolation:
-			return s.buildResult(item, normalized, checkStateBad, false, fmt.Sprintf("分享链接部分违规已失效(share_status=%d)", share.Status)), nil
-		case share.Status > 1:
-			return s.buildResult(item, normalized, checkStateBad, false, fmt.Sprintf("分享链接已失效(share_status=%d)", share.Status)), nil
 		case detailResp.Data.IsExpire:
-			return s.buildResult(item, normalized, checkStateBad, false, "分享链接已过期"), nil
+			return s.buildResult(item, normalized, checkStateExpired, false, "分享链接已过期"), nil
+		case share.PartialViolation:
+			return s.buildResult(item, normalized, checkStateViolation, false, fmt.Sprintf("分享链接部分违规已失效(share_status=%d)", share.Status)), nil
+		case share.Status > 1:
+			return s.buildResult(item, normalized, checkStateInvalid, false, fmt.Sprintf("分享链接已失效(share_status=%d)", share.Status)), nil
 		default:
-			return s.buildResult(item, normalized, checkStateBad, false, "分享链接无效：文件列表为空"), nil
+			return s.buildResult(item, normalized, checkStateInvalid, false, "分享链接无效：文件列表为空"), nil
 		}
 	}
 
 	switch {
+	case detailResp.Data.IsExpire:
+		return s.buildResult(item, normalized, checkStateExpired, false, "分享链接已过期"), nil
 	case share.Status == 1 && share.PartialViolation:
-		return s.buildResult(item, normalized, checkStateOK, false, "链接有效但部分文件违规"), nil
+		return s.buildResult(item, normalized, checkStateViolation, false, "链接可访问但部分文件违规"), nil
+	case filtered:
+		return s.buildResult(item, normalized, checkStateViolation, false, "链接有效但部分文件被过滤"), nil
 	case share.Status == 1:
 		return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
 	case share.Status == 3 && share.PartialViolation:
-		return s.buildResult(item, normalized, checkStateBad, false, "分享链接因违规已失效(share_status=3, partial_violation=true)"), nil
+		return s.buildResult(item, normalized, checkStateViolation, false, "分享链接因违规已失效(share_status=3, partial_violation=true)"), nil
 	case share.Status == 3:
 		return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
 	case share.Status > 1:
-		return s.buildResult(item, normalized, checkStateBad, false, fmt.Sprintf("分享链接已失效(share_status=%d)", share.Status)), nil
+		return s.buildResult(item, normalized, checkStateInvalid, false, fmt.Sprintf("分享链接已失效(share_status=%d)", share.Status)), nil
 	case share.PartialViolation:
-		return s.buildResult(item, normalized, checkStateOK, false, "链接有效但部分文件违规"), nil
+		return s.buildResult(item, normalized, checkStateViolation, false, "链接可访问但部分文件违规"), nil
 	default:
 		return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
 	}
+}
+
+func (s *CheckService) hasQuarkFilteredChild(ctx context.Context, resourceID string, stoken string, files []quarkShareFile) bool {
+	probed := 0
+	for _, file := range files {
+		if probed >= 1 {
+			return false
+		}
+		if file.FID == "" || !file.Dir || file.IncludeItems <= 0 {
+			continue
+		}
+
+		probed++
+		detailURL := fmt.Sprintf("https://drive-pc.quark.cn/1/clouddrive/share/sharepage/detail?pwd_id=%s&stoken=%s&ver=2&pr=ucpro&pdir_fid=%s",
+			url.QueryEscape(resourceID),
+			url.QueryEscape(stoken),
+			url.QueryEscape(file.FID),
+		)
+		body, _, err := s.doRequest(ctx, "GET", detailURL, nil, map[string]string{
+			"accept":        "application/json, text/plain, */*",
+			"origin":        "https://pan.quark.cn",
+			"referer":       "https://pan.quark.cn/",
+			"cache-control": "no-cache",
+		})
+		if err != nil {
+			return false
+		}
+
+		var detailResp struct {
+			Code int `json:"code"`
+			Data struct {
+				List []quarkShareFile `json:"list"`
+			} `json:"data"`
+		}
+		if err := utiljson.Unmarshal(body, &detailResp); err != nil || detailResp.Code != 0 {
+			return false
+		}
+		return hasQuarkFilteredFile(detailResp.Data.List)
+	}
+	return false
+}
+
+func hasQuarkFilteredFile(files []quarkShareFile) bool {
+	for _, file := range files {
+		if file.Ban || file.RiskType > 0 {
+			return true
+		}
+		if file.Status != 0 && file.Status != 1 {
+			return true
+		}
+		if containsAny(file.FileName, []string{
+			"部分文件被过滤",
+			"文件被过滤",
+			"已被过滤",
+			"被过滤",
+			"违规文件",
+			"文件违规",
+			"敏感文件",
+			"风险文件",
+			"内容风险",
+			"无法查看",
+			"被屏蔽",
+			"和谐太快",
+			"被和谐",
+			"已和谐",
+			"在线解压吧",
+		}) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *CheckService) checkUC(item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
@@ -456,14 +547,16 @@ func (s *CheckService) checkUC(item model.CheckItem, normalized string, client *
 	}
 
 	if statusCode == http.StatusNotFound {
-		return s.buildResult(item, normalized, checkStateBad, false, "链接失效"), nil
+		return s.buildResult(item, normalized, checkStateInvalid, false, "链接失效"), nil
 	}
 
 	pageText := strings.ToLower(string(body))
+	if state := classifyKnownFailureState(pageText); state != "" {
+		return s.buildResult(item, normalized, state, false, failureSummary(state, "")), nil
+	}
+
 	switch {
-	case containsAny(pageText, []string{"失效", "不存在", "违规", "删除", "已过期", "被取消"}):
-		return s.buildResult(item, normalized, checkStateBad, false, "链接失效"), nil
-	case containsAny(pageText, []string{"提取码", "访问码", "请输入密码"}):
+	case isLockedMessage(pageText) || containsAny(pageText, []string{"请输入密码"}):
 		return s.buildResult(item, normalized, checkStateLocked, false, "需要提取码"), nil
 	case containsAny(pageText, []string{"文件", "分享", "drive.uc.cn"}):
 		return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
@@ -500,6 +593,7 @@ func (s *CheckService) checkBaidu(item model.CheckItem, normalized string, clien
 		var verifyResp struct {
 			Errno  int    `json:"errno"`
 			Errmsg string `json:"errmsg"`
+			ErrMsg string `json:"err_msg"`
 			Randsk string `json:"randsk"`
 		}
 		_ = utiljson.Unmarshal(body, &verifyResp)
@@ -510,7 +604,11 @@ func (s *CheckService) checkBaidu(item model.CheckItem, normalized string, clien
 		case -9, -12:
 			return s.buildResult(item, normalized, checkStateLocked, false, "提取码错误或缺失"), nil
 		default:
-			return s.buildResult(item, normalized, checkStateUncertain, false, verifyResp.Errmsg), nil
+			message := coalesce(verifyResp.Errmsg, verifyResp.ErrMsg)
+			if state := classifyKnownFailureState(message); state != "" {
+				return s.buildResult(item, normalized, state, false, failureSummary(state, message)), nil
+			}
+			return s.buildResult(item, normalized, checkStateUncertain, false, message), nil
 		}
 	}
 
@@ -530,24 +628,33 @@ func (s *CheckService) checkBaidu(item model.CheckItem, normalized string, clien
 	}
 
 	var listResp struct {
-		Errno  int    `json:"errno"`
-		Errmsg string `json:"errmsg"`
-		List   []any  `json:"list"`
+		Errno   int    `json:"errno"`
+		Errmsg  string `json:"errmsg"`
+		ErrMsg  string `json:"err_msg"`
+		ShowMsg string `json:"show_msg"`
+		List    []any  `json:"list"`
 	}
 	_ = utiljson.Unmarshal(body, &listResp)
+	message := coalesce(listResp.ShowMsg, listResp.Errmsg, listResp.ErrMsg)
 
 	switch listResp.Errno {
 	case 0:
 		if len(listResp.List) > 0 {
 			return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
 		}
-		return s.buildResult(item, normalized, checkStateBad, false, "链接失效"), nil
+		return s.buildResult(item, normalized, checkStateInvalid, false, "链接失效"), nil
 	case -9, -12:
 		return s.buildResult(item, normalized, checkStateLocked, false, "需要提取码"), nil
-	case -7, 105, 115, 117, 145:
-		return s.buildResult(item, normalized, checkStateBad, false, "链接失效"), nil
+	case 9019:
+		return s.buildResult(item, normalized, checkStateLocked, false, coalesce(message, "需要验证提取码")), nil
+	case -21, -7, 105, 115, 117, 145:
+		state := classifyFailureState(message)
+		return s.buildResult(item, normalized, state, false, failureSummary(state, message)), nil
 	default:
-		return s.buildResult(item, normalized, checkStateUncertain, false, listResp.Errmsg), nil
+		if state := classifyKnownFailureState(message); state != "" {
+			return s.buildResult(item, normalized, state, false, failureSummary(state, message)), nil
+		}
+		return s.buildResult(item, normalized, checkStateUncertain, false, message), nil
 	}
 }
 
@@ -613,17 +720,18 @@ func (s *CheckService) checkTianyi(item model.CheckItem, normalized string, clie
 	}
 	if err := xml.Unmarshal(body, &errorResponse); err == nil && errorResponse.XMLName.Local == "error" {
 		message := mapTianyiErrorMessage(errorResponse.Code, errorResponse.Message)
-		messageLower := strings.ToLower(coalesce(errorResponse.Code, errorResponse.Message, message))
 
 		switch {
 		case isKnownTianyiErrorCode(errorResponse.Code):
-			return s.buildResult(item, normalized, checkStateBad, false, message), nil
-		case containsAny(messageLower, []string{"accesscode", "访问码", "提取码", "密码"}):
+			state := classifyFailureState(errorResponse.Code, errorResponse.Message, message)
+			return s.buildResult(item, normalized, state, false, failureSummary(state, message)), nil
+		case isLockedMessage(errorResponse.Code, errorResponse.Message, message):
 			return s.buildResult(item, normalized, checkStateLocked, false, message), nil
-		case containsAny(messageLower, []string{"shareinfonotfound", "sharenotfound", "filenotfound", "shareexpirederror", "shareauditnotpass", "foldernotfound", "不存在", "失效", "取消", "过期"}):
-			return s.buildResult(item, normalized, checkStateBad, false, message), nil
+		case classifyKnownFailureState(errorResponse.Code, errorResponse.Message, message) != "":
+			state := classifyFailureState(errorResponse.Code, errorResponse.Message, message)
+			return s.buildResult(item, normalized, state, false, failureSummary(state, message)), nil
 		}
-		return s.buildResult(item, normalized, checkStateBad, false, message), nil
+		return s.buildResult(item, normalized, checkStateInvalid, false, message), nil
 	}
 
 	var jsonResponse struct {
@@ -647,14 +755,18 @@ func (s *CheckService) checkTianyi(item model.CheckItem, normalized string, clie
 		case jsonResponse.NeedAccessCode == 1:
 			return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
 		case jsonResponse.ErrorCode != "":
-			return s.buildResult(item, normalized, checkStateBad, false, mapTianyiErrorMessage(jsonResponse.ErrorCode, jsonResponse.ResMessage)), nil
-		case containsAny(strings.ToLower(jsonResponse.ResMessage), []string{"accesscode", "访问码", "提取码", "密码"}):
+			message := mapTianyiErrorMessage(jsonResponse.ErrorCode, jsonResponse.ResMessage)
+			state := classifyFailureState(jsonResponse.ErrorCode, jsonResponse.ResMessage, message)
+			return s.buildResult(item, normalized, state, false, failureSummary(state, message)), nil
+		case isLockedMessage(jsonResponse.ResMessage):
 			return s.buildResult(item, normalized, checkStateLocked, false, coalesce(jsonResponse.ResMessage, "需要访问码")), nil
 		}
 	}
 
 	if code := scanTianyiKnownErrorCode(bodyText); code != "" {
-		return s.buildResult(item, normalized, checkStateBad, false, mapTianyiErrorMessage(code, "")), nil
+		message := mapTianyiErrorMessage(code, "")
+		state := classifyFailureState(code, message)
+		return s.buildResult(item, normalized, state, false, failureSummary(state, message)), nil
 	}
 
 	switch {
@@ -666,10 +778,11 @@ func (s *CheckService) checkTianyi(item model.CheckItem, normalized string, clie
 			return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
 		}
 		return s.buildResult(item, normalized, checkStateUncertain, false, "无法确认链接状态"), nil
-	case containsAny(strings.ToLower(bodyText), []string{"erroraccesscode", "needaccesscode", "访问码", "提取码", "密码"}):
+	case isLockedMessage(bodyText):
 		return s.buildResult(item, normalized, checkStateLocked, false, "需要访问码"), nil
-	case containsAny(strings.ToLower(bodyText), []string{"shareinfonotfound", "sharenotfound", "filenotfound", "shareexpirederror", "shareauditnotpass", "foldernotfound", "不存在", "失效", "取消", "过期"}):
-		return s.buildResult(item, normalized, checkStateBad, false, "链接失效"), nil
+	case classifyKnownFailureState(bodyText) != "":
+		state := classifyFailureState(bodyText)
+		return s.buildResult(item, normalized, state, false, failureSummary(state, "")), nil
 	default:
 		return s.buildResult(item, normalized, checkStateUncertain, false, "无法确认链接状态"), nil
 	}
@@ -685,36 +798,67 @@ func (s *CheckService) check123(item model.CheckItem, normalized string, client 
 	defer cancel()
 	ctx = contextWithCheckHTTPClient(ctx, client)
 
-	apiURL := fmt.Sprintf("https://www.123pan.com/api/share/info?shareKey=%s", url.QueryEscape(shareKey))
-	body, statusCode, err := s.doRequest(ctx, "GET", apiURL, nil, nil)
-	if err != nil {
-		return s.buildResult(item, normalized, checkStateUncertain, false, "请求失败"), err
-	}
-
-	if statusCode == http.StatusForbidden {
-		return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
-	}
-
 	var response struct {
 		Code int `json:"code"`
 		Data struct {
-			HasPwd bool `json:"HasPwd"`
+			HasPwd        bool   `json:"HasPwd"`
+			Expired       bool   `json:"Expired"`
+			DisplayStatus int    `json:"DisplayStatus"`
+			ShareName     string `json:"ShareName"`
 		} `json:"data"`
 		Message string `json:"message"`
 	}
-	if err := utiljson.Unmarshal(body, &response); err != nil {
-		return s.buildResult(item, normalized, checkStateUncertain, false, "响应解析失败"), nil
+
+	var lastBody []byte
+	parsedResponse := false
+	for _, apiURL := range build123APIURLs(normalized, shareKey) {
+		body, statusCode, err := s.doRequest(ctx, "GET", apiURL, nil, map[string]string{
+			"accept":  "application/json, text/plain, */*",
+			"referer": normalized,
+		})
+		if err != nil {
+			return s.buildResult(item, normalized, checkStateUncertain, false, "请求失败"), err
+		}
+		lastBody = body
+
+		if statusCode == http.StatusForbidden {
+			return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
+		}
+		if err := utiljson.Unmarshal(body, &response); err == nil {
+			parsedResponse = true
+			break
+		}
 	}
 
 	switch {
-	case response.Code == 0:
+	case parsedResponse && response.Code == 0:
+		if response.Data.Expired {
+			return s.buildResult(item, normalized, checkStateExpired, false, "分享链接已过期"), nil
+		}
+		if response.Data.DisplayStatus > 1 {
+			state := classifyFailureState(fmt.Sprintf("DisplayStatus=%d", response.Data.DisplayStatus))
+			return s.buildResult(item, normalized, state, false, failureSummary(state, "链接失效")), nil
+		}
+		if response.Data.HasPwd && item.Password == "" {
+			return s.buildResult(item, normalized, checkStateLocked, false, "需要提取码"), nil
+		}
 		return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
-	case response.Data.HasPwd:
+	case parsedResponse && response.Data.HasPwd && item.Password == "":
 		return s.buildResult(item, normalized, checkStateLocked, false, "需要提取码"), nil
-	case response.Message != "":
-		return s.buildResult(item, normalized, checkStateBad, false, response.Message), nil
+	case parsedResponse && response.Message != "":
+		state := classifyFailureState(response.Message)
+		return s.buildResult(item, normalized, state, false, failureSummary(state, response.Message)), nil
+	case len(lastBody) > 0:
+		bodyText := string(lastBody)
+		if state := classifyKnownFailureState(bodyText); state != "" {
+			return s.buildResult(item, normalized, state, false, failureSummary(state, "")), nil
+		}
+		if containsAny(bodyText, []string{"123云盘", "shareKey", shareKey}) {
+			return s.buildResult(item, normalized, checkStateUncertain, false, "123云盘接口响应格式异常"), nil
+		}
+		return s.buildResult(item, normalized, checkStateUncertain, false, "响应解析失败"), nil
 	default:
-		return s.buildResult(item, normalized, checkStateBad, false, "链接失效"), nil
+		return s.buildResult(item, normalized, checkStateInvalid, false, "链接失效"), nil
 	}
 }
 
@@ -755,7 +899,8 @@ func (s *CheckService) checkXunlei(item model.CheckItem, normalized string, clie
 	body, _ = decompressResponseBody(body, headers["accept-encoding"], "")
 
 	if statusCode == http.StatusNotFound || statusCode == http.StatusForbidden {
-		return s.buildResult(item, normalized, checkStateBad, false, "链接失效"), nil
+		state := classifyFailureState(string(body), fmt.Sprintf("HTTP状态码: %d", statusCode))
+		return s.buildResult(item, normalized, state, false, failureSummary(state, "")), nil
 	}
 
 	var response struct {
@@ -778,25 +923,17 @@ func (s *CheckService) checkXunlei(item model.CheckItem, normalized string, clie
 		return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
 	case response.ShareID != "", response.ShareName != "", response.FileCount > 0:
 		return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
-	case containsAny(strings.ToLower(response.Error), []string{"pass_code"}), containsAny(strings.ToLower(response.ErrorMsg), []string{"pass_code", "提取码", "密码"}):
+	case isLockedMessage(response.Error, response.ErrorMsg):
 		return s.buildResult(item, normalized, checkStateLocked, false, coalesce(response.ErrorMsg, "需要提取码")), nil
-	case containsAny(strings.ToLower(response.ShareStatus), []string{"pass_code"}), containsAny(strings.ToLower(response.ShareStatusText), []string{"pass_code", "提取码", "密码"}):
+	case isLockedMessage(response.ShareStatus, response.ShareStatusText):
 		return s.buildResult(item, normalized, checkStateLocked, false, coalesce(response.ShareStatusText, "需要提取码")), nil
 	case response.ShareStatus != "" && response.ShareStatus != "OK":
 		summary := coalesce(response.ShareStatusText, fmt.Sprintf("分享状态: %s", response.ShareStatus))
-		if containsAny(strings.ToLower(summary), []string{"不存在", "失效", "过期", "not found", "deleted"}) {
-			return s.buildResult(item, normalized, checkStateBad, false, summary), nil
-		}
-		return s.buildResult(item, normalized, checkStateBad, false, summary), nil
+		state := classifyFailureState(response.ShareStatus, response.ShareStatusText)
+		return s.buildResult(item, normalized, state, false, failureSummary(state, summary)), nil
 	case response.ErrorCode != 0 || response.Error != "" || response.ErrorMsg != "":
-		if containsAny(strings.ToLower(response.ErrorMsg), []string{"参数错误", "share_status", "不存在", "失效", "过期", "not found"}) {
-			return s.buildResult(item, normalized, checkStateBad, false, coalesce(response.ErrorMsg, "链接失效")), nil
-		}
-		if containsAny(strings.ToLower(response.Error), []string{"参数错误", "share_status", "不存在", "失效", "过期", "not found"}) {
-			return s.buildResult(item, normalized, checkStateBad, false, coalesce(response.ErrorMsg, response.Error)), nil
-		}
-		if containsAny(strings.ToLower(response.ErrorMsg), []string{"not found", "不存在", "失效", "过期"}) {
-			return s.buildResult(item, normalized, checkStateBad, false, coalesce(response.ErrorMsg, "链接失效")), nil
+		if state := classifyKnownFailureState(response.Error, response.ErrorMsg); state != "" {
+			return s.buildResult(item, normalized, state, false, failureSummary(state, coalesce(response.ErrorMsg, response.Error))), nil
 		}
 		return s.buildResult(item, normalized, checkStateUncertain, false, coalesce(response.ErrorMsg, response.Error)), nil
 	default:
@@ -876,22 +1013,24 @@ func (s *CheckService) check115(item model.CheckItem, normalized string, client 
 		if containsAny(strings.ToLower(reason), []string{"密码", "提取码"}) {
 			return s.buildResult(item, normalized, checkStateLocked, false, reason), nil
 		}
-		return s.buildResult(item, normalized, checkStateBad, false, reason), nil
+		state := classifyFailureState(reason)
+		return s.buildResult(item, normalized, state, false, failureSummary(state, reason)), nil
 	}
 
-	if containsAny(strings.ToLower(response.Error), []string{"密码", "提取码", "receive_code"}) {
+	if isLockedMessage(response.Error) {
 		return s.buildResult(item, normalized, checkStateLocked, false, coalesce(response.Error, "需要提取码")), nil
 	}
 
-	if containsAny(strings.ToLower(response.Error), []string{"参数错误", "不存在", "失效", "share_code", "forbid", "forbidden", "违规", "删除", "取消"}) {
-		return s.buildResult(item, normalized, checkStateBad, false, coalesce(response.Error, "链接失效")), nil
+	if state := classifyKnownFailureState(response.Error); state != "" {
+		return s.buildResult(item, normalized, state, false, failureSummary(state, response.Error)), nil
 	}
 
 	if response.Error == "" {
 		return s.buildResult(item, normalized, checkStateUncertain, false, "无法确认链接状态"), nil
 	}
 
-	return s.buildResult(item, normalized, checkStateBad, false, response.Error), nil
+	state := classifyFailureState(response.Error)
+	return s.buildResult(item, normalized, state, false, failureSummary(state, response.Error)), nil
 }
 
 func (s *CheckService) checkMobile(item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
@@ -899,6 +1038,7 @@ func (s *CheckService) checkMobile(item model.CheckItem, normalized string, clie
 	if shareID == "" {
 		return s.buildResult(item, normalized, checkStateUncertain, false, "无法解析分享地址"), nil
 	}
+	password := extractMobilePassword(normalized, item.Password)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -908,7 +1048,7 @@ func (s *CheckService) checkMobile(item model.CheckItem, normalized string, clie
 		"getOutLinkInfoReq": map[string]any{
 			"account": "",
 			"linkID":  shareID,
-			"passwd":  item.Password,
+			"passwd":  password,
 			"caSrt":   1,
 			"coSrt":   1,
 			"srtDr":   0,
@@ -959,15 +1099,15 @@ func (s *CheckService) checkMobile(item model.CheckItem, normalized string, clie
 	switch {
 	case resultCode == "0" && data != nil:
 		return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
-	case containsAny(strings.ToLower(description), []string{"提取码", "密码", "访问码"}):
+	case isLockedMessage(description):
 		return s.buildResult(item, normalized, checkStateLocked, false, coalesce(description, "需要提取码")), nil
 	case description != "":
-		if containsAny(strings.ToLower(description), []string{"失效", "不存在", "过期", "取消"}) {
-			return s.buildResult(item, normalized, checkStateBad, false, description), nil
+		if state := classifyKnownFailureState(description); state != "" {
+			return s.buildResult(item, normalized, state, false, failureSummary(state, description)), nil
 		}
 		return s.buildResult(item, normalized, checkStateUncertain, false, description), nil
 	case resultCode != "":
-		return s.buildResult(item, normalized, checkStateBad, false, "错误码: "+resultCode), nil
+		return s.buildResult(item, normalized, checkStateInvalid, false, "错误码: "+resultCode), nil
 	default:
 		return s.buildResult(item, normalized, checkStateUncertain, false, "无法确认链接状态"), nil
 	}
@@ -1122,7 +1262,11 @@ func (s *CheckService) normalizeShareLink(diskType, rawURL, password string) str
 		return base
 	}
 
-	parsed.Fragment = ""
+	switch strings.ToLower(strings.TrimSpace(diskType)) {
+	case "mobile", "tianyi":
+	default:
+		parsed.Fragment = ""
+	}
 	parsed.Host = strings.ToLower(parsed.Host)
 
 	query := parsed.Query()
@@ -1143,7 +1287,7 @@ func ttlForState(state string) time.Duration {
 	switch state {
 	case checkStateOK:
 		return 24 * time.Hour
-	case checkStateBad:
+	case checkStateBad, checkStateInvalid, checkStateExpired, checkStateCancelled, checkStateViolation:
 		return 6 * time.Hour
 	case checkStateLocked:
 		return 12 * time.Hour
@@ -1326,12 +1470,89 @@ func buildXunleiCaptchaSignature(clientID, clientVersion, packageName, deviceID 
 }
 
 func containsAny(content string, keywords []string) bool {
+	content = strings.ToLower(content)
 	for _, keyword := range keywords {
 		if strings.Contains(content, strings.ToLower(keyword)) {
 			return true
 		}
 	}
 	return false
+}
+
+func isLockedMessage(values ...string) bool {
+	return containsStatusKeyword(values, []string{
+		"提取码", "访问码", "密码", "passcode", "pass_code", "receive_code", "accesscode", "needaccesscode", "erroraccesscode",
+	})
+}
+
+func classifyKnownFailureState(values ...string) string {
+	switch {
+	case containsStatusKeyword(values, []string{
+		"过期", "已过期", "expire", "expired", "expiration", "shareexpirederror",
+	}):
+		return checkStateExpired
+	case containsStatusKeyword(values, []string{
+		"取消分享", "分享取消", "已取消", "被取消", "取消", "cancel", "canceled", "cancelled", "sharecancel",
+	}):
+		return checkStateCancelled
+	case containsStatusKeyword(values, []string{
+		"违规", "违反", "审核", "未通过", "illegal", "violation", "audit", "shareauditnotpass", "forbid", "forbidden",
+		"blocked", "屏蔽", "风险", "敏感", "版权", "copyright", "侵权", "禁止访问",
+	}):
+		return checkStateViolation
+	case containsStatusKeyword(values, []string{
+		"失效", "无效", "不存在", "删除", "已删除", "not found", "notfound", "deleted", "removed", "invalid",
+		"sharelink", "share link", "shareinfonotfound", "sharenotfound", "filenotfound", "foldernotfound",
+		"file_count=0", "文件列表为空", "参数错误", "share_code",
+	}):
+		return checkStateInvalid
+	default:
+		return ""
+	}
+}
+
+func classifyFailureState(values ...string) string {
+	if state := classifyKnownFailureState(values...); state != "" {
+		return state
+	}
+	return checkStateInvalid
+}
+
+func failureSummary(state string, fallback string) string {
+	if strings.TrimSpace(fallback) != "" {
+		return fallback
+	}
+
+	switch state {
+	case checkStateExpired:
+		return "分享链接已过期"
+	case checkStateCancelled:
+		return "分享已取消"
+	case checkStateViolation:
+		return "分享内容违规"
+	default:
+		return "链接失效"
+	}
+}
+
+func containsStatusKeyword(values []string, keywords []string) bool {
+	content := strings.Join(values, " ")
+	compact := compactStatusText(content)
+	return containsAny(content, keywords) || containsAny(compact, keywords)
+}
+
+func compactStatusText(content string) string {
+	replacer := strings.NewReplacer(
+		" ", "",
+		"\t", "",
+		"\n", "",
+		"\r", "",
+		"_", "",
+		"-", "",
+		":", "",
+		"：", "",
+	)
+	return replacer.Replace(strings.ToLower(content))
 }
 
 func coalesce(values ...string) string {
@@ -1522,6 +1743,36 @@ func extract123ShareKey(rawURL string) string {
 	return parts[len(parts)-1]
 }
 
+func build123APIURLs(rawURL string, shareKey string) []string {
+	seen := make(map[string]struct{})
+	urls := make([]string, 0, 5)
+	add := func(base string) {
+		base = strings.TrimRight(strings.TrimSpace(base), "/")
+		if base == "" {
+			return
+		}
+		apiURL := fmt.Sprintf("%s/api/share/info?shareKey=%s", base, url.QueryEscape(shareKey))
+		if _, ok := seen[apiURL]; ok {
+			return
+		}
+		seen[apiURL] = struct{}{}
+		urls = append(urls, apiURL)
+	}
+
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Host != "" {
+		scheme := parsed.Scheme
+		if scheme == "" {
+			scheme = "https"
+		}
+		add(scheme + "://" + parsed.Host)
+	}
+	add("https://www.123684.com")
+	add("https://www.123912.com")
+	add("https://www.123865.com")
+	add("https://www.123pan.com")
+	return urls
+}
+
 func extractXunleiShareInfo(rawURL string) (string, string) {
 	re := regexp.MustCompile(`pan\.xunlei\.com/s/([^?/#]+)`)
 	matches := re.FindStringSubmatch(rawURL)
@@ -1580,4 +1831,31 @@ func extractMobileShareID(rawURL string) string {
 	}
 
 	return ""
+}
+
+func extractMobilePassword(rawURL string, fallbackPassword string) string {
+	password := strings.TrimSpace(fallbackPassword)
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return password
+	}
+	if value := parsed.Query().Get("pwd"); value != "" {
+		password = value
+	}
+	if parsed.Fragment != "" {
+		if index := strings.Index(parsed.Fragment, "?"); index >= 0 && index+1 < len(parsed.Fragment) {
+			if values, err := url.ParseQuery(parsed.Fragment[index+1:]); err == nil {
+				if value := values.Get("pwd"); value != "" {
+					password = value
+				}
+				if value := values.Get("password"); value != "" {
+					password = value
+				}
+				if value := values.Get("passwd"); value != "" {
+					password = value
+				}
+			}
+		}
+	}
+	return password
 }

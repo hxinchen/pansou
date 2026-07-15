@@ -39,11 +39,26 @@ type MergedLink struct {
 // MergedLinks 按网盘类型分组的合并链接
 type MergedLinks map[string][]MergedLink
 
+// SearchCompletion describes whether every requested source finished before
+// the response was returned. Partial responses may still contain useful data.
+type SearchCompletion string
+
+const (
+	SearchCompletionComplete SearchCompletion = "complete"
+	SearchCompletionPartial  SearchCompletion = "partial"
+)
+
 // SearchResponse 搜索响应
 type SearchResponse struct {
-	Total        int            `json:"total" sonic:"total"`
-	Results      []SearchResult `json:"results,omitempty" sonic:"results,omitempty"`
-	MergedByType MergedLinks    `json:"merged_by_type,omitempty" sonic:"merged_by_type,omitempty"`
+	Total          int              `json:"total" sonic:"total"`
+	Results        []SearchResult   `json:"results,omitempty" sonic:"results,omitempty"`
+	MergedByType   MergedLinks      `json:"merged_by_type,omitempty" sonic:"merged_by_type,omitempty"`
+	Completion     SearchCompletion `json:"completion,omitempty" sonic:"completion,omitempty"`
+	PartialSources []string         `json:"partial_sources,omitempty" sonic:"partial_sources,omitempty"`
+}
+
+func (r SearchResponse) IsPartial() bool {
+	return r.Completion == SearchCompletionPartial
 }
 
 // Response API通用响应

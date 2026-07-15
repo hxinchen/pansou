@@ -117,6 +117,33 @@ func TestSearchResponseContractRemainsWrapped(t *testing.T) {
 	}
 }
 
+func TestPartialSearchReturns206AndCompletionMetadata(t *testing.T) {
+	previous := config.AppConfig
+	config.AppConfig = testConfig(false)
+	defer func() { config.AppConfig = previous }()
+
+	router := SetupRouter(routerTestSearch{response: model.SearchResponse{
+		Total: 1, Completion: model.SearchCompletionPartial,
+		PartialSources: []string{"plugin:slow"},
+		MergedByType:   model.MergedLinks{"quark": {{URL: "https://pan.quark.cn/s/test"}}},
+	}})
+	request := httptest.NewRequest(http.MethodGet, "/api/search?kw=test", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusPartialContent {
+		t.Fatalf("status = %d, want 206; body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Data model.SearchResponse `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Data.Completion != model.SearchCompletionPartial || len(payload.Data.PartialSources) != 1 {
+		t.Fatalf("partial response = %+v", payload.Data)
+	}
+}
+
 func TestSearchLeavesOmittedChannelsEmptyForManagedSources(t *testing.T) {
 	previous := config.AppConfig
 	config.AppConfig = testConfig(false)

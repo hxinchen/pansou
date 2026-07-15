@@ -255,5 +255,9 @@ func SearchHandler(c *gin.Context) {
 	// 包装SearchResponse到标准响应格式中
 	response := model.NewSuccessResponse(result)
 	jsonData, _ := jsonutil.Marshal(response)
-	c.Data(http.StatusOK, "application/json", jsonData)
+	statusCode := http.StatusOK
+	if result.IsPartial() {
+		statusCode = http.StatusPartialContent
+	}
+	c.Data(statusCode, "application/json", jsonData)
 }

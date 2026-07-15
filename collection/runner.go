@@ -320,9 +320,11 @@ func (r *Runner) RecordExternalSource(ctx context.Context, value string, source 
 	}
 
 	completion.FinishedAt = r.now()
-	completion.Status = DetermineRunStatus(count > 0, count == 0)
 	if ingestErr != nil {
+		completion.Status = StatusFailed
 		completion.Error = ingestErr.Error()
+	} else {
+		completion.Status = DetermineRunStatus(count > 0, count == 0)
 	}
 	if keyword.ID != 0 && (completion.Status == StatusSuccess || completion.Status == StatusSuccessEmpty) {
 		next := CalculateNextEligibleAt(*keyword, completion.FinishedAt, r.config.DefaultCooldown)

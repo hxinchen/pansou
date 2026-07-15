@@ -131,6 +131,48 @@ func (s *Store) GetKeywordByNormalized(ctx context.Context, keyword string) (Key
 	return result, nil
 }
 
+// ExistingNormalizedKeywords returns the subset of normalized values already
+// present in the global keyword library. Callers may pass raw or normalized
+// values; the result keys are always normalized.
+func (s *Store) ExistingNormalizedKeywords(ctx context.Context, values []string) (map[string]struct{}, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("storage is disabled")
+	}
+	normalized := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		key := NormalizeKeyword(strings.TrimSpace(value))
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, key)
+	}
+	result := make(map[string]struct{}, len(normalized))
+	if len(normalized) == 0 {
+		return result, nil
+	}
+	rows, err := s.pool.Query(ctx, "SELECT normalized_keyword FROM keywords WHERE normalized_keyword=ANY($1)", normalized)
+	if err != nil {
+		return nil, fmt.Errorf("check existing normalized keywords: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, fmt.Errorf("scan existing normalized keyword: %w", err)
+		}
+		result[value] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate existing normalized keywords: %w", err)
+	}
+	return result, nil
+}
+
 func (s *Store) ListKeywords(ctx context.Context, filter KeywordFilter) (KeywordPage, error) {
 	if s == nil || s.pool == nil {
 		return KeywordPage{}, fmt.Errorf("storage is disabled")

@@ -62,6 +62,7 @@ func TestKeywordAPISourceIterationConfigIncludesUnlimitedAndRandomDelay(t *testi
 		"iteration_delay_seconds": 3,
 		"iteration_unlimited": true,
 		"iteration_no_keyword_stop_count": 4,
+		"iteration_stop_mode": "strict",
 		"iteration_random_delay_min_seconds": -2,
 		"iteration_random_delay_max_seconds": 5
 	}`), &request); err != nil {
@@ -70,13 +71,25 @@ func TestKeywordAPISourceIterationConfigIncludesUnlimitedAndRandomDelay(t *testi
 	config := keywordAPISourceIterationConfig(request)
 	if !config.Enabled || config.Path != "page" || config.Start != 1 || config.Step != 2 ||
 		config.Count != 10 || config.DelaySeconds != 3 || !config.Unlimited ||
-		config.NoKeywordStopCount != 4 || config.RandomDelayMinSeconds != -2 ||
+		config.NoKeywordStopCount != 4 || config.StopMode != keywordsource.IterationStopModeStrict || config.RandomDelayMinSeconds != -2 ||
 		config.RandomDelayMaxSeconds != 5 {
 		t.Fatalf("iteration config = %+v", config)
 	}
 	derived, value, err := keywordsource.DeriveRequest(keywordsource.RequestConfig{}, config, 0)
 	if err != nil || value != 1 || derived.Query["page"] != "1" {
 		t.Fatalf("first test request = value:%d query:%#v err:%v", value, derived.Query, err)
+	}
+}
+
+func TestBindKeywordAPISourceDefaultsStopModeToStrict(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"source"}`))
+	context.Request.Header.Set("Content-Type", "application/json")
+	request, _, ok := bindKeywordAPISource(context)
+	if !ok || request.IterationStopMode != storage.KeywordAPIIterationStopModeStrict {
+		t.Fatalf("request = %+v ok=%v response=%s", request, ok, recorder.Body.String())
 	}
 }
 
@@ -99,6 +112,9 @@ func TestValidateKeywordAPISourceRequestChecksUnlimitedAndRandomDelay(t *testing
 		{name: "random delay order", mutate: func(request *keywordAPISourceRequest) {
 			request.IterationRandomDelayMinSeconds = 2
 			request.IterationRandomDelayMaxSeconds = 1
+		}},
+		{name: "invalid stop mode", mutate: func(request *keywordAPISourceRequest) {
+			request.IterationStopMode = "aggressive"
 		}},
 	}
 	for _, test := range tests {
@@ -125,13 +141,27 @@ func TestValidateKeywordAPISourceRequestChecksUnlimitedAndRandomDelay(t *testing
 	}
 }
 
+func TestValidateKeywordAPISourceRequestRejectsStopModeWhenIterationDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	if validateKeywordAPISourceRequest(context, keywordAPISourceRequest{IterationStopMode: "aggressive"}, "", false) {
+		t.Fatal("invalid stop mode was accepted while iteration was disabled")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}
+
 func TestKeywordAPISourceDetailIncludesUnlimitedAndRandomDelay(t *testing.T) {
 	detail := keywordAPISourceDetail(storage.KeywordAPISource{
 		IterationUnlimited: true, IterationNoKeywordStopCount: 5,
+		IterationStopMode:              storage.KeywordAPIIterationStopModeStrict,
 		IterationRandomDelayMinSeconds: -4, IterationRandomDelayMaxSeconds: 6,
 		SyncConfigRevision: 8, LastAppliedConfigRevision: 7, ResultStale: true,
 	})
 	if detail["iteration_unlimited"] != true || detail["iteration_no_keyword_stop_count"] != 5 ||
+		detail["iteration_stop_mode"] != storage.KeywordAPIIterationStopModeStrict ||
 		detail["iteration_random_delay_min_seconds"] != -4 ||
 		detail["iteration_random_delay_max_seconds"] != 6 {
 		t.Fatalf("detail = %#v", detail)

@@ -44,6 +44,7 @@ type keywordAPISourceRequest struct {
 	IterationDelaySeconds          int               `json:"iteration_delay_seconds"`
 	IterationUnlimited             bool              `json:"iteration_unlimited"`
 	IterationNoKeywordStopCount    int               `json:"iteration_no_keyword_stop_count"`
+	IterationStopMode              string            `json:"iteration_stop_mode"`
 	IterationRandomDelayMinSeconds int               `json:"iteration_random_delay_min_seconds"`
 	IterationRandomDelayMaxSeconds int               `json:"iteration_random_delay_max_seconds"`
 }
@@ -216,6 +217,7 @@ func (h *AdminHandler) createKeywordAPISource(c *gin.Context) {
 		IterationPath: request.IterationPath, IterationStart: request.IterationStart, IterationStep: request.IterationStep,
 		IterationCount: request.IterationCount, IterationDelaySeconds: request.IterationDelaySeconds,
 		IterationUnlimited: request.IterationUnlimited, IterationNoKeywordStopCount: request.IterationNoKeywordStopCount,
+		IterationStopMode:              request.IterationStopMode,
 		IterationRandomDelayMinSeconds: request.IterationRandomDelayMinSeconds,
 		IterationRandomDelayMaxSeconds: request.IterationRandomDelayMaxSeconds,
 	})
@@ -255,6 +257,7 @@ func (h *AdminHandler) updateKeywordAPISource(c *gin.Context) {
 		IterationPath: &request.IterationPath, IterationStart: &request.IterationStart, IterationStep: &request.IterationStep,
 		IterationCount: &request.IterationCount, IterationDelaySeconds: &request.IterationDelaySeconds,
 		IterationUnlimited: &request.IterationUnlimited, IterationNoKeywordStopCount: &request.IterationNoKeywordStopCount,
+		IterationStopMode:              &request.IterationStopMode,
 		IterationRandomDelayMinSeconds: &request.IterationRandomDelayMinSeconds,
 		IterationRandomDelayMaxSeconds: &request.IterationRandomDelayMaxSeconds,
 	})
@@ -544,6 +547,10 @@ func bindKeywordAPISource(c *gin.Context) (keywordAPISourceRequest, string, bool
 		c.JSON(http.StatusBadRequest, model.NewErrorResponse(http.StatusBadRequest, "请求 JSON 无效"))
 		return request, "", false
 	}
+	request.IterationStopMode = strings.ToLower(strings.TrimSpace(request.IterationStopMode))
+	if request.IterationStopMode == "" {
+		request.IterationStopMode = storage.KeywordAPIIterationStopModeDefault
+	}
 	body, err := encodeKeywordAPISourceBody(request.BodyType, request.RequestBody)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, model.NewErrorResponse(http.StatusBadRequest, err.Error()))
@@ -587,6 +594,13 @@ func encodeKeywordAPISourceBody(bodyType string, value any) (string, error) {
 
 func validateKeywordAPISourceRequest(c *gin.Context, request keywordAPISourceRequest, body string, requirePath bool) bool {
 	config, err := keywordAPISourceRequestConfig(request, body)
+	if err == nil {
+		switch keywordsource.NormalizeIterationStopMode(keywordsource.IterationStopMode(request.IterationStopMode)) {
+		case keywordsource.IterationStopModeNormal, keywordsource.IterationStopModeStrict:
+		default:
+			err = fmt.Errorf("停止判定模式仅支持 normal 或 strict")
+		}
+	}
 	if err == nil && strings.TrimSpace(request.RequestURL) != "" {
 		err = keywordsource.ValidateRequestConfig(config)
 	}
@@ -612,6 +626,7 @@ func keywordAPISourceIterationConfig(request keywordAPISourceRequest) keywordsou
 		Path: request.IterationPath, Start: request.IterationStart, Step: request.IterationStep,
 		Count: request.IterationCount, DelaySeconds: request.IterationDelaySeconds,
 		Unlimited: request.IterationUnlimited, NoKeywordStopCount: request.IterationNoKeywordStopCount,
+		StopMode:              keywordsource.IterationStopMode(request.IterationStopMode),
 		RandomDelayMinSeconds: request.IterationRandomDelayMinSeconds,
 		RandomDelayMaxSeconds: request.IterationRandomDelayMaxSeconds,
 	}
@@ -658,6 +673,7 @@ func keywordAPISourceDetail(source storage.KeywordAPISource) gin.H {
 		"iteration_count": source.IterationCount, "iteration_delay_seconds": source.IterationDelaySeconds,
 		"iteration_unlimited":                source.IterationUnlimited,
 		"iteration_no_keyword_stop_count":    source.IterationNoKeywordStopCount,
+		"iteration_stop_mode":                source.IterationStopMode,
 		"iteration_random_delay_min_seconds": source.IterationRandomDelayMinSeconds,
 		"iteration_random_delay_max_seconds": source.IterationRandomDelayMaxSeconds,
 		"last_request_count":                 source.LastRequestCount, "last_success_count": source.LastSuccessCount,

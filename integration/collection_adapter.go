@@ -353,11 +353,19 @@ func (c LinkChecker) Check(ctx context.Context, candidate collection.LinkCheckCa
 		switch result.response.Results[0].State {
 		case "ok":
 			return collection.DetectionValid, nil
-		case "bad":
+		case "bad", "invalid":
 			return collection.DetectionInvalid, nil
+		case "expired":
+			return collection.DetectionExpired, nil
+		case "cancelled":
+			return collection.DetectionCancelled, nil
+		case "violation":
+			return collection.DetectionViolation, nil
+		case "locked":
+			return collection.DetectionLocked, nil
 		case "unsupported":
 			return collection.DetectionUnsupported, nil
-		case "locked", "uncertain":
+		case "uncertain":
 			return collection.DetectionUnknown, nil
 		default:
 			return collection.DetectionUnknown, fmt.Errorf("unknown link-check state %q", result.response.Results[0].State)

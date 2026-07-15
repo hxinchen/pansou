@@ -25,6 +25,10 @@ type Config struct {
 type delaySampler func(minSeconds, maxSeconds int) int
 type delayWaiter func(context.Context, time.Duration) error
 
+type keywordExistenceStore interface {
+	ExistingNormalizedKeywords(context.Context, []string) (map[string]struct{}, error)
+}
+
 // Service serializes scheduled and manual API-source synchronization. The
 // store claim is the cross-goroutine guard; the mutex keeps this process from
 // issuing multiple outbound keyword-source requests at once.
@@ -45,6 +49,7 @@ type Service struct {
 }
 
 type keywordSourceStore interface {
+	keywordExistenceStore
 	ClaimDueKeywordAPISource(context.Context, time.Time) (*storage.KeywordAPISource, error)
 	ClaimKeywordAPISourceForSync(context.Context, int64, time.Time) (storage.KeywordAPISource, error)
 	CompleteKeywordAPISourceSync(context.Context, storage.KeywordAPISourceSyncInput) (storage.KeywordAPISourceSyncResult, error)
@@ -283,17 +288,23 @@ iterationLoop:
 			}
 			continue
 		}
-		successCount++
-		if len(extraction.Values) == 0 {
-			noKeywordStreak++
-		} else {
-			noKeywordStreak = 0
-		}
-		for _, value := range extraction.Values {
-			if _, exists := seenValues[value.Normalized]; exists {
-				continue
+		progress, progressErr := evaluateIterationKeywordProgress(ctx, s.store, iteration, extraction.Values, seenValues)
+		if progressErr != nil {
+			failureCount++
+			message := fmt.Sprintf("iteration %d strict stop check failed: %v", index+1, progressErr)
+			_, recordErr := s.store.FailKeywordAPISourceSyncWithStats(context.WithoutCancel(ctx), source.ID, message, time.Now(), requestCount, failureCount)
+			if recordErr != nil {
+				return storage.KeywordAPISourceSyncResult{}, fmt.Errorf("%s; record failure: %w", message, recordErr)
 			}
-			seenValues[value.Normalized] = struct{}{}
+			return storage.KeywordAPISourceSyncResult{}, errors.New(message)
+		}
+		successCount++
+		if progress.hasProgress {
+			noKeywordStreak = 0
+		} else {
+			noKeywordStreak++
+		}
+		for _, value := range progress.newValues {
 			values = append(values, value.Value)
 		}
 		if iterationReachedNoKeywordLimit(iteration, noKeywordStreak) {
@@ -332,9 +343,54 @@ func IterationConfig(source storage.KeywordAPISource) keywordsource.IterationCon
 		Path: source.IterationPath, Start: source.IterationStart, Step: source.IterationStep,
 		Count: source.IterationCount, DelaySeconds: source.IterationDelaySeconds,
 		Unlimited: source.IterationUnlimited, NoKeywordStopCount: source.IterationNoKeywordStopCount,
+		StopMode:              keywordsource.IterationStopMode(source.IterationStopMode),
 		RandomDelayMinSeconds: source.IterationRandomDelayMinSeconds,
 		RandomDelayMaxSeconds: source.IterationRandomDelayMaxSeconds,
 	}
+}
+
+type iterationKeywordProgress struct {
+	newValues   []keywordsource.KeywordValue
+	hasProgress bool
+}
+
+func evaluateIterationKeywordProgress(
+	ctx context.Context,
+	store keywordExistenceStore,
+	iteration keywordsource.IterationConfig,
+	extracted []keywordsource.KeywordValue,
+	seenValues map[string]struct{},
+) (iterationKeywordProgress, error) {
+	progress := iterationKeywordProgress{newValues: make([]keywordsource.KeywordValue, 0, len(extracted))}
+	for _, value := range extracted {
+		if _, exists := seenValues[value.Normalized]; exists {
+			continue
+		}
+		seenValues[value.Normalized] = struct{}{}
+		progress.newValues = append(progress.newValues, value)
+	}
+	if !iteration.Enabled || iteration.NoKeywordStopCount <= 0 || keywordsource.NormalizeIterationStopMode(iteration.StopMode) == keywordsource.IterationStopModeNormal {
+		progress.hasProgress = len(extracted) > 0
+		return progress, nil
+	}
+	if len(progress.newValues) == 0 {
+		return progress, nil
+	}
+	normalized := make([]string, len(progress.newValues))
+	for index, value := range progress.newValues {
+		normalized[index] = value.Normalized
+	}
+	existing, err := store.ExistingNormalizedKeywords(ctx, normalized)
+	if err != nil {
+		return iterationKeywordProgress{}, err
+	}
+	for _, value := range progress.newValues {
+		if _, exists := existing[value.Normalized]; !exists {
+			progress.hasProgress = true
+			break
+		}
+	}
+	return progress, nil
 }
 
 func iterationAllowsIndex(iteration keywordsource.IterationConfig, index int) bool {

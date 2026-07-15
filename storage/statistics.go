@@ -90,7 +90,7 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 
 	go func() {
 		var result resourceResult
-		var pending, valid, invalid, unknown, unsupported int64
+		var pending, valid, invalid, expired, cancelled, violation, locked, unknown, unsupported int64
 		result.err = s.pool.QueryRow(ctx, `
 			SELECT
 				count(*),
@@ -99,6 +99,10 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 				count(*) FILTER (WHERE check_status = 'pending'),
 				count(*) FILTER (WHERE check_status = 'valid'),
 				count(*) FILTER (WHERE check_status = 'invalid'),
+				count(*) FILTER (WHERE check_status = 'expired'),
+				count(*) FILTER (WHERE check_status = 'cancelled'),
+				count(*) FILTER (WHERE check_status = 'violation'),
+				count(*) FILTER (WHERE check_status = 'locked'),
 				count(*) FILTER (WHERE check_status = 'unknown'),
 				count(*) FILTER (WHERE check_status = 'unsupported')
 			FROM resources`, today, tomorrow, sevenDaysAgo).Scan(
@@ -108,6 +112,10 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 			&pending,
 			&valid,
 			&invalid,
+			&expired,
+			&cancelled,
+			&violation,
+			&locked,
 			&unknown,
 			&unsupported,
 		)
@@ -116,7 +124,8 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 		} else {
 			result.statusCounts = StatusCounts{
 				CheckPending: pending, CheckValid: valid, CheckInvalid: invalid,
-				CheckUnknown: unknown, CheckUnsupported: unsupported,
+				CheckExpired: expired, CheckCancelled: cancelled, CheckViolation: violation,
+				CheckLocked: locked, CheckUnknown: unknown, CheckUnsupported: unsupported,
 			}
 		}
 		resourcesCh <- result

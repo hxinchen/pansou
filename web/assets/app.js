@@ -85,8 +85,12 @@
     running: '运行中',
     valid: '有效',
     invalid: '失效',
+    expired: '已过期',
+    share_cancelled: '取消分享',
+    violation: '违规',
+    locked: '需提取码',
     unknown: '未知',
-    unsupported: '不支持',
+    unsupported: '暂不支持',
     success: '成功',
     success_empty: '无结果',
     failed: '失败',
@@ -95,7 +99,6 @@
     cancelled: '已取消',
     legacy: '升级前记录',
     active: '可用',
-    expired: '已过期',
     disabled: '已停用',
     admin_suspended: '管理员暂停'
   };
@@ -279,10 +282,14 @@
 
   function normalizedStatus(item) {
     var value = pick(item, ['status', 'check_status', 'state'], 'unknown');
-    if (value === 'ok') return 'valid';
-    if (value === 'bad') return 'invalid';
-    if (value === 'uncertain') return 'unknown';
-    return String(value || 'unknown').toLowerCase();
+    var normalized = String(value || 'unknown').toLowerCase();
+    if (normalized === 'ok') return 'valid';
+    if (normalized === 'bad') return 'invalid';
+    if (normalized === 'uncertain') return 'unknown';
+    if (normalized === 'canceled') normalized = 'cancelled';
+    if ((normalized === 'cancelled' || normalized === 'share_cancelled') && pick(item, ['disk_type', 'diskType', 'platform'], '')) return 'share_cancelled';
+    if (normalized === 'illegal') return 'violation';
+    return normalized;
   }
 
   function statusBadge(status) {
@@ -1223,8 +1230,12 @@
     var statuses = [
       { key: 'valid', label: '有效', color: '#16835b' },
       { key: 'pending', label: '待检测', color: '#9ca3ad' },
+      { key: 'locked', label: '需提取码', color: '#a26108' },
       { key: 'unknown', label: '未知', color: '#d28a24' },
       { key: 'unsupported', label: '不支持', color: '#7557c5' },
+      { key: 'expired', label: '已过期', color: '#b7791f' },
+      { key: 'cancelled', label: '取消分享', color: '#6b727b' },
+      { key: 'violation', label: '违规', color: '#c23838' },
       { key: 'invalid', label: '失效', color: '#c23838' }
     ];
     var values = statuses.map(function (item) {
@@ -2563,6 +2574,10 @@
     if (!form || form.dataset.mode !== 'api' || state.keywordSources.editing) return;
     var controls = {};
     form.querySelectorAll('[data-keyword-mode-panel="api"] [name]').forEach(function (control) {
+      if (control.type === 'radio') {
+        if (control.checked) controls[control.name] = { value: control.value };
+        return;
+      }
       controls[control.name] = control.type === 'checkbox'
         ? { checked: control.checked }
         : { value: control.value };
@@ -2630,6 +2645,20 @@
     return minimum === maximum ? minText : minText + ' – ' + maxText;
   }
 
+  function keywordAPIIterationStopMode() {
+    var selected = byId('keyword-form').elements.iteration_stop_mode.value;
+    return selected === 'normal' ? 'normal' : 'strict';
+  }
+
+  function updateAPIIterationStopMode() {
+    var strict = keywordAPIIterationStopMode() === 'strict';
+    byId('api-stop-mode-description').textContent = strict
+      ? '本轮没有产生资源库新词时累计，并排除本次同步已见词。'
+      : '本轮没有提取到有效关键词时累计。';
+    byId('api-iteration-stop-count-label').textContent = strict ? '连续无新增关键词停止' : '连续无关键词停止';
+    return strict;
+  }
+
   function updateAPIIterationPreview() {
     var enabled = byId('api-iteration-enabled').checked;
     var unlimited = byId('api-iteration-unlimited').checked;
@@ -2637,6 +2666,7 @@
     var countInput = byId('api-iteration-count');
     fields.hidden = !enabled;
     countInput.disabled = unlimited;
+    var strictStop = updateAPIIterationStopMode();
     var location = byId('api-iteration-location').value;
     var bodyType = byId('api-body-type').value;
     var hint = byId('api-iteration-hint');
@@ -2661,14 +2691,14 @@
     var sequence = values.join(' → ');
     if (unlimited) {
       sequence += ' → …';
-      var stopText = noKeywordStopCount >= 1 && noKeywordStopCount <= 100 ? '连续 ' + noKeywordStopCount + ' 轮无关键词' : '需设置 1–100 轮';
+      var stopText = noKeywordStopCount >= 1 && noKeywordStopCount <= 100 ? '连续 ' + noKeywordStopCount + (strictStop ? ' 轮无新增关键词' : ' 轮无关键词') : '需设置 1–100 轮';
       var perRoundDelay = randomDelayMin > randomDelayMax ? '随机范围无效' : formatAPIIterationDurationRange(delayMinimum, delayMaximum);
       byId('api-iteration-preview').innerHTML = '<div><span>无限序列 · 持续迭代</span><strong>' + escapeHTML(sequence) + '</strong></div><div><span>停止条件</span><strong>' + escapeHTML(stopText) + '</strong><small>单轮等待 ' + escapeHTML(perRoundDelay) + ' · 不含网络请求时间</small></div>';
       return;
     }
     if (count > 6) sequence += ' → … → ' + (start + step * (count - 1));
     var totalDelay = randomDelayMin > randomDelayMax ? '随机范围无效' : formatAPIIterationDurationRange((count - 1) * delayMinimum, (count - 1) * delayMaximum);
-    var earlyStop = noKeywordStopCount >= 1 && noKeywordStopCount <= 100 ? ' · 连续 ' + noKeywordStopCount + ' 轮无关键词时提前停止' : '';
+    var earlyStop = noKeywordStopCount >= 1 && noKeywordStopCount <= 100 ? ' · 连续 ' + noKeywordStopCount + (strictStop ? ' 轮无新增关键词时提前停止' : ' 轮无关键词时提前停止') : '';
     byId('api-iteration-preview').innerHTML = '<div><span>有限序列 · 共 ' + count + ' 轮</span><strong>' + escapeHTML(sequence) + '</strong></div><div><span>理论总等待</span><strong>' + escapeHTML(totalDelay) + '</strong><small>不含网络请求时间' + escapeHTML(earlyStop) + '</small></div>';
   }
 
@@ -2707,6 +2737,7 @@
     form.elements.iteration_delay_seconds.value = 0;
     form.elements.iteration_unlimited.checked = false;
     form.elements.iteration_no_keyword_stop_count.value = 0;
+    form.elements.iteration_stop_mode.value = 'strict';
     form.elements.iteration_random_delay_min_seconds.value = 0;
     form.elements.iteration_random_delay_max_seconds.value = 0;
     byId('api-response-path').value = '';
@@ -2754,6 +2785,7 @@
       iteration_delay_seconds: Math.trunc(numberValue(form.elements.iteration_delay_seconds.value, 0)),
       iteration_unlimited: form.elements.iteration_unlimited.checked,
       iteration_no_keyword_stop_count: Math.trunc(numberValue(form.elements.iteration_no_keyword_stop_count.value, 0)),
+      iteration_stop_mode: form.elements.iteration_stop_mode.value === 'normal' ? 'normal' : 'strict',
       iteration_random_delay_min_seconds: Math.trunc(numberValue(form.elements.iteration_random_delay_min_seconds.value, 0)),
       iteration_random_delay_max_seconds: Math.trunc(numberValue(form.elements.iteration_random_delay_max_seconds.value, 0))
     };
@@ -2779,6 +2811,7 @@
       iteration_delay_seconds: payload.iteration_delay_seconds,
       iteration_unlimited: payload.iteration_unlimited,
       iteration_no_keyword_stop_count: payload.iteration_no_keyword_stop_count,
+      iteration_stop_mode: payload.iteration_stop_mode,
       iteration_random_delay_min_seconds: payload.iteration_random_delay_min_seconds,
       iteration_random_delay_max_seconds: payload.iteration_random_delay_max_seconds
     });
@@ -2788,6 +2821,7 @@
     if (payload.iteration_count < 1 || payload.iteration_count > 100) return '请求次数必须是 1–100 之间的整数';
     if (payload.iteration_delay_seconds < 0 || payload.iteration_delay_seconds > 3600) return '固定间隔必须是 0–3600 秒之间的整数';
     if (payload.iteration_no_keyword_stop_count < 0 || payload.iteration_no_keyword_stop_count > 100) return '连续无关键词停止次数必须是 0–100 之间的整数';
+    if (['normal', 'strict'].indexOf(payload.iteration_stop_mode) < 0) return '停止判定模式仅支持普通或严格';
     if (payload.iteration_random_delay_min_seconds < -3600 || payload.iteration_random_delay_min_seconds > 3600 || payload.iteration_random_delay_max_seconds < -3600 || payload.iteration_random_delay_max_seconds > 3600) return '随机延迟最小值和最大值必须是 -3600–3600 秒之间的整数';
     if (payload.iteration_random_delay_min_seconds > payload.iteration_random_delay_max_seconds) return '随机延迟最小值不能大于最大值';
     if (!payload.iteration_enabled) return '';
@@ -2905,6 +2939,7 @@
       form.elements.iteration_delay_seconds.value = Math.max(0, numberValue(source.iteration_delay_seconds, 0));
       form.elements.iteration_unlimited.checked = boolValue(source.iteration_unlimited, false);
       form.elements.iteration_no_keyword_stop_count.value = numberValue(source.iteration_no_keyword_stop_count, 0);
+      form.elements.iteration_stop_mode.value = source.iteration_stop_mode === 'strict' ? 'strict' : 'normal';
       form.elements.iteration_random_delay_min_seconds.value = numberValue(source.iteration_random_delay_min_seconds, 0);
       form.elements.iteration_random_delay_max_seconds.value = numberValue(source.iteration_random_delay_max_seconds, 0);
       resetAPIEditor('header', source.request_headers || {});
@@ -5356,6 +5391,9 @@
     byId('api-response-path').addEventListener('input', debounce(updateKeywordAPIExtractPreview, 120));
     ['api-iteration-start', 'api-iteration-step', 'api-iteration-count', 'api-iteration-delay', 'api-iteration-no-keyword-stop-count', 'api-iteration-random-delay-min', 'api-iteration-random-delay-max'].forEach(function (id) {
       byId(id).addEventListener('input', updateAPIIterationPreview);
+    });
+    document.querySelectorAll('[name="iteration_stop_mode"]').forEach(function (control) {
+      control.addEventListener('change', updateAPIIterationPreview);
     });
     ['query', 'header', 'form'].forEach(function (target) {
       byId(apiEditorDefinitions[target].json).addEventListener('blur', function () { validateAPIObjectEditor(target); });

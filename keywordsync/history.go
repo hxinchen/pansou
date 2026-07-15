@@ -25,6 +25,7 @@ const (
 )
 
 type trackedKeywordSourceStore interface {
+	keywordExistenceStore
 	EnqueueKeywordAPISourceSync(context.Context, int64, string, time.Time) (storage.KeywordAPISyncRun, bool, error)
 	EnqueueDueKeywordAPISourceSync(context.Context, time.Time) (*storage.KeywordAPISyncRun, error)
 	ClaimNextKeywordAPISyncRun(context.Context, string, string, time.Time, time.Time) (*storage.KeywordAPISyncClaim, error)
@@ -249,22 +250,33 @@ func (s *Service) executeTrackedRun(parent context.Context, store trackedKeyword
 			continue
 		}
 
+		progress, progressErr := evaluateIterationKeywordProgress(runCtx, store, iteration, extraction.Values, seenValues)
+		if progressErr != nil {
+			failureCount++
+			message := fmt.Sprintf("iteration %d strict stop check failed: %v", index+1, progressErr)
+			input.Status = storage.KeywordAPISyncIterationStatusFailed
+			input.ErrorMessage = message
+			input.CompletedAt = time.Now()
+			storeCtx, storeCancel = keywordSyncStoreContext(runCtx, keywordSyncStoreTimeout)
+			_, completeErr := store.CompleteKeywordAPISyncIteration(storeCtx, input)
+			storeCancel()
+			if completeErr != nil {
+				return completeErr
+			}
+			return s.failTrackedRun(store, claim.Run.ID, token, errors.New(message), requestCount, failureCount)
+		}
 		successCount++
 		rawItemCount += extraction.RawCount
 		input.Status = storage.KeywordAPISyncIterationStatusSuccess
 		input.RawItemCount = extraction.RawCount
 		input.UniqueItemCount = extraction.UniqueCount
 		input.Samples = keywordSyncSamples(extraction.Values)
-		if len(extraction.Values) == 0 {
-			noKeywordStreak++
-		} else {
+		if progress.hasProgress {
 			noKeywordStreak = 0
+		} else {
+			noKeywordStreak++
 		}
-		for _, value := range extraction.Values {
-			if _, exists := seenValues[value.Normalized]; exists {
-				continue
-			}
-			seenValues[value.Normalized] = struct{}{}
+		for _, value := range progress.newValues {
 			values = append(values, value.Value)
 			valueSequences = append(valueSequences, index+1)
 			input.CrossIterationNew++

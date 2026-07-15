@@ -14,7 +14,7 @@ type sortField struct {
 var resourceSortFields = map[string]sortField{
 	"resource":        {Expression: "lower(COALESCE(r.title,''))", TieBreaker: "r.id", NullsLast: true},
 	"platform":        {Expression: "lower(r.platform)", TieBreaker: "r.id", NullsLast: true},
-	"check_status":    {Expression: "CASE r.check_status WHEN 'valid' THEN 0 WHEN 'pending' THEN 1 WHEN 'unknown' THEN 2 WHEN 'unsupported' THEN 3 WHEN 'invalid' THEN 4 ELSE 5 END", TieBreaker: "r.id"},
+	"check_status":    {Expression: "CASE r.check_status WHEN 'valid' THEN 0 WHEN 'locked' THEN 1 WHEN 'pending' THEN 2 WHEN 'unknown' THEN 3 WHEN 'unsupported' THEN 4 WHEN 'expired' THEN 5 WHEN 'cancelled' THEN 6 WHEN 'violation' THEN 7 WHEN 'invalid' THEN 8 ELSE 9 END", TieBreaker: "r.id"},
 	"source_count":    {Expression: "(SELECT count(*) FROM resource_sources rs_sort WHERE rs_sort.resource_id=r.id)", TieBreaker: "r.id"},
 	"discovery_count": {Expression: "r.discovery_count", TieBreaker: "r.id"},
 	"last_seen_at":    {Expression: "r.last_seen_at", TieBreaker: "r.id", NullsLast: true},

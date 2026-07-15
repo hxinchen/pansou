@@ -54,6 +54,7 @@ func TestValidateIterationConfig(t *testing.T) {
 	base := RequestConfig{BodyType: BodyJSON, Body: `{"pagination":{"offset":0}}`}
 	valid := []IterationConfig{
 		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1},
+		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, StopMode: IterationStopModeStrict},
 		{Enabled: true, Location: IterationHeader, Path: "X-Page", Count: 100, DelaySeconds: 3600},
 		{Enabled: true, Location: IterationBody, Path: "pagination.offset", Count: 2},
 		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, Unlimited: true, NoKeywordStopCount: 1, RandomDelayMinSeconds: -3600, RandomDelayMaxSeconds: 3600},
@@ -73,6 +74,7 @@ func TestValidateIterationConfig(t *testing.T) {
 		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, DelaySeconds: 3601},
 		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, NoKeywordStopCount: -1},
 		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, NoKeywordStopCount: 101},
+		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, StopMode: "unknown"},
 		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, Unlimited: true},
 		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, RandomDelayMinSeconds: -3601},
 		{Enabled: true, Location: IterationQuery, Path: "page", Count: 1, RandomDelayMaxSeconds: 3601},

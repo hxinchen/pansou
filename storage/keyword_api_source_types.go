@@ -31,6 +31,9 @@ const (
 
 	KeywordAPISourceDefaultIntervalSeconds int64 = 3600
 	KeywordAPISourceDefaultTimeoutSeconds        = 15
+	KeywordAPIIterationStopModeNormal            = "normal"
+	KeywordAPIIterationStopModeStrict            = "strict"
+	KeywordAPIIterationStopModeDefault           = KeywordAPIIterationStopModeStrict
 )
 
 type KeywordAPISource struct {
@@ -61,6 +64,7 @@ type KeywordAPISource struct {
 	IterationDelaySeconds          int                `json:"iteration_delay_seconds"`
 	IterationUnlimited             bool               `json:"iteration_unlimited"`
 	IterationNoKeywordStopCount    int                `json:"iteration_no_keyword_stop_count"`
+	IterationStopMode              string             `json:"iteration_stop_mode"`
 	IterationRandomDelayMinSeconds int                `json:"iteration_random_delay_min_seconds"`
 	IterationRandomDelayMaxSeconds int                `json:"iteration_random_delay_max_seconds"`
 	NextSyncAt                     *time.Time         `json:"next_sync_at,omitempty"`
@@ -107,6 +111,7 @@ type CreateKeywordAPISourceInput struct {
 	IterationDelaySeconds          int
 	IterationUnlimited             bool
 	IterationNoKeywordStopCount    int
+	IterationStopMode              string
 	IterationRandomDelayMinSeconds int
 	IterationRandomDelayMaxSeconds int
 	NextSyncAt                     *time.Time
@@ -139,6 +144,7 @@ type UpdateKeywordAPISourceInput struct {
 	IterationDelaySeconds          *int
 	IterationUnlimited             *bool
 	IterationNoKeywordStopCount    *int
+	IterationStopMode              *string
 	IterationRandomDelayMinSeconds *int
 	IterationRandomDelayMaxSeconds *int
 	NextSyncAt                     **time.Time
@@ -218,6 +224,7 @@ type KeywordAPISyncConfigSnapshot struct {
 	IterationDelaySeconds          int      `json:"iteration_delay_seconds"`
 	IterationUnlimited             bool     `json:"iteration_unlimited"`
 	IterationNoKeywordStopCount    int      `json:"iteration_no_keyword_stop_count"`
+	IterationStopMode              string   `json:"iteration_stop_mode"`
 	IterationRandomDelayMinSeconds int      `json:"iteration_random_delay_min_seconds"`
 	IterationRandomDelayMaxSeconds int      `json:"iteration_random_delay_max_seconds"`
 }

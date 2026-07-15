@@ -91,3 +91,20 @@ func TestLinkCheckQueueStoresUnknownOnCheckerErrorAndDeduplicates(t *testing.T) 
 		t.Fatalf("stored result = %+v", result)
 	}
 }
+
+func TestIsFinalDetectionStatusIncludesDetailedFailures(t *testing.T) {
+	for _, status := range []DetectionStatus{
+		DetectionValid,
+		DetectionInvalid,
+		DetectionExpired,
+		DetectionCancelled,
+		DetectionViolation,
+		DetectionLocked,
+		DetectionUnknown,
+		DetectionUnsupported,
+	} {
+		if !isFinalDetectionStatus(status) {
+			t.Fatalf("isFinalDetectionStatus(%q) = false", status)
+		}
+	}
+}

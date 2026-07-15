@@ -51,6 +51,10 @@ const (
 	DetectionPending     DetectionStatus = "pending"
 	DetectionValid       DetectionStatus = "valid"
 	DetectionInvalid     DetectionStatus = "invalid"
+	DetectionExpired     DetectionStatus = "expired"
+	DetectionCancelled   DetectionStatus = "cancelled"
+	DetectionViolation   DetectionStatus = "violation"
+	DetectionLocked      DetectionStatus = "locked"
 	DetectionUnknown     DetectionStatus = "unknown"
 	DetectionUnsupported DetectionStatus = "unsupported"
 )
@@ -285,7 +289,12 @@ func ShouldQueueLinkCheck(candidate LinkCheckCandidate, now time.Time, staleAfte
 	if candidate.IsNew {
 		return true
 	}
-	if candidate.Status != DetectionInvalid && candidate.Status != DetectionUnknown {
+	if candidate.Status != DetectionInvalid &&
+		candidate.Status != DetectionExpired &&
+		candidate.Status != DetectionCancelled &&
+		candidate.Status != DetectionViolation &&
+		candidate.Status != DetectionLocked &&
+		candidate.Status != DetectionUnknown {
 		return false
 	}
 	if candidate.LastCheckedAt == nil {

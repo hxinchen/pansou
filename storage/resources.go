@@ -16,6 +16,60 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+func sanitizeResourceInput(input ResourceInput) ResourceInput {
+	input.URL = strings.ToValidUTF8(input.URL, "")
+	input.Password = strings.ToValidUTF8(input.Password, "")
+	input.Platform = strings.ToValidUTF8(input.Platform, "")
+	input.Title = strings.ToValidUTF8(input.Title, "")
+	input.Content = strings.ToValidUTF8(input.Content, "")
+	input.CheckStatus = strings.ToValidUTF8(input.CheckStatus, "")
+	input.Keyword = strings.ToValidUTF8(input.Keyword, "")
+	input.KeywordType = strings.ToValidUTF8(input.KeywordType, "")
+	input.Source.SourceType = strings.ToValidUTF8(input.Source.SourceType, "")
+	input.Source.SourceKey = strings.ToValidUTF8(input.Source.SourceKey, "")
+	input.Source.SourceIdentity = strings.ToValidUTF8(input.Source.SourceIdentity, "")
+	input.Source.MessageID = strings.ToValidUTF8(input.Source.MessageID, "")
+	input.Source.UniqueID = strings.ToValidUTF8(input.Source.UniqueID, "")
+	input.Source.Title = strings.ToValidUTF8(input.Source.Title, "")
+	input.Source.Content = strings.ToValidUTF8(input.Source.Content, "")
+	input.Source.Metadata = sanitizeUTF8Map(input.Source.Metadata)
+	return input
+}
+
+func sanitizeUTF8Map(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
+	result := make(map[string]any, len(values))
+	for key, value := range values {
+		result[strings.ToValidUTF8(key, "")] = sanitizeUTF8Value(value)
+	}
+	return result
+}
+
+func sanitizeUTF8Value(value any) any {
+	switch typed := value.(type) {
+	case string:
+		return strings.ToValidUTF8(typed, "")
+	case []string:
+		result := make([]string, len(typed))
+		for index, item := range typed {
+			result[index] = strings.ToValidUTF8(item, "")
+		}
+		return result
+	case []any:
+		result := make([]any, len(typed))
+		for index, item := range typed {
+			result[index] = sanitizeUTF8Value(item)
+		}
+		return result
+	case map[string]any:
+		return sanitizeUTF8Map(typed)
+	default:
+		return value
+	}
+}
+
 const resourceColumns = `
 	id, normalized_url, url, password, platform, title, content,
 	link_datetime, check_status, last_checked_at, first_seen_at, last_seen_at,
@@ -68,6 +122,7 @@ func (s *Store) UpsertResource(ctx context.Context, input ResourceInput) (Upsert
 }
 
 func (s *Store) upsertResourceTx(ctx context.Context, tx pgx.Tx, input ResourceInput) (UpsertResult, error) {
+	input = sanitizeResourceInput(input)
 	cleanedURL := cleanURLInput(input.URL)
 	normalizedURL, err := NormalizeURL(cleanedURL)
 	if err != nil {
@@ -106,7 +161,7 @@ func (s *Store) upsertResourceTx(ctx context.Context, tx pgx.Tx, input ResourceI
 			END,
 			check_status = CASE
 				WHEN EXCLUDED.last_checked_at IS NOT NULL THEN EXCLUDED.check_status
-				WHEN resources.check_status IN ('invalid','unknown')
+				WHEN resources.check_status IN ('invalid','expired','cancelled','violation','locked','unknown')
 					AND (resources.last_checked_at IS NULL OR resources.last_checked_at <= EXCLUDED.last_seen_at - interval '7 days')
 				THEN 'pending'
 				ELSE resources.check_status
@@ -493,13 +548,17 @@ func buildResourceWhere(filter ResourceFilter) (string, []any) {
 		placeholder := addArg("%" + query + "%")
 		conditions = append(conditions, "(r.title ILIKE "+placeholder+" OR r.content ILIKE "+placeholder+" OR r.url ILIKE "+placeholder+")")
 	}
+	if query := strings.TrimSpace(filter.TitleQuery); query != "" {
+		placeholder := addArg("%" + query + "%")
+		conditions = append(conditions, "r.title ILIKE "+placeholder)
+	}
 	if values := normalizeStringList(filter.Platforms); len(values) > 0 {
 		conditions = append(conditions, "r.platform=ANY("+addArg(values)+"::text[])")
 	}
 	if values := normalizeStringList(filter.CheckStatuses); len(values) > 0 {
 		conditions = append(conditions, "r.check_status=ANY("+addArg(values)+"::text[])")
 	} else if !filter.IncludeInvalid {
-		conditions = append(conditions, "r.check_status<>'invalid'")
+		conditions = append(conditions, "r.check_status NOT IN ('invalid','expired','cancelled','violation')")
 	}
 	if len(filter.SourceTypes) > 0 || len(filter.SourceKeys) > 0 {
 		sourceConditions := []string{"rs.resource_id=r.id"}
@@ -819,7 +878,7 @@ func (s *Store) ListResourcesDueForCheck(ctx context.Context, limit int, staleBe
 	}
 	rows, err := s.pool.Query(ctx, "SELECT "+resourceColumns+` FROM resources
 		WHERE check_status='pending'
-			OR (check_status IN ('invalid','unknown')
+			OR (check_status IN ('invalid','expired','cancelled','violation','locked','unknown')
 				AND (last_checked_at IS NULL OR last_checked_at <= $1)
 				AND (last_checked_at IS NULL OR last_seen_at > last_checked_at))
 		ORDER BY CASE WHEN check_status='pending' THEN 0 ELSE 1 END, last_seen_at DESC
@@ -841,7 +900,7 @@ func (s *Store) ListResourcesDueForCheck(ctx context.Context, limit int, staleBe
 
 func validCheckStatus(status string) bool {
 	switch status {
-	case CheckPending, CheckValid, CheckInvalid, CheckUnknown, CheckUnsupported:
+	case CheckPending, CheckValid, CheckInvalid, CheckExpired, CheckCancelled, CheckViolation, CheckLocked, CheckUnknown, CheckUnsupported:
 		return true
 	default:
 		return false

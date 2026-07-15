@@ -84,6 +84,14 @@ func TestShouldQueueLinkCheck(t *testing.T) {
 	if !ShouldQueueLinkCheck(base, now, DefaultLinkCheckStale) {
 		t.Fatal("seven-day-old invalid resource should be rechecked")
 	}
+	base.Status = DetectionExpired
+	if !ShouldQueueLinkCheck(base, now, DefaultLinkCheckStale) {
+		t.Fatal("stale expired resource should be rechecked")
+	}
+	base.Status = DetectionLocked
+	if !ShouldQueueLinkCheck(base, now, DefaultLinkCheckStale) {
+		t.Fatal("stale locked resource should be rechecked")
+	}
 	base.Status = DetectionValid
 	if ShouldQueueLinkCheck(base, now, DefaultLinkCheckStale) {
 		t.Fatal("valid resource should not be periodically queued")

@@ -114,6 +114,7 @@ func keywordAPISyncRequestSummary(source KeywordAPISource) KeywordAPISyncConfigS
 		IterationPath: source.IterationPath, IterationStart: source.IterationStart, IterationStep: source.IterationStep,
 		IterationCount: source.IterationCount, IterationDelaySeconds: source.IterationDelaySeconds,
 		IterationUnlimited: source.IterationUnlimited, IterationNoKeywordStopCount: source.IterationNoKeywordStopCount,
+		IterationStopMode:              source.IterationStopMode,
 		IterationRandomDelayMinSeconds: source.IterationRandomDelayMinSeconds,
 		IterationRandomDelayMaxSeconds: source.IterationRandomDelayMaxSeconds,
 	}

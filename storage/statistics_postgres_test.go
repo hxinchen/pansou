@@ -42,6 +42,10 @@ func TestPostgresOverviewSnapshotActivityAndTrends(t *testing.T) {
 		{status: CheckValid, seenAt: today.AddDate(0, 0, -8)},
 		{status: CheckInvalid, seenAt: today.AddDate(0, 0, -8).Add(time.Hour)},
 		{status: CheckUnsupported, seenAt: today.AddDate(0, 0, -8).Add(2 * time.Hour)},
+		{status: CheckExpired, seenAt: today.AddDate(0, 0, -8).Add(3 * time.Hour)},
+		{status: CheckCancelled, seenAt: today.AddDate(0, 0, -8).Add(4 * time.Hour)},
+		{status: CheckViolation, seenAt: today.AddDate(0, 0, -8).Add(5 * time.Hour)},
+		{status: CheckLocked, seenAt: today.AddDate(0, 0, -8).Add(6 * time.Hour)},
 		{status: CheckValid, seenAt: today.AddDate(0, 0, -2)},
 		{status: CheckPending, seenAt: today.AddDate(0, 0, -2).Add(23*time.Hour + 59*time.Minute)},
 		{status: CheckUnknown, seenAt: today},
@@ -133,7 +137,7 @@ func TestPostgresOverviewSnapshotActivityAndTrends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OverviewSnapshot: %v", err)
 	}
-	if snapshot.ResourceCount != 7 || snapshot.TodayNew != 1 || snapshot.LastSevenDaysNew != 3 {
+	if snapshot.ResourceCount != 11 || snapshot.TodayNew != 1 || snapshot.LastSevenDaysNew != 3 {
 		t.Fatalf("snapshot resource counters = %+v", snapshot)
 	}
 	if snapshot.KeywordCount != 2 || snapshot.EnabledKeywordCount != 1 {
@@ -141,6 +145,7 @@ func TestPostgresOverviewSnapshotActivityAndTrends(t *testing.T) {
 	}
 	wantStatuses := StatusCounts{
 		CheckPending: 1, CheckValid: 3, CheckInvalid: 1, CheckUnknown: 1, CheckUnsupported: 1,
+		CheckExpired: 1, CheckCancelled: 1, CheckViolation: 1, CheckLocked: 1,
 	}
 	for status, want := range wantStatuses {
 		if got := snapshot.StatusCounts[status]; got != want {

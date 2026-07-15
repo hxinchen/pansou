@@ -30,6 +30,7 @@ func TestKeywordAPISyncRequestSummaryRedactsSecrets(t *testing.T) {
 		IterationPath:          "offset",
 		IterationCount:         3,
 		IterationStep:          20,
+		IterationStopMode:      KeywordAPIIterationStopModeStrict,
 	})
 	encoded, err := json.Marshal(summary)
 	if err != nil {
@@ -41,7 +42,7 @@ func TestKeywordAPISyncRequestSummaryRedactsSecrets(t *testing.T) {
 			t.Fatalf("request summary leaked %q: %s", secret, text)
 		}
 	}
-	if summary.RequestURL != "https://example.test" || summary.ProxyScheme != "socks5h" || !summary.HasRequestBody {
+	if summary.RequestURL != "https://example.test" || summary.ProxyScheme != "socks5h" || !summary.HasRequestBody || summary.IterationStopMode != KeywordAPIIterationStopModeStrict {
 		t.Fatalf("summary = %+v", summary)
 	}
 	if !reflect.DeepEqual(summary.HeaderKeys, []string{"Accept", "X-Token"}) ||
@@ -71,6 +72,11 @@ func TestKeywordAPISourceConfigChanged(t *testing.T) {
 	changed.QueryParams = map[string]string{"page": "2"}
 	if !keywordAPISourceConfigChanged(base, changed) {
 		t.Fatal("query parameter value change did not bump the config revision")
+	}
+	changedMode := base
+	changedMode.IterationStopMode = KeywordAPIIterationStopModeStrict
+	if !keywordAPISourceConfigChanged(base, changedMode) {
+		t.Fatal("iteration stop mode change did not bump the config revision")
 	}
 	equalCooldown := base
 	equalValue := int64(30)

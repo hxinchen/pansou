@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"pansou/config"
 	"pansou/credential"
 	"pansou/model"
@@ -208,6 +210,7 @@ type SearchService struct {
 	pluginManager *plugin.PluginManager
 	snapshots     *sourceconfig.Manager
 	credentials   credentialProvider
+	flights       *singleflight.Group
 }
 
 type credentialProvider interface {
@@ -215,6 +218,16 @@ type credentialProvider interface {
 	OpenStored(storage.PluginCredential) ([]byte, error)
 	Success(context.Context, string) error
 	Failure(context.Context, string, string, string, *time.Time) error
+}
+
+type sourceSearchBatch struct {
+	Results        []model.SearchResult
+	Complete       bool
+	PartialSources []string
+}
+
+func completeSourceSearchBatch() sourceSearchBatch {
+	return sourceSearchBatch{Complete: true}
 }
 
 // LiveSearchService names the existing Telegram/plugin implementation
@@ -252,11 +265,12 @@ func NewSearchService(pluginManager *plugin.PluginManager) *SearchService {
 
 	return &SearchService{
 		pluginManager: pluginManager,
+		flights:       &singleflight.Group{},
 	}
 }
 
 func NewDynamicSearchService(snapshots *sourceconfig.Manager) *SearchService {
-	return &SearchService{snapshots: snapshots}
+	return &SearchService{snapshots: snapshots, flights: &singleflight.Group{}}
 }
 
 func (s *SearchService) UsesManagedSources() bool {
@@ -345,89 +359,18 @@ func injectMainCacheToAsyncPlugins(pluginManager *plugin.PluginManager, mainCach
 
 	// 创建缓存更新函数（支持IsFinal参数）- 接收原始数据并与现有缓存合并
 	cacheUpdater := func(key string, newResults []model.SearchResult, ttl time.Duration, isFinal bool, keyword string, pluginName string) error {
-		// 优化：如果新结果为空，跳过缓存更新（避免无效操作）
 		if len(newResults) == 0 {
 			return nil
 		}
-
-		// 获取现有缓存数据进行合并
-		var finalResults []model.SearchResult
-		if existingData, hit, err := mainCache.Get(key); err == nil && hit {
-			var existingResults []model.SearchResult
-			if err := mainCache.GetSerializer().Deserialize(existingData, &existingResults); err == nil {
-				// 合并新旧结果，去重保留最完整的数据
-				finalResults = mergeSearchResults(existingResults, newResults)
-				if config.AppConfig != nil && config.AppConfig.AsyncLogEnabled {
-					if keyword != "" {
-						fmt.Printf("🔄 [%s:%s] 更新缓存| 原有: %d + 新增: %d = 合并后: %d\n",
-							pluginName, keyword, len(existingResults), len(newResults), len(finalResults))
-					}
-				}
-			} else {
-				// 反序列化失败，使用新结果
-				finalResults = newResults
-				if config.AppConfig != nil && config.AppConfig.AsyncLogEnabled {
-					displayKey := key[:8] + "..."
-					if keyword != "" {
-						fmt.Printf("[异步插件 %s] 缓存反序列化失败，使用新结果: %s(关键词:%s) | 结果数: %d\n", pluginName, displayKey, keyword, len(newResults))
-					} else {
-						fmt.Printf("[异步插件 %s] 缓存反序列化失败，使用新结果: %s | 结果数: %d\n", pluginName, key, len(newResults))
-					}
-				}
-			}
-		} else {
-			// 无现有缓存，直接使用新结果
-			finalResults = newResults
-			if config.AppConfig != nil && config.AppConfig.AsyncLogEnabled {
-				displayKey := key[:8] + "..."
-				if keyword != "" {
-					fmt.Printf("[异步插件 %s] 初始缓存创建: %s(关键词:%s) | 结果数: %d\n", pluginName, displayKey, keyword, len(newResults))
-				} else {
-					fmt.Printf("[异步插件 %s] 初始缓存创建: %s | 结果数: %d\n", pluginName, key, len(newResults))
-				}
-			}
+		// A final callback only means this individual plugin finished; it does
+		// not make the aggregate cache complete. The aggregate search marks the
+		// envelope complete after every selected plugin has finished.
+		merged, err := mergeAndStoreCachedSearch(mainCache, key, newResults, ttl, false)
+		if err == nil && config.AppConfig != nil && config.AppConfig.AsyncLogEnabled {
+			fmt.Printf("🔄 [%s:%s] 单调合并缓存 | 新增: %d | 合并后: %d | 插件最终: %t\n",
+				pluginName, keyword, len(newResults), len(merged.Results), isFinal)
 		}
-
-		// 序列化合并后的结果
-		data, err := mainCache.GetSerializer().Serialize(finalResults)
-		if err != nil {
-			fmt.Printf("[缓存更新] 序列化失败: %s | 错误: %v\n", key, err)
-			return err
-		}
-
-		// 先更新内存缓存（立即可见）
-		if err := mainCache.SetMemoryOnly(key, data, ttl); err != nil {
-			return fmt.Errorf("内存缓存更新失败: %v", err)
-		}
-
-		// 使用新的缓存写入管理器处理磁盘写入（智能批处理）
-		if cacheWriteManager := globalCacheWriteManager; cacheWriteManager != nil {
-			operation := &cache.CacheOperation{
-				Key:        key,
-				Data:       finalResults, // 使用原始数据而不是序列化后的
-				TTL:        ttl,
-				IsFinal:    isFinal,
-				PluginName: pluginName,
-				Keyword:    keyword,
-				Priority:   2, // 中等优先级
-				Timestamp:  time.Now(),
-				DataSize:   len(data), // 序列化后的数据大小
-			}
-
-			// 根据是否为最终结果设置优先级
-			if isFinal {
-				operation.Priority = 1 // 高优先级
-			}
-
-			return cacheWriteManager.HandleCacheOperation(operation)
-		}
-
-		// 兜底：如果缓存写入管理器不可用，使用原有逻辑
-		if isFinal {
-			return mainCache.SetBothLevels(key, data, ttl)
-		} else {
-			return nil // 内存已更新，磁盘稍后批处理
-		}
+		return err
 	}
 
 	// 获取所有插件
@@ -476,8 +419,15 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 		}
 		static := NewSearchService(snapshot.PluginManager)
 		static.credentials = s.credentials
+		static.flights = s.flights
 		return static.SearchContext(ctx, request)
 	}
+	return executeSearchFlight(ctx, s.flights, "live", request, func(sharedCtx context.Context) (model.SearchResponse, error) {
+		return s.searchContextUncoalesced(sharedCtx, request)
+	})
+}
+
+func (s *SearchService) searchContextUncoalesced(ctx context.Context, request ContextSearchRequest) (model.SearchResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return model.SearchResponse{}, err
 	}
@@ -573,8 +523,8 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 	}
 
 	// 并行获取TG搜索和插件搜索结果
-	var tgResults []model.SearchResult
-	var pluginResults []model.SearchResult
+	tgBatch := completeSourceSearchBatch()
+	pluginBatch := completeSourceSearchBatch()
 
 	var wg sync.WaitGroup
 	var tgErr, pluginErr error
@@ -584,7 +534,7 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			tgResults, tgErr = s.searchTG(ctx, keyword, channels, forceRefresh)
+			tgBatch, tgErr = s.searchTGWithStatus(ctx, keyword, channels, forceRefresh)
 		}()
 	}
 	// 如果需要搜索插件（且插件功能已启用）
@@ -594,7 +544,7 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 			defer wg.Done()
 			// 对于插件搜索，我们总是希望获取最新的缓存数据
 			// 因此，即使forceRefresh=false，我们也需要确保获取到最新的缓存
-			pluginResults, pluginErr = s.searchPluginsForIdentity(ctx, request.Identity, keyword, plugins, forceRefresh, concurrency, ext)
+			pluginBatch, pluginErr = s.searchPluginsForIdentityWithStatus(ctx, request.Identity, keyword, plugins, forceRefresh, concurrency, ext)
 		}()
 	}
 
@@ -610,7 +560,7 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 	}
 
 	// 合并结果
-	allResults := mergeSearchResults(tgResults, pluginResults)
+	allResults := mergeSearchResults(tgBatch.Results, pluginBatch.Results)
 
 	// 按照优化后的规则排序结果
 	sortResultsByTimeAndKeywords(allResults)
@@ -644,9 +594,14 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 	}
 
 	response := model.SearchResponse{
-		Total:        total,
-		Results:      filteredForResults, // 使用进一步过滤的结果
-		MergedByType: mergedLinks,
+		Total:          total,
+		Results:        filteredForResults, // 使用进一步过滤的结果
+		MergedByType:   mergedLinks,
+		Completion:     model.SearchCompletionComplete,
+		PartialSources: append(append([]string(nil), tgBatch.PartialSources...), pluginBatch.PartialSources...),
+	}
+	if !tgBatch.Complete || !pluginBatch.Complete {
+		response.Completion = model.SearchCompletionPartial
 	}
 
 	// 根据resultType过滤返回结果
@@ -659,25 +614,31 @@ func filterResponseByType(response model.SearchResponse, resultType string) mode
 	case "merged_by_type":
 		// 只返回MergedByType，Results设为nil，结合omitempty标签，JSON序列化时会忽略此字段
 		return model.SearchResponse{
-			Total:        response.Total,
-			MergedByType: response.MergedByType,
-			Results:      nil,
+			Total:          response.Total,
+			MergedByType:   response.MergedByType,
+			Results:        nil,
+			Completion:     response.Completion,
+			PartialSources: response.PartialSources,
 		}
 	case "all":
 		return response
 	case "results":
 		// 只返回Results
 		return model.SearchResponse{
-			Total:   response.Total,
-			Results: response.Results,
+			Total:          response.Total,
+			Results:        response.Results,
+			Completion:     response.Completion,
+			PartialSources: response.PartialSources,
 		}
 	default:
 		// // 默认返回全部
 		// return response
 		return model.SearchResponse{
-			Total:        response.Total,
-			MergedByType: response.MergedByType,
-			Results:      nil,
+			Total:          response.Total,
+			MergedByType:   response.MergedByType,
+			Results:        nil,
+			Completion:     response.Completion,
+			PartialSources: response.PartialSources,
 		}
 	}
 }
@@ -1353,31 +1314,34 @@ func mergeResultsByType(results []model.SearchResult, keyword string, cloudTypes
 
 // searchTG 搜索TG频道
 func (s *SearchService) searchTG(ctx context.Context, keyword string, channels []string, forceRefresh bool) ([]model.SearchResult, error) {
+	batch, err := s.searchTGWithStatus(ctx, keyword, channels, forceRefresh)
+	return batch.Results, err
+}
+
+type tgChannelSearchResult struct {
+	Channel string
+	Results []model.SearchResult
+	Err     error
+}
+
+func (s *SearchService) searchTGWithStatus(ctx context.Context, keyword string, channels []string, forceRefresh bool) (sourceSearchBatch, error) {
 	// 生成缓存键
 	cacheKey := cache.GenerateTGCacheKey(keyword, channels)
+	seed := cachedSearchResults{}
 
 	// 如果未启用强制刷新，尝试从缓存获取结果
 	if !forceRefresh && cacheInitialized && config.AppConfig.CacheEnabled && enhancedTwoLevelCache != nil {
-		var data []byte
-		var hit bool
-		var err error
-
-		// 使用增强版缓存
-		if enhancedTwoLevelCache != nil {
-			data, hit, err = enhancedTwoLevelCache.Get(cacheKey)
-
-			if err == nil && hit {
-				var results []model.SearchResult
-				if err := enhancedTwoLevelCache.GetSerializer().Deserialize(data, &results); err == nil {
-					MarkSearchCacheStatus(ctx, SearchCacheHit)
-					// 直接返回缓存数据，不检查新鲜度
-					return results, nil
-				}
-				MarkSearchCacheStatus(ctx, SearchCacheMiss)
-			} else if err != nil {
-				MarkSearchCacheStatus(ctx, SearchCacheBypass)
-			} else {
-				MarkSearchCacheStatus(ctx, SearchCacheMiss)
+		cached, hit, err := loadCachedSearch(enhancedTwoLevelCache, cacheKey)
+		if err == nil && hit && cached.Complete {
+			MarkSearchCacheStatus(ctx, SearchCacheHit)
+			return sourceSearchBatch{Results: cached.Results, Complete: true}, nil
+		}
+		if err != nil {
+			MarkSearchCacheStatus(ctx, SearchCacheBypass)
+		} else {
+			MarkSearchCacheStatus(ctx, SearchCacheMiss)
+			if hit {
+				seed = cached
 			}
 		}
 	} else if !forceRefresh {
@@ -1394,10 +1358,7 @@ func (s *SearchService) searchTG(ctx context.Context, keyword string, channels [
 		ch := channel // 创建副本，避免闭包问题
 		tasks = append(tasks, func() interface{} {
 			results, err := s.searchChannel(keyword, ch)
-			if err != nil {
-				return nil
-			}
-			return results
+			return tgChannelSearchResult{Channel: ch, Results: results, Err: err}
 		})
 	}
 
@@ -1405,31 +1366,41 @@ func (s *SearchService) searchTG(ctx context.Context, keyword string, channels [
 	workers := tgSearchWorkerCount(len(channels))
 	taskResults := executeTGTasksWithTimeout(tasks, workers, config.AppConfig.PluginTimeout)
 
+	complete := len(taskResults) == len(tasks)
+	finished := make(map[string]struct{}, len(taskResults))
+	partialSources := make([]string, 0)
 	// 合并所有频道的结果
 	for _, result := range taskResults {
-		if result != nil {
-			channelResults := result.([]model.SearchResult)
-			results = append(results, channelResults...)
+		outcome, ok := result.(tgChannelSearchResult)
+		if !ok {
+			complete = false
+			continue
+		}
+		finished[outcome.Channel] = struct{}{}
+		if outcome.Err != nil {
+			complete = false
+			partialSources = append(partialSources, "tg:"+outcome.Channel)
+			continue
+		}
+		results = append(results, outcome.Results...)
+	}
+	for _, channel := range channels {
+		if _, ok := finished[channel]; !ok {
+			partialSources = append(partialSources, "tg:"+channel)
 		}
 	}
+	results = mergeSearchResults(seed.Results, results)
 
-	// 异步缓存结果
+	// Cache updates are monotonic and carry completeness metadata. A timed-out
+	// subset can seed a later request but can never be served as complete.
 	if cacheInitialized && config.AppConfig.CacheEnabled {
-		go func(res []model.SearchResult) {
+		go func(res []model.SearchResult, isComplete bool) {
 			ttl := time.Duration(config.AppConfig.CacheTTLMinutes) * time.Minute
-
-			// 使用增强版缓存
-			if enhancedTwoLevelCache != nil {
-				data, err := enhancedTwoLevelCache.GetSerializer().Serialize(res)
-				if err != nil {
-					return
-				}
-				enhancedTwoLevelCache.Set(cacheKey, data, ttl)
-			}
-		}(results)
+			_, _ = mergeAndStoreCachedSearch(enhancedTwoLevelCache, cacheKey, res, ttl, isComplete)
+		}(results, complete)
 	}
 
-	return results, nil
+	return sourceSearchBatch{Results: results, Complete: complete, PartialSources: partialSources}, nil
 }
 
 func tgSearchWorkerCount(channelCount int) int {
@@ -1527,6 +1498,22 @@ func compactTGTaskResults(values []interface{}, finished []bool) []interface{} {
 
 // searchPlugins 搜索插件
 func (s *SearchService) searchPlugins(ctx context.Context, keyword string, plugins []string, forceRefresh bool, concurrency int, ext map[string]interface{}) ([]model.SearchResult, error) {
+	batch, err := s.searchPluginsWithStatus(ctx, keyword, plugins, forceRefresh, concurrency, ext)
+	return batch.Results, err
+}
+
+type pluginSearchWithResult interface {
+	SearchWithResult(string, map[string]interface{}) (model.PluginSearchResult, error)
+}
+
+type pluginTaskResult struct {
+	Source   string
+	Results  []model.SearchResult
+	Complete bool
+	Err      error
+}
+
+func (s *SearchService) searchPluginsWithStatus(ctx context.Context, keyword string, plugins []string, forceRefresh bool, concurrency int, ext map[string]interface{}) (sourceSearchBatch, error) {
 	baseExt := cloneSearchExt(ext)
 	if forceRefresh {
 		baseExt["refresh"] = true
@@ -1534,36 +1521,22 @@ func (s *SearchService) searchPlugins(ctx context.Context, keyword string, plugi
 
 	// 生成缓存键
 	cacheKey := cache.GeneratePluginCacheKey(keyword, plugins)
+	seed := cachedSearchResults{}
 
 	// 如果未启用强制刷新，尝试从缓存获取结果
 	if !forceRefresh && cacheInitialized && config.AppConfig.CacheEnabled && enhancedTwoLevelCache != nil {
-		var data []byte
-		var hit bool
-		var err error
-
-		// 使用增强版缓存
-		if enhancedTwoLevelCache != nil {
-
-			// 使用Get方法，它会检查磁盘缓存是否有更新
-			// 如果磁盘缓存比内存缓存更新，会自动更新内存缓存并返回最新数据
-			data, hit, err = enhancedTwoLevelCache.Get(cacheKey)
-
-			if err == nil && hit {
-				var results []model.SearchResult
-				if err := enhancedTwoLevelCache.GetSerializer().Deserialize(data, &results); err == nil {
-					MarkSearchCacheStatus(ctx, SearchCacheHit)
-					// 返回缓存数据
-					fmt.Printf("✅ [%s] 命中缓存 结果数: %d\n", keyword, len(results))
-					return results, nil
-				} else {
-					MarkSearchCacheStatus(ctx, SearchCacheMiss)
-					displayKey := cacheKey[:8] + "..."
-					fmt.Printf("[主服务] 缓存反序列化失败: %s(关键词:%s) | 错误: %v\n", displayKey, keyword, err)
-				}
-			} else if err != nil {
-				MarkSearchCacheStatus(ctx, SearchCacheBypass)
-			} else {
-				MarkSearchCacheStatus(ctx, SearchCacheMiss)
+		cached, hit, err := loadCachedSearch(enhancedTwoLevelCache, cacheKey)
+		if err == nil && hit && cached.Complete {
+			MarkSearchCacheStatus(ctx, SearchCacheHit)
+			fmt.Printf("✅ [%s] 命中完整缓存 结果数: %d\n", keyword, len(cached.Results))
+			return sourceSearchBatch{Results: cached.Results, Complete: true}, nil
+		}
+		if err != nil {
+			MarkSearchCacheStatus(ctx, SearchCacheBypass)
+		} else {
+			MarkSearchCacheStatus(ctx, SearchCacheMiss)
+			if hit {
+				seed = cached
 			}
 		}
 	} else if !forceRefresh {
@@ -1619,23 +1592,19 @@ func (s *SearchService) searchPlugins(ctx context.Context, keyword string, plugi
 	// 使用工作池执行并行搜索
 	tasks := make([]pool.Task, 0, len(availablePlugins))
 	for _, p := range availablePlugins {
-		plugin := p // 创建副本，避免闭包问题
+		instance := p // 创建副本，避免闭包问题
 		tasks = append(tasks, func() interface{} {
 			pluginExt := cloneSearchExt(baseExt)
 			// 设置主缓存键和当前关键词
-			plugin.SetMainCacheKey(cacheKey)
-			plugin.SetCurrentKeyword(keyword)
+			instance.SetMainCacheKey(cacheKey)
+			instance.SetCurrentKeyword(keyword)
 
-			// 调用异步插件的AsyncSearch方法
-			results, err := plugin.AsyncSearch(keyword, func(client *http.Client, kw string, extParams map[string]interface{}) ([]model.SearchResult, error) {
-				// 使用插件的Search方法作为搜索函数
-				return plugin.Search(kw, extParams)
-			}, cacheKey, pluginExt)
-
-			if err != nil {
-				return nil
+			if detailed, ok := instance.(pluginSearchWithResult); ok {
+				result, err := detailed.SearchWithResult(keyword, pluginExt)
+				return pluginTaskResult{Source: instance.Name(), Results: result.Results, Complete: result.IsFinal, Err: err}
 			}
-			return results
+			results, err := instance.Search(keyword, pluginExt)
+			return pluginTaskResult{Source: instance.Name(), Results: results, Complete: err == nil, Err: err}
 		})
 	}
 
@@ -1643,44 +1612,50 @@ func (s *SearchService) searchPlugins(ctx context.Context, keyword string, plugi
 	results := pool.ExecuteBatchWithTimeout(tasks, concurrency, config.AppConfig.PluginTimeout)
 
 	// 合并所有插件的结果，过滤掉无链接的结果
-	var allResults []model.SearchResult
-	for _, result := range results {
-		if result != nil {
-			pluginResults := result.([]model.SearchResult)
-			// 只添加有链接的结果到最终结果中
-			for _, pluginResult := range pluginResults {
-				if len(pluginResult.Links) > 0 {
-					allResults = append(allResults, pluginResult)
-				}
+	allResults := append([]model.SearchResult(nil), seed.Results...)
+	complete := len(results) == len(tasks)
+	finished := make(map[string]struct{}, len(results))
+	partialSources := make([]string, 0)
+	for _, value := range results {
+		outcome, ok := value.(pluginTaskResult)
+		if !ok {
+			complete = false
+			continue
+		}
+		finished[outcome.Source] = struct{}{}
+		if outcome.Err != nil || !outcome.Complete {
+			complete = false
+			partialSources = append(partialSources, "plugin:"+outcome.Source)
+		}
+		for _, pluginResult := range outcome.Results {
+			if len(pluginResult.Links) > 0 {
+				allResults = append(allResults, pluginResult)
 			}
 		}
 	}
+	for _, instance := range availablePlugins {
+		if _, ok := finished[instance.Name()]; !ok {
+			partialSources = append(partialSources, "plugin:"+instance.Name())
+		}
+	}
+	allResults = mergeSearchResults(nil, allResults)
 
 	// 恢复主程序缓存更新：确保最终合并结果被正确缓存
 	if cacheInitialized && config.AppConfig.CacheEnabled {
-		go func(res []model.SearchResult, kw string, key string) {
+		go func(res []model.SearchResult, kw string, key string, isComplete bool) {
 			ttl := time.Duration(config.AppConfig.CacheTTLMinutes) * time.Minute
-
-			// 使用增强版缓存，确保与异步插件使用相同的序列化器
-			if enhancedTwoLevelCache != nil {
-				data, err := enhancedTwoLevelCache.GetSerializer().Serialize(res)
-				if err != nil {
-					fmt.Printf("[主程序] 缓存序列化失败: %s | 错误: %v\n", key, err)
-					return
-				}
-
-				// 主程序最后更新，覆盖可能有问题的异步插件缓存
-				// 使用同步方式确保数据写入磁盘
-				enhancedTwoLevelCache.SetBothLevels(key, data, ttl)
-				if config.AppConfig != nil && config.AppConfig.AsyncLogEnabled {
-					fmt.Printf("[主程序] 缓存更新完成: %s | 结果数: %d",
-						key, len(res))
-				}
+			merged, err := mergeAndStoreCachedSearch(enhancedTwoLevelCache, key, res, ttl, isComplete)
+			if err != nil {
+				fmt.Printf("[主程序] 缓存更新失败: %s | 错误: %v\n", key, err)
+				return
 			}
-		}(allResults, keyword, cacheKey)
+			if config.AppConfig != nil && config.AppConfig.AsyncLogEnabled {
+				fmt.Printf("[主程序] 缓存更新完成: %s | 结果数: %d | 完整: %t\n", key, len(merged.Results), merged.Complete)
+			}
+		}(allResults, keyword, cacheKey, complete)
 	}
 
-	return allResults, nil
+	return sourceSearchBatch{Results: allResults, Complete: complete, PartialSources: partialSources}, nil
 }
 
 // searchPluginsForIdentity keeps the legacy plugin cache for stateless
@@ -1688,8 +1663,13 @@ func (s *SearchService) searchPlugins(ctx context.Context, keyword string, plugi
 // resolved for the current tenant. This prevents one user's account state or
 // background refresh from leaking into another request.
 func (s *SearchService) searchPluginsForIdentity(ctx context.Context, identity SearchIdentity, keyword string, requested []string, forceRefresh bool, concurrency int, ext map[string]interface{}) ([]model.SearchResult, error) {
+	batch, err := s.searchPluginsForIdentityWithStatus(ctx, identity, keyword, requested, forceRefresh, concurrency, ext)
+	return batch.Results, err
+}
+
+func (s *SearchService) searchPluginsForIdentityWithStatus(ctx context.Context, identity SearchIdentity, keyword string, requested []string, forceRefresh bool, concurrency int, ext map[string]interface{}) (sourceSearchBatch, error) {
 	if s == nil || s.credentials == nil || s.pluginManager == nil {
-		return s.searchPlugins(ctx, keyword, requested, forceRefresh, concurrency, ext)
+		return s.searchPluginsWithStatus(ctx, keyword, requested, forceRefresh, concurrency, ext)
 	}
 
 	selected := selectPlugins(s.pluginManager.GetPlugins(), requested)
@@ -1709,16 +1689,16 @@ func (s *SearchService) searchPluginsForIdentity(ctx context.Context, identity S
 		legacyNames = append(legacyNames, instance.Name())
 	}
 
-	var legacyResults []model.SearchResult
+	legacyBatch := completeSourceSearchBatch()
 	if len(legacyNames) > 0 {
 		var err error
-		legacyResults, err = s.searchPlugins(ctx, keyword, legacyNames, forceRefresh, concurrency, ext)
+		legacyBatch, err = s.searchPluginsWithStatus(ctx, keyword, legacyNames, forceRefresh, concurrency, ext)
 		if err != nil {
-			return nil, err
+			return sourceSearchBatch{}, err
 		}
 	}
 	if len(managed) == 0 {
-		return legacyResults, nil
+		return legacyBatch, nil
 	}
 	if !forceRefresh {
 		MarkSearchCacheStatus(ctx, SearchCacheBypass)
@@ -1760,35 +1740,52 @@ func (s *SearchService) searchPluginsForIdentity(ctx context.Context, identity S
 		tasks = append(tasks, func() interface{} {
 			layers, err := s.credentials.Resolve(ctx, credentialIdentity, item.plugin.Name(), 20)
 			if err != nil {
-				return nil
+				return pluginTaskResult{Source: item.plugin.Name(), Complete: false, Err: err}
 			}
 			pluginExt := cloneSearchExt(baseExt)
-			results, succeeded, _ := item.searcher.SearchCredentialLayer(ctx, keyword, pluginExt, layers.Private, access)
+			results, succeeded, searchErr := item.searcher.SearchCredentialLayer(ctx, keyword, pluginExt, layers.Private, access)
 			if succeeded {
-				return results
+				return pluginTaskResult{Source: item.plugin.Name(), Results: results, Complete: searchErr == nil, Err: searchErr}
 			}
-			results, succeeded, _ = item.searcher.SearchCredentialLayer(ctx, keyword, pluginExt, layers.Shared, access)
+			results, succeeded, searchErr = item.searcher.SearchCredentialLayer(ctx, keyword, pluginExt, layers.Shared, access)
 			if !succeeded {
-				return nil
+				if searchErr == nil {
+					searchErr = fmt.Errorf("all credential layers failed")
+				}
+				return pluginTaskResult{Source: item.plugin.Name(), Complete: false, Err: searchErr}
 			}
-			return results
+			return pluginTaskResult{Source: item.plugin.Name(), Results: results, Complete: searchErr == nil, Err: searchErr}
 		})
 	}
 
 	managedResults := pool.ExecuteBatchWithTimeout(tasks, concurrency, config.AppConfig.PluginTimeout)
-	allResults := append([]model.SearchResult(nil), legacyResults...)
+	allResults := append([]model.SearchResult(nil), legacyBatch.Results...)
+	complete := legacyBatch.Complete && len(managedResults) == len(tasks)
+	partialSources := append([]string(nil), legacyBatch.PartialSources...)
+	finished := make(map[string]struct{}, len(managedResults))
 	for _, value := range managedResults {
-		results, ok := value.([]model.SearchResult)
+		outcome, ok := value.(pluginTaskResult)
 		if !ok {
+			complete = false
 			continue
 		}
-		for _, result := range results {
+		finished[outcome.Source] = struct{}{}
+		if outcome.Err != nil || !outcome.Complete {
+			complete = false
+			partialSources = append(partialSources, "plugin:"+outcome.Source)
+		}
+		for _, result := range outcome.Results {
 			if len(result.Links) > 0 {
 				allResults = append(allResults, result)
 			}
 		}
 	}
-	return allResults, nil
+	for _, item := range managed {
+		if _, ok := finished[item.plugin.Name()]; !ok {
+			partialSources = append(partialSources, "plugin:"+item.plugin.Name())
+		}
+	}
+	return sourceSearchBatch{Results: mergeSearchResults(nil, allResults), Complete: complete, PartialSources: partialSources}, nil
 }
 
 func selectPlugins(all []plugin.AsyncSearchPlugin, requested []string) []plugin.AsyncSearchPlugin {
