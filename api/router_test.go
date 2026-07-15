@@ -133,7 +133,7 @@ func TestSearchResponseContractRemainsWrapped(t *testing.T) {
 	}
 }
 
-func TestPartialSearchReturns206AndCompletionMetadata(t *testing.T) {
+func TestPartialSearchReturns200AndCompletionMetadata(t *testing.T) {
 	previous := config.AppConfig
 	config.AppConfig = testConfig(false)
 	defer func() { config.AppConfig = previous }()
@@ -146,8 +146,8 @@ func TestPartialSearchReturns206AndCompletionMetadata(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/search?kw=test", nil)
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
-	if response.Code != http.StatusPartialContent {
-		t.Fatalf("status = %d, want 206; body=%s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
 	}
 	if got := response.Header().Get("Retry-After"); got != "2" {
 		t.Fatalf("Retry-After = %q, want 2", got)

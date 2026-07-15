@@ -564,7 +564,7 @@ curl "http://localhost:8888/api/search?kw=唐朝诡事录&filter=%7B%22include%2
 }
 ```
 
-`completion` 为 `complete` 时表示所有请求来源均已完成。若部分频道或插件在响应期限内未完成，接口返回 HTTP `206`，`completion` 为 `partial`，并通过 `partial_sources` 列出未完成来源；已返回的结果仍可正常使用。部分结果不会作为完整缓存或资源库快照持久化。
+`completion` 为 `complete` 时表示所有请求来源均已完成。若部分频道或插件在响应期限内未完成，接口返回 HTTP `200`，`completion` 为 `partial`，并通过 `partial_sources` 列出未完成来源；已返回的结果仍可正常使用。部分结果不会作为完整缓存或资源库快照持久化。
 
 **字段说明**：
 
