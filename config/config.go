@@ -114,7 +114,7 @@ func Init() {
 		HTTPWriteTimeout:      getHTTPWriteTimeout(),
 		HTTPIdleTimeout:       getHTTPIdleTimeout(),
 		HTTPMaxConns:          getHTTPMaxConns(),
-		SearchResponseTimeout: getDurationSeconds("SEARCH_RESPONSE_TIMEOUT_SECONDS", 10*time.Second),
+		SearchResponseTimeout: getDurationSeconds("SEARCH_RESPONSE_TIMEOUT_SECONDS", 45*time.Second),
 		// 认证相关配置
 		AuthEnabled:     getAuthEnabled(),
 		AuthUsers:       getAuthUsers(),

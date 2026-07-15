@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	defaultSearchResponseTimeout = 10 * time.Second
+	defaultSearchResponseTimeout = 45 * time.Second
 	statusClientClosedRequest    = 499
 )
 
