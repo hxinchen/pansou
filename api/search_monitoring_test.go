@@ -84,6 +84,10 @@ func TestNormalizeUsageSourceIP(t *testing.T) {
 	for input, want := range map[string]string{
 		"127.0.0.1":     "internal",
 		"::1":           "internal",
+		"192.168.16.1":  "internal",
+		"172.16.1.69":   "internal",
+		"10.0.0.5":      "internal",
+		"fd00::25":      "internal",
 		"203.0.113.25":  "203.0.113.25",
 		"2001:db8::123": "2001:db8::123",
 	} {

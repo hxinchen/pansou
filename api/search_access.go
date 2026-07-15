@@ -99,7 +99,7 @@ func finalizeSearchCacheStatus(c *gin.Context) string {
 
 func normalizeUsageSourceIP(value string) string {
 	value = strings.TrimSpace(value)
-	if ip := net.ParseIP(value); ip != nil && ip.IsLoopback() {
+	if ip := net.ParseIP(value); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
 		return "internal"
 	}
 	return value
