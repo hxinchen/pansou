@@ -206,7 +206,7 @@ curl -X POST http://localhost:8888/api/search \
 | ASYNC_PLUGIN_ENABLED | 异步插件是否启用 | `true` |
 | HTTP_READ_TIMEOUT | HTTP读取超时(秒) | 自动计算 |
 | HTTP_WRITE_TIMEOUT | HTTP写入超时(秒) | 自动计算 |
-| SEARCH_RESPONSE_TIMEOUT_SECONDS | 搜索接口前台软响应预算(秒)，超时后返回处理中并继续后台搜索 | `45` |
+| SEARCH_RESPONSE_TIMEOUT_SECONDS | 搜索接口前台软响应预算(秒)，超时后返回处理中并继续后台搜索 | `25` |
 | HTTP_IDLE_TIMEOUT | HTTP空闲超时(秒) | `120` |
 | HTTP_MAX_CONNS | HTTP最大连接数 | 自动计算 |
 
