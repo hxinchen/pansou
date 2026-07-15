@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"pansou/config"
 	"pansou/service"
 	"pansou/usage"
 )
@@ -98,11 +99,43 @@ func finalizeSearchCacheStatus(c *gin.Context) string {
 }
 
 func normalizeUsageSourceIP(value string) string {
+	trustedProxies := []string(nil)
+	if config.AppConfig != nil {
+		trustedProxies = config.AppConfig.TrustedProxies
+	}
+	return normalizeUsageSourceIPWithTrustedProxies(value, trustedProxies)
+}
+
+func normalizeUsageSourceIPWithTrustedProxies(value string, trustedProxies []string) string {
 	value = strings.TrimSpace(value)
-	if ip := net.ParseIP(value); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return value
+	}
+	if ip.IsLoopback() || matchesTrustedProxy(ip, trustedProxies) {
 		return "internal"
 	}
 	return value
+}
+
+func matchesTrustedProxy(ip net.IP, trustedProxies []string) bool {
+	for _, value := range trustedProxies {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if candidate := net.ParseIP(value); candidate != nil {
+			if candidate.Equal(ip) {
+				return true
+			}
+			continue
+		}
+		_, network, err := net.ParseCIDR(value)
+		if err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func setRateLimitHeaders(c *gin.Context, decision usage.LimitDecision) {

@@ -80,19 +80,61 @@ func TestSearchMonitoringFreezesClientIP(t *testing.T) {
 	}
 }
 
+func TestSearchMonitoringDistinguishesPrivateClientFromTrustedProxy(t *testing.T) {
+	previous := config.AppConfig
+	config.AppConfig = &config.Config{TrustedProxies: []string{"172.18.0.0/16"}}
+	defer func() { config.AppConfig = previous }()
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	if err := router.SetTrustedProxies(config.AppConfig.TrustedProxies); err != nil {
+		t.Fatal(err)
+	}
+	router.GET("/test", SearchAccessMiddleware(), func(c *gin.Context) {
+		c.String(http.StatusOK, c.GetString(usageSourceIPContextKey))
+	})
+
+	tests := []struct {
+		name      string
+		forwarded string
+		want      string
+	}{
+		{name: "direct trusted proxy", want: "internal"},
+		{name: "private client behind proxy", forwarded: "172.16.1.69", want: "172.16.1.69"},
+		{name: "public client behind proxy", forwarded: "203.0.113.25", want: "203.0.113.25"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/test", nil)
+			request.RemoteAddr = "172.18.0.4:4567"
+			if test.forwarded != "" {
+				request.Header.Set("X-Forwarded-For", test.forwarded)
+			}
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if got := strings.TrimSpace(response.Body.String()); got != test.want {
+				t.Fatalf("source IP = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeUsageSourceIP(t *testing.T) {
+	trustedProxies := []string{"192.168.16.0/20", "127.0.0.1", "::1"}
 	for input, want := range map[string]string{
 		"127.0.0.1":     "internal",
 		"::1":           "internal",
 		"192.168.16.1":  "internal",
-		"172.16.1.69":   "internal",
-		"10.0.0.5":      "internal",
-		"fd00::25":      "internal",
+		"192.168.31.9":  "internal",
+		"172.16.1.69":   "172.16.1.69",
+		"10.0.0.5":      "10.0.0.5",
+		"fd00::25":      "fd00::25",
 		"203.0.113.25":  "203.0.113.25",
 		"2001:db8::123": "2001:db8::123",
+		"not-an-ip":     "not-an-ip",
 	} {
-		if got := normalizeUsageSourceIP(input); got != want {
-			t.Errorf("normalizeUsageSourceIP(%q) = %q, want %q", input, got, want)
+		if got := normalizeUsageSourceIPWithTrustedProxies(input, trustedProxies); got != want {
+			t.Errorf("normalizeUsageSourceIPWithTrustedProxies(%q) = %q, want %q", input, got, want)
 		}
 	}
 }
