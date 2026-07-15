@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 
@@ -17,6 +19,20 @@ type searchFlightValue struct {
 	response    model.SearchResponse
 	cacheStatus SearchCacheStatus
 }
+
+const searchFlightReplayTTL = 5 * time.Second
+
+type searchFlightReplayKey struct {
+	group *singleflight.Group
+	key   string
+}
+
+type searchFlightReplayValue struct {
+	value     searchFlightValue
+	expiresAt time.Time
+}
+
+var searchFlightReplays sync.Map
 
 func executeSearchFlight(
 	ctx context.Context,
@@ -32,12 +48,29 @@ func executeSearchFlight(
 	if err != nil {
 		return search(ctx)
 	}
+	replayKey := searchFlightReplayKey{group: group, key: key}
+	if cached, ok := searchFlightReplays.Load(replayKey); ok {
+		replay := cached.(*searchFlightReplayValue)
+		if time.Now().Before(replay.expiresAt) {
+			MarkSearchCacheStatus(ctx, replay.value.cacheStatus)
+			return replay.value.response, nil
+		}
+		searchFlightReplays.CompareAndDelete(replayKey, replay)
+	}
 
 	result := group.DoChan(key, func() (interface{}, error) {
 		trace := NewSearchTrace()
 		sharedCtx := ContextWithSearchTrace(context.WithoutCancel(ctx), trace)
 		response, searchErr := search(sharedCtx)
-		return searchFlightValue{response: response, cacheStatus: trace.Status()}, searchErr
+		value := searchFlightValue{response: response, cacheStatus: trace.Status()}
+		if searchErr == nil {
+			replay := &searchFlightReplayValue{value: value, expiresAt: time.Now().Add(searchFlightReplayTTL)}
+			searchFlightReplays.Store(replayKey, replay)
+			time.AfterFunc(searchFlightReplayTTL, func() {
+				searchFlightReplays.CompareAndDelete(replayKey, replay)
+			})
+		}
+		return value, searchErr
 	})
 
 	select {

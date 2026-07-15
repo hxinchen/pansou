@@ -55,3 +55,25 @@ func TestExecuteSearchFlightContinuesAfterCallerDeadline(t *testing.T) {
 		t.Fatalf("shared search calls = %d, want 1", got)
 	}
 }
+
+func TestExecuteSearchFlightReplaysRecentlyCompletedResult(t *testing.T) {
+	var group singleflight.Group
+	var calls atomic.Int32
+	request := ContextSearchRequest{Keyword: "replay", ResultType: "merged_by_type", SourceType: "all"}
+	search := func(context.Context) (model.SearchResponse, error) {
+		calls.Add(1)
+		return model.SearchResponse{Total: 2, Completion: model.SearchCompletionPartial}, nil
+	}
+
+	first, err := executeSearchFlight(context.Background(), &group, "replay", request, search)
+	if err != nil || first.Total != 2 {
+		t.Fatalf("first result = %+v, err = %v", first, err)
+	}
+	second, err := executeSearchFlight(context.Background(), &group, "replay", request, search)
+	if err != nil || second.Total != 2 || second.Completion != model.SearchCompletionPartial {
+		t.Fatalf("replayed result = %+v, err = %v", second, err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("shared search calls = %d, want 1", got)
+	}
+}
