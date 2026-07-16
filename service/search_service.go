@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -220,14 +221,32 @@ type credentialProvider interface {
 	Failure(context.Context, string, string, string, *time.Time) error
 }
 
+type credentialRefresher interface {
+	Refresh(context.Context, string, credential.LoginMaterial) error
+}
+
 type sourceSearchBatch struct {
 	Results        []model.SearchResult
 	Complete       bool
 	PartialSources []string
+	SourceStatuses map[string]model.SourceStatus
 }
 
 func completeSourceSearchBatch() sourceSearchBatch {
 	return sourceSearchBatch{Complete: true}
+}
+
+func mergeSourceStatuses(groups ...map[string]model.SourceStatus) map[string]model.SourceStatus {
+	var merged map[string]model.SourceStatus
+	for _, group := range groups {
+		for source, status := range group {
+			if merged == nil {
+				merged = make(map[string]model.SourceStatus)
+			}
+			merged[source] = status
+		}
+	}
+	return merged
 }
 
 // LiveSearchService names the existing Telegram/plugin implementation
@@ -599,6 +618,7 @@ func (s *SearchService) searchContextUncoalesced(ctx context.Context, request Co
 		MergedByType:   mergedLinks,
 		Completion:     model.SearchCompletionComplete,
 		PartialSources: append(append([]string(nil), tgBatch.PartialSources...), pluginBatch.PartialSources...),
+		SourceStatuses: mergeSourceStatuses(tgBatch.SourceStatuses, pluginBatch.SourceStatuses),
 	}
 	if !tgBatch.Complete || !pluginBatch.Complete {
 		response.Completion = model.SearchCompletionPartial
@@ -619,6 +639,7 @@ func filterResponseByType(response model.SearchResponse, resultType string) mode
 			Results:        nil,
 			Completion:     response.Completion,
 			PartialSources: response.PartialSources,
+			SourceStatuses: response.SourceStatuses,
 		}
 	case "all":
 		return response
@@ -629,6 +650,7 @@ func filterResponseByType(response model.SearchResponse, resultType string) mode
 			Results:        response.Results,
 			Completion:     response.Completion,
 			PartialSources: response.PartialSources,
+			SourceStatuses: response.SourceStatuses,
 		}
 	default:
 		// // 默认返回全部
@@ -639,6 +661,7 @@ func filterResponseByType(response model.SearchResponse, resultType string) mode
 			Results:        nil,
 			Completion:     response.Completion,
 			PartialSources: response.PartialSources,
+			SourceStatuses: response.SourceStatuses,
 		}
 	}
 }
@@ -1511,6 +1534,20 @@ type pluginTaskResult struct {
 	Results  []model.SearchResult
 	Complete bool
 	Err      error
+	Status   *model.SourceStatus
+}
+
+type sourceStatusError interface {
+	SourceStatus() model.SourceStatus
+}
+
+func statusFromSearchError(err error) *model.SourceStatus {
+	var detailed sourceStatusError
+	if err == nil || !errors.As(err, &detailed) {
+		return nil
+	}
+	status := detailed.SourceStatus()
+	return &status
 }
 
 func (s *SearchService) searchPluginsWithStatus(ctx context.Context, keyword string, plugins []string, forceRefresh bool, concurrency int, ext map[string]interface{}) (sourceSearchBatch, error) {
@@ -1601,10 +1638,10 @@ func (s *SearchService) searchPluginsWithStatus(ctx context.Context, keyword str
 
 			if detailed, ok := instance.(pluginSearchWithResult); ok {
 				result, err := detailed.SearchWithResult(keyword, pluginExt)
-				return pluginTaskResult{Source: instance.Name(), Results: result.Results, Complete: result.IsFinal, Err: err}
+				return pluginTaskResult{Source: instance.Name(), Results: result.Results, Complete: result.IsFinal, Err: err, Status: statusFromSearchError(err)}
 			}
 			results, err := instance.Search(keyword, pluginExt)
-			return pluginTaskResult{Source: instance.Name(), Results: results, Complete: err == nil, Err: err}
+			return pluginTaskResult{Source: instance.Name(), Results: results, Complete: err == nil, Err: err, Status: statusFromSearchError(err)}
 		})
 	}
 
@@ -1616,6 +1653,7 @@ func (s *SearchService) searchPluginsWithStatus(ctx context.Context, keyword str
 	complete := len(results) == len(tasks)
 	finished := make(map[string]struct{}, len(results))
 	partialSources := make([]string, 0)
+	sourceStatuses := make(map[string]model.SourceStatus)
 	for _, value := range results {
 		outcome, ok := value.(pluginTaskResult)
 		if !ok {
@@ -1626,6 +1664,9 @@ func (s *SearchService) searchPluginsWithStatus(ctx context.Context, keyword str
 		if outcome.Err != nil || !outcome.Complete {
 			complete = false
 			partialSources = append(partialSources, "plugin:"+outcome.Source)
+		}
+		if outcome.Status != nil {
+			sourceStatuses["plugin:"+outcome.Source] = *outcome.Status
 		}
 		for _, pluginResult := range outcome.Results {
 			if len(pluginResult.Links) > 0 {
@@ -1655,7 +1696,10 @@ func (s *SearchService) searchPluginsWithStatus(ctx context.Context, keyword str
 		}(allResults, keyword, cacheKey, complete)
 	}
 
-	return sourceSearchBatch{Results: allResults, Complete: complete, PartialSources: partialSources}, nil
+	if len(sourceStatuses) == 0 {
+		sourceStatuses = nil
+	}
+	return sourceSearchBatch{Results: allResults, Complete: complete, PartialSources: partialSources, SourceStatuses: sourceStatuses}, nil
 }
 
 // searchPluginsForIdentity keeps the legacy plugin cache for stateless
@@ -1720,6 +1764,7 @@ func (s *SearchService) searchPluginsForIdentityWithStatus(ctx context.Context, 
 	}
 	credentialIdentity := credential.Identity{Actor: actor, UserID: identity.UserID}
 	baseExt := cloneSearchExt(ext)
+	baseExt["credential_cache_scope"] = fmt.Sprintf("%s:%d:%s:%s:%d", actor, identity.UserID, identity.Role, identity.AuthType, identity.APIKeyID)
 	if forceRefresh {
 		baseExt["refresh"] = true
 	}
@@ -1733,6 +1778,11 @@ func (s *SearchService) searchPluginsForIdentityWithStatus(ctx context.Context, 
 			_ = s.credentials.Failure(callbackCtx, publicID, status, code, cooldown)
 		},
 	}
+	if refresher, ok := s.credentials.(credentialRefresher); ok {
+		access.Refresh = func(callbackCtx context.Context, publicID string, material credential.LoginMaterial) error {
+			return refresher.Refresh(callbackCtx, publicID, material)
+		}
+	}
 
 	tasks := make([]pool.Task, 0, len(managed))
 	for _, item := range managed {
@@ -1745,16 +1795,20 @@ func (s *SearchService) searchPluginsForIdentityWithStatus(ctx context.Context, 
 			pluginExt := cloneSearchExt(baseExt)
 			results, succeeded, searchErr := item.searcher.SearchCredentialLayer(ctx, keyword, pluginExt, layers.Private, access)
 			if succeeded {
-				return pluginTaskResult{Source: item.plugin.Name(), Results: results, Complete: searchErr == nil, Err: searchErr}
+				return pluginTaskResult{Source: item.plugin.Name(), Results: results, Complete: searchErr == nil, Err: searchErr, Status: statusFromSearchError(searchErr)}
 			}
+			privateEmpty := errors.Is(searchErr, credential.ErrNoResults)
 			results, succeeded, searchErr = item.searcher.SearchCredentialLayer(ctx, keyword, pluginExt, layers.Shared, access)
 			if !succeeded {
+				if privateEmpty || errors.Is(searchErr, credential.ErrNoResults) {
+					return pluginTaskResult{Source: item.plugin.Name(), Results: []model.SearchResult{}, Complete: true}
+				}
 				if searchErr == nil {
 					searchErr = fmt.Errorf("all credential layers failed")
 				}
 				return pluginTaskResult{Source: item.plugin.Name(), Complete: false, Err: searchErr}
 			}
-			return pluginTaskResult{Source: item.plugin.Name(), Results: results, Complete: searchErr == nil, Err: searchErr}
+			return pluginTaskResult{Source: item.plugin.Name(), Results: results, Complete: searchErr == nil, Err: searchErr, Status: statusFromSearchError(searchErr)}
 		})
 	}
 
@@ -1762,6 +1816,7 @@ func (s *SearchService) searchPluginsForIdentityWithStatus(ctx context.Context, 
 	allResults := append([]model.SearchResult(nil), legacyBatch.Results...)
 	complete := legacyBatch.Complete && len(managedResults) == len(tasks)
 	partialSources := append([]string(nil), legacyBatch.PartialSources...)
+	sourceStatuses := mergeSourceStatuses(legacyBatch.SourceStatuses)
 	finished := make(map[string]struct{}, len(managedResults))
 	for _, value := range managedResults {
 		outcome, ok := value.(pluginTaskResult)
@@ -1774,6 +1829,12 @@ func (s *SearchService) searchPluginsForIdentityWithStatus(ctx context.Context, 
 			complete = false
 			partialSources = append(partialSources, "plugin:"+outcome.Source)
 		}
+		if outcome.Status != nil {
+			if sourceStatuses == nil {
+				sourceStatuses = make(map[string]model.SourceStatus)
+			}
+			sourceStatuses["plugin:"+outcome.Source] = *outcome.Status
+		}
 		for _, result := range outcome.Results {
 			if len(result.Links) > 0 {
 				allResults = append(allResults, result)
@@ -1785,7 +1846,7 @@ func (s *SearchService) searchPluginsForIdentityWithStatus(ctx context.Context, 
 			partialSources = append(partialSources, "plugin:"+item.plugin.Name())
 		}
 	}
-	return sourceSearchBatch{Results: mergeSearchResults(nil, allResults), Complete: complete, PartialSources: partialSources}, nil
+	return sourceSearchBatch{Results: mergeSearchResults(nil, allResults), Complete: complete, PartialSources: partialSources, SourceStatuses: sourceStatuses}, nil
 }
 
 func selectPlugins(all []plugin.AsyncSearchPlugin, requested []string) []plugin.AsyncSearchPlugin {

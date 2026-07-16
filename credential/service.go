@@ -138,6 +138,74 @@ func (s *Service) OpenStored(value storage.PluginCredential) ([]byte, error) {
 	return s.Open(value, metadataBinding(value.PublicMetadata))
 }
 
+// Refresh replaces an existing credential's encrypted secret while preserving
+// its owner, scope and public metadata. Search adapters use this after an
+// upstream re-login refreshes cookies. CAS prevents an older concurrent login
+// from overwriting a newer credential revision.
+func (s *Service) Refresh(ctx context.Context, publicID string, material LoginMaterial) error {
+	if s == nil || s.repository == nil || s.cipher == nil {
+		return errors.New("credential service is unavailable")
+	}
+	publicID = strings.TrimSpace(publicID)
+	if publicID == "" || len(material.Secret) == 0 || len(material.StableID) == 0 {
+		return storage.ErrInvalid
+	}
+
+	secret := append([]byte(nil), material.Secret...)
+	stableID := append([]byte(nil), material.StableID...)
+	clear(material.Secret)
+	defer clear(secret)
+	defer clear(stableID)
+
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		current, err := s.repository.GetPluginCredentialByPublicID(ctx, publicID)
+		if err != nil {
+			return err
+		}
+
+		candidate := material
+		candidate.Secret = append([]byte(nil), secret...)
+		candidate.StableID = append([]byte(nil), stableID...)
+		if strings.TrimSpace(candidate.DisplayName) == "" {
+			candidate.DisplayName = current.DisplayName
+		}
+		if candidate.PublicMetadata == nil {
+			candidate.PublicMetadata = current.PublicMetadata
+		}
+		if len(candidate.ConfigBinding) == 0 {
+			candidate.ConfigBinding = metadataBinding(current.PublicMetadata)
+		}
+		if strings.TrimSpace(candidate.Status) == "" {
+			candidate.Status = current.Status
+		}
+		if candidate.ExpiresAt == nil {
+			candidate.ExpiresAt = current.ExpiresAt
+		}
+
+		input, err := s.replacementInput(current, candidate)
+		if err != nil {
+			return err
+		}
+		if current.Scope == storage.CredentialScopeUserPrivate {
+			if current.OwnerUserID == nil {
+				return storage.ErrInvalid
+			}
+			_, err = s.repository.ReplaceUserPluginCredentialEnvelopeCAS(ctx, *current.OwnerUserID, input)
+		} else {
+			_, err = s.repository.ReplacePluginCredentialEnvelopeCAS(ctx, input)
+		}
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !errors.Is(err, storage.ErrConflict) {
+			return err
+		}
+	}
+	return lastErr
+}
+
 type Identity struct {
 	Actor  string
 	UserID int64

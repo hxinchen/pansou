@@ -38,14 +38,22 @@ import (
 	"golang.org/x/net/proxy"
 
 	cloudscraper "github.com/Advik-B/cloudscraper/lib"
+	"golang.org/x/sync/singleflight"
 )
 
 // 插件配置参数
 const (
 	MaxConcurrentUsers   = 3     // 最多尝试的用户数
 	MaxConcurrentDetails = 4     // 最大并发详情请求数
-	MaxSearchSuggestions = 10    // 单次最多解析的搜索建议数量
+	InitialDetailBatch   = 10    // 首批详情数量，优先保证响应速度
+	MaxSearchSuggestions = 20    // 结果不足时最多解析的搜索建议数量
+	MinUsefulResults     = 5     // 首批达到该数量时不再请求第二批
 	DebugLog             = false // 调试日志开关（排查问题时改为true）
+
+	managedCacheFreshTTL = 10 * time.Minute
+	managedCacheStaleTTL = 30 * time.Minute
+	managedSessionTTL    = 30 * time.Minute
+	detailRequestTimeout = 12 * time.Second
 )
 
 // 默认账户配置（可通过Web界面添加更多账户）
@@ -304,7 +312,7 @@ const HTMLTemplate = `<!DOCTYPE html>
         </div>
 
         <div class="section" id="test-section">
-            <div class="section-title">🔍 测试搜索(限制返回10条数据)</div>
+            <div class="section-title">🔍 测试搜索（按相关度分批获取，最多20条候选）</div>
             
             <div style="display: flex; gap: 10px;">
                 <input type="text" id="search-keyword" placeholder="输入关键词测试搜索" style="flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 6px;">
@@ -497,6 +505,10 @@ type GyingPlugin struct {
 	*plugin.BaseAsyncPlugin
 	users              sync.Map // 内存缓存：hash -> *User
 	scrapers           sync.Map // cloudscraper实例缓存：hash -> *cloudscraper.Scraper
+	managedSessions    sync.Map // 托管凭据会话：凭据ID+站点 -> *managedSession
+	managedSearchCache sync.Map // 身份+凭据+站点+关键词 -> *managedSearchCacheEntry
+	managedSearchGroup singleflight.Group
+	managedLoginGroup  singleflight.Group
 	mu                 sync.RWMutex
 	searchCache        sync.Map // 插件级缓存：关键词->model.PluginSearchResult
 	baseURL            string   // 当前配置的站点地址
@@ -731,6 +743,14 @@ func (p *GyingPlugin) clearSearchCache() {
 func (p *GyingPlugin) resetSessionsForBaseURLChange() {
 	p.scrapers.Range(func(key, value interface{}) bool {
 		p.scrapers.Delete(key)
+		return true
+	})
+	p.managedSessions.Range(func(key, value interface{}) bool {
+		p.managedSessions.Delete(key)
+		return true
+	})
+	p.managedSearchCache.Range(func(key, value interface{}) bool {
+		p.managedSearchCache.Delete(key)
 		return true
 	})
 
@@ -1912,22 +1932,15 @@ func (p *GyingPlugin) submitChallengeVerification(scraper *cloudscraper.Scraper,
 }
 
 func (p *GyingPlugin) requestWithChallengeRetry(scraper *cloudscraper.Scraper, method, requestURL, contentType, requestBody string) ([]byte, int, http.Header, error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		var (
-			resp *http.Response
-			err  error
-		)
+	return p.requestWithChallengeRetryContext(context.Background(), scraper, method, requestURL, contentType, requestBody)
+}
 
-		switch method {
-		case http.MethodGet:
-			// Use cloudscraper for GET as well as POST so the challenge page,
-			// verification request, and retry share the same browser-like headers.
-			resp, err = scraper.Get(requestURL)
-		case http.MethodPost:
-			resp, err = scraper.Post(requestURL, contentType, strings.NewReader(requestBody))
-		default:
-			return nil, 0, nil, fmt.Errorf("不支持的请求方法: %s", method)
+func (p *GyingPlugin) requestWithChallengeRetryContext(ctx context.Context, scraper *cloudscraper.Scraper, method, requestURL, contentType, requestBody string) ([]byte, int, http.Header, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, nil, err
 		}
+		resp, err := p.doScraperRequest(ctx, scraper, method, requestURL, contentType, requestBody)
 		if err != nil {
 			return nil, 0, nil, err
 		}
@@ -1955,6 +1968,9 @@ func (p *GyingPlugin) requestWithChallengeRetry(scraper *cloudscraper.Scraper, m
 			if err := p.solveBotChallenge(scraper, requestURL, body); err != nil {
 				return nil, statusCode, headers, err
 			}
+			if err := ctx.Err(); err != nil {
+				return nil, statusCode, headers, err
+			}
 			if DebugLog {
 				fmt.Printf("[Gying] requestWithChallengeRetry: challenge已完成，重试原请求 url=%s\n", requestURL)
 			}
@@ -1965,6 +1981,40 @@ func (p *GyingPlugin) requestWithChallengeRetry(scraper *cloudscraper.Scraper, m
 	}
 
 	return nil, 0, nil, fmt.Errorf("请求重试次数已耗尽")
+}
+
+// doScraperRequest uses cloudscraper's browser headers, stealth settings,
+// cookie jar and transport while attaching the caller's context to the HTTP
+// request. The upstream library's exported Get/Post helpers create background
+// requests and therefore cannot be cancelled by the search timeout.
+func (p *GyingPlugin) doScraperRequest(ctx context.Context, scraper *cloudscraper.Scraper, method, requestURL, contentType, requestBody string) (*http.Response, error) {
+	if scraper == nil {
+		return nil, fmt.Errorf("scraper 实例为空")
+	}
+	var body io.Reader
+	if method == http.MethodPost {
+		body = strings.NewReader(requestBody)
+	} else if method != http.MethodGet {
+		return nil, fmt.Errorf("不支持的请求方法: %s", method)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, body)
+	if err != nil {
+		return nil, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	for key, values := range scraper.UserAgent.Headers {
+		if req.Header.Get(key) == "" {
+			req.Header[key] = append([]string(nil), values...)
+		}
+	}
+	scraper.StealthMode.Apply(req, scraper.UserAgent.Browser)
+	client, err := getScraperClient(scraper)
+	if err != nil {
+		return nil, err
+	}
+	return client.Do(req)
 }
 
 func parseLoginFailure(body []byte) error {
@@ -2120,6 +2170,10 @@ func parseCookieString(cookieStr string) map[string]string {
 //
 // 返回: (*cloudscraper.Scraper, cookie字符串, error)
 func (p *GyingPlugin) doLogin(username, password string) (*cloudscraper.Scraper, string, error) {
+	return p.doLoginContext(context.Background(), username, password)
+}
+
+func (p *GyingPlugin) doLoginContext(ctx context.Context, username, password string) (*cloudscraper.Scraper, string, error) {
 	if DebugLog {
 		fmt.Printf("[Gying] ========== 开始登录 ==========\n")
 		fmt.Printf("[Gying] 用户名: %s\n", username)
@@ -2161,7 +2215,7 @@ func (p *GyingPlugin) doLogin(username, password string) (*cloudscraper.Scraper,
 		fmt.Printf("[Gying] 步骤1: 访问登录页面: %s\n", loginPageURL)
 	}
 
-	_, statusCode, headers, err := p.requestWithChallengeRetry(scraper, http.MethodGet, loginPageURL, "", "")
+	_, statusCode, headers, err := p.requestWithChallengeRetryContext(ctx, scraper, http.MethodGet, loginPageURL, "", "")
 
 	if err != nil {
 		if DebugLog {
@@ -2197,7 +2251,7 @@ func (p *GyingPlugin) doLogin(username, password string) (*cloudscraper.Scraper,
 			url.QueryEscape(username), len(password))
 	}
 
-	body, statusCode, headers, err := p.requestWithChallengeRetry(scraper, http.MethodPost, loginURL, "application/x-www-form-urlencoded", postData)
+	body, statusCode, headers, err := p.requestWithChallengeRetryContext(ctx, scraper, http.MethodPost, loginURL, "application/x-www-form-urlencoded", postData)
 	if err != nil {
 		if DebugLog {
 			fmt.Printf("[Gying] 登录POST请求失败: %v\n", err)
@@ -2226,7 +2280,7 @@ func (p *GyingPlugin) doLogin(username, password string) (*cloudscraper.Scraper,
 		fmt.Printf("[Gying] 步骤3: GET详情页收集完整Cookie\n")
 	}
 
-	warmupBody, warmupStatus, warmupHeaders, err := p.requestWithChallengeRetry(scraper, http.MethodGet, p.getWarmupDetailURL(), "", "")
+	warmupBody, warmupStatus, warmupHeaders, err := p.requestWithChallengeRetryContext(ctx, scraper, http.MethodGet, p.getWarmupDetailURL(), "", "")
 	if err == nil {
 		if DebugLog {
 			fmt.Printf("[Gying] 详情页状态码: %d\n", warmupStatus)
@@ -2425,48 +2479,90 @@ func (p *GyingPlugin) searchWithScraperWithRetry(keyword string, scraper *clouds
 
 // searchWithScraper 使用scraper搜索
 func (p *GyingPlugin) searchWithScraper(keyword string, scraper *cloudscraper.Scraper) ([]model.SearchResult, error) {
+	outcome, err := p.searchWithScraperContext(context.Background(), keyword, scraper)
+	return outcome.Results, err
+}
+
+type gyingSearchStats struct {
+	Candidates int
+	Attempted  int
+	Succeeded  int
+	Failed     int
+}
+
+type gyingSearchOutcome struct {
+	Results  []model.SearchResult
+	Stats    gyingSearchStats
+	Complete bool
+}
+
+func (p *GyingPlugin) searchWithScraperContext(ctx context.Context, keyword string, scraper *cloudscraper.Scraper) (gyingSearchOutcome, error) {
 	if DebugLog {
 		fmt.Printf("[Gying] ---------- searchWithScraper 开始 ----------\n")
 		fmt.Printf("[Gying] 关键词: %s\n", keyword)
 	}
 
-	searchItems, err := p.fetchSearchSuggestions(keyword, scraper)
+	searchItems, err := p.fetchSearchSuggestionsContext(ctx, keyword, scraper)
 	if err != nil {
-		return nil, err
+		return gyingSearchOutcome{}, err
 	}
+	outcome := gyingSearchOutcome{Stats: gyingSearchStats{Candidates: len(searchItems)}, Complete: true}
 	if len(searchItems) == 0 {
-		return []model.SearchResult{}, nil
+		return outcome, nil
 	}
 
 	if DebugLog {
 		fmt.Printf("[Gying] 搜索建议返回 %d 条\n", len(searchItems))
 	}
 
-	results, err := p.fetchAllDetails(searchItems, scraper, keyword)
-	if err != nil {
-		if DebugLog {
-			fmt.Printf("[Gying] fetchAllDetails 失败: %v\n", err)
-			fmt.Printf("[Gying] ---------- searchWithScraper 结束 ----------\n")
-		}
-		return nil, err
+	firstEnd := min(len(searchItems), InitialDetailBatch)
+	batches := [][]SearchSuggestItem{searchItems[:firstEnd]}
+	if firstEnd < len(searchItems) {
+		batches = append(batches, searchItems[firstEnd:])
 	}
 
+	for batchIndex, batch := range batches {
+		batchOutcome, batchErr := p.fetchAllDetailsContext(ctx, batch, scraper, keyword)
+		outcome.Results = append(outcome.Results, batchOutcome.Results...)
+		outcome.Stats.Attempted += batchOutcome.Stats.Attempted
+		outcome.Stats.Succeeded += batchOutcome.Stats.Succeeded
+		outcome.Stats.Failed += batchOutcome.Stats.Failed
+		if !batchOutcome.Complete {
+			outcome.Complete = false
+		}
+		if batchErr != nil {
+			if DebugLog {
+				fmt.Printf("[Gying] fetchAllDetails 失败: %v\n", batchErr)
+			}
+			return outcome, batchErr
+		}
+		if batchIndex == 0 && len(outcome.Results) >= MinUsefulResults {
+			break
+		}
+	}
+	outcome.Results = p.deduplicateResults(outcome.Results)
+
 	if DebugLog {
-		fmt.Printf("[Gying] fetchAllDetails 返回 %d 条结果\n", len(results))
+		fmt.Printf("[Gying] fetchAllDetails 返回 %d 条结果 (候选=%d 尝试=%d 成功=%d 失败=%d 完整=%t)\n",
+			len(outcome.Results), outcome.Stats.Candidates, outcome.Stats.Attempted, outcome.Stats.Succeeded, outcome.Stats.Failed, outcome.Complete)
 		fmt.Printf("[Gying] ---------- searchWithScraper 结束 ----------\n")
 	}
 
-	return results, nil
+	return outcome, nil
 }
 
 func (p *GyingPlugin) fetchSearchSuggestions(keyword string, scraper *cloudscraper.Scraper) ([]SearchSuggestItem, error) {
+	return p.fetchSearchSuggestionsContext(context.Background(), keyword, scraper)
+}
+
+func (p *GyingPlugin) fetchSearchSuggestionsContext(ctx context.Context, keyword string, scraper *cloudscraper.Scraper) ([]SearchSuggestItem, error) {
 	searchURL := fmt.Sprintf("%s/res/search_suggest?q=%s", p.getBaseURL(), url.QueryEscape(keyword))
 
 	if DebugLog {
 		fmt.Printf("[Gying] 搜索建议URL: %s\n", searchURL)
 	}
 
-	body, statusCode, _, err := p.requestWithChallengeRetry(scraper, http.MethodGet, searchURL, "", "")
+	body, statusCode, _, err := p.requestWithChallengeRetryContext(ctx, scraper, http.MethodGet, searchURL, "", "")
 	if err != nil {
 		return nil, err
 	}
@@ -2482,7 +2578,7 @@ func (p *GyingPlugin) fetchSearchSuggestions(keyword string, scraper *cloudscrap
 		return nil, fmt.Errorf("解析搜索建议失败: %w", err)
 	}
 
-	filtered := make([]SearchSuggestItem, 0, min(len(items), MaxSearchSuggestions))
+	filtered := make([]SearchSuggestItem, 0, len(items))
 	for _, item := range items {
 		item.ID = strings.TrimSpace(item.ID)
 		item.Dir = strings.TrimSpace(item.Dir)
@@ -2491,30 +2587,62 @@ func (p *GyingPlugin) fetchSearchSuggestions(keyword string, scraper *cloudscrap
 			continue
 		}
 		filtered = append(filtered, item)
-		if len(filtered) >= MaxSearchSuggestions {
-			break
-		}
+	}
+	p.sortSearchSuggestions(filtered, keyword)
+	if len(filtered) > MaxSearchSuggestions {
+		filtered = filtered[:MaxSearchSuggestions]
 	}
 
 	return filtered, nil
 }
 
+func (p *GyingPlugin) sortSearchSuggestions(items []SearchSuggestItem, keyword string) {
+	keywordKey := p.normalizeTitleForCompare(keyword)
+	score := func(item SearchSuggestItem) int {
+		titleKey := p.normalizeTitleForCompare(item.Title)
+		switch {
+		case titleKey == keywordKey:
+			return 0
+		case strings.HasPrefix(titleKey, keywordKey):
+			return 1
+		case strings.Contains(titleKey, keywordKey):
+			return 2
+		default:
+			return 3
+		}
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		left, right := score(items[i]), score(items[j])
+		if left != right {
+			return left < right
+		}
+		if items[i].Year != items[j].Year {
+			return items[i].Year > items[j].Year
+		}
+		return items[i].Title < items[j].Title
+	})
+}
+
 // fetchAllDetails 并发获取所有详情
 func (p *GyingPlugin) fetchAllDetails(items []SearchSuggestItem, scraper *cloudscraper.Scraper, keyword string) ([]model.SearchResult, error) {
+	outcome, err := p.fetchAllDetailsContext(context.Background(), items, scraper, keyword)
+	return outcome.Results, err
+}
+
+func (p *GyingPlugin) fetchAllDetailsContext(ctx context.Context, items []SearchSuggestItem, scraper *cloudscraper.Scraper, keyword string) (gyingSearchOutcome, error) {
 	if DebugLog {
 		fmt.Printf("[Gying] >>> fetchAllDetails 开始\n")
 		fmt.Printf("[Gying] 需要获取 %d 个详情，关键词: %s\n", len(items), keyword)
 	}
 
-	var results []model.SearchResult
+	results := make([]*model.SearchResult, len(items))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
 	semaphore := make(chan struct{}, MaxConcurrentDetails)
 	errChan := make(chan error, 1) // 用于接收403错误
 
-	successCount := 0
-	failCount := 0
+	stats := gyingSearchStats{Candidates: len(items)}
 	has403 := false
 
 	for i, item := range items {
@@ -2523,7 +2651,14 @@ func (p *GyingPlugin) fetchAllDetails(items []SearchSuggestItem, scraper *clouds
 		go func(index int) {
 			defer wg.Done()
 
-			semaphore <- struct{}{}
+			select {
+			case semaphore <- struct{}{}:
+			case <-ctx.Done():
+				mu.Lock()
+				stats.Failed++
+				mu.Unlock()
+				return
+			}
 			defer func() { <-semaphore }()
 
 			// 检查是否已经遇到403错误
@@ -2533,13 +2668,24 @@ func (p *GyingPlugin) fetchAllDetails(items []SearchSuggestItem, scraper *clouds
 				return
 			}
 			mu.Unlock()
+			if err := ctx.Err(); err != nil {
+				mu.Lock()
+				stats.Failed++
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			stats.Attempted++
+			mu.Unlock()
 
 			if DebugLog {
 				fmt.Printf("[Gying]   [%d/%d] 获取详情: ID=%s, Type=%s, 标题=%s\n",
 					index+1, len(items), item.ID, item.Dir, item.Title)
 			}
 
-			detail, err := p.fetchDetail(item.ID, item.Dir, scraper)
+			detailCtx, cancel := context.WithTimeout(ctx, detailRequestTimeout)
+			detail, err := p.fetchDetailContext(detailCtx, item.ID, item.Dir, scraper)
+			cancel()
 			if err != nil {
 				if DebugLog {
 					fmt.Printf("[Gying]   [%d/%d] ❌ 获取详情失败: %v\n", index+1, len(items), err)
@@ -2559,7 +2705,7 @@ func (p *GyingPlugin) fetchAllDetails(items []SearchSuggestItem, scraper *clouds
 				}
 
 				mu.Lock()
-				failCount++
+				stats.Failed++
 				mu.Unlock()
 				return
 			}
@@ -2571,8 +2717,9 @@ func (p *GyingPlugin) fetchAllDetails(items []SearchSuggestItem, scraper *clouds
 						index+1, len(items), result.Title, len(result.Links))
 				}
 				mu.Lock()
-				results = append(results, result)
-				successCount++
+				resultCopy := result
+				results[index] = &resultCopy
+				stats.Succeeded++
 				mu.Unlock()
 			} else {
 				if DebugLog {
@@ -2584,6 +2731,16 @@ func (p *GyingPlugin) fetchAllDetails(items []SearchSuggestItem, scraper *clouds
 	}
 
 	wg.Wait()
+	ordered := make([]model.SearchResult, 0, stats.Succeeded)
+	for _, result := range results {
+		if result != nil {
+			ordered = append(ordered, *result)
+		}
+	}
+	outcome := gyingSearchOutcome{Results: ordered, Stats: stats, Complete: stats.Failed == 0}
+	if err := ctx.Err(); err != nil {
+		return outcome, err
+	}
 
 	// 检查是否有403错误
 	select {
@@ -2591,20 +2748,24 @@ func (p *GyingPlugin) fetchAllDetails(items []SearchSuggestItem, scraper *clouds
 		if DebugLog {
 			fmt.Printf("[Gying] <<< fetchAllDetails 检测到403错误，需要重新登录\n")
 		}
-		return nil, err
+		return outcome, err
 	default:
 	}
 
 	if DebugLog {
 		fmt.Printf("[Gying] <<< fetchAllDetails 完成: 成功=%d, 失败=%d, 总计=%d\n",
-			successCount, failCount, len(items))
+			stats.Succeeded, stats.Failed, len(items))
 	}
 
-	return results, nil
+	return outcome, nil
 }
 
 // fetchDetail 获取详情
 func (p *GyingPlugin) fetchDetail(resourceID, resourceType string, scraper *cloudscraper.Scraper) (*DetailData, error) {
+	return p.fetchDetailContext(context.Background(), resourceID, resourceType, scraper)
+}
+
+func (p *GyingPlugin) fetchDetailContext(ctx context.Context, resourceID, resourceType string, scraper *cloudscraper.Scraper) (*DetailData, error) {
 	detailURL := fmt.Sprintf("%s/res/downurl/%s/%s", p.getBaseURL(), url.PathEscape(resourceType), url.PathEscape(resourceID))
 
 	if DebugLog {
@@ -2612,7 +2773,7 @@ func (p *GyingPlugin) fetchDetail(resourceID, resourceType string, scraper *clou
 	}
 
 	// 使用cloudscraper发送请求（自动管理Cookie和绕过反爬虫）
-	body, statusCode, _, err := p.requestWithChallengeRetry(scraper, http.MethodGet, detailURL, "", "")
+	body, statusCode, _, err := p.requestWithChallengeRetryContext(ctx, scraper, http.MethodGet, detailURL, "", "")
 	if err != nil {
 		if DebugLog {
 			fmt.Printf("[Gying]     请求失败: %v\n", err)
@@ -2704,11 +2865,12 @@ func (p *GyingPlugin) buildResult(detail *DetailData, item SearchSuggestItem) mo
 	var datetime time.Time
 	if detail == nil {
 		datetime = time.Now()
-	} else if !detail.FetchedAt.IsZero() {
-		datetime = detail.FetchedAt
 	} else {
 		detailTimes := p.collectDetailTimes(detail)
 		datetime = p.parseUpdateTime(detailTimes)
+		if datetime.IsZero() {
+			datetime = detail.FetchedAt
+		}
 	}
 
 	return model.SearchResult{

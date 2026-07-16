@@ -49,13 +49,25 @@ const (
 	SearchCompletionProcessing SearchCompletion = "processing"
 )
 
+// SourceStatus exposes useful progress for a source that returned a partial
+// result. It is omitted for normal complete sources to keep responses compact.
+type SourceStatus struct {
+	Completion SearchCompletion `json:"completion" sonic:"completion"`
+	Candidates int              `json:"candidates,omitempty" sonic:"candidates,omitempty"`
+	Attempted  int              `json:"attempted,omitempty" sonic:"attempted,omitempty"`
+	Succeeded  int              `json:"succeeded,omitempty" sonic:"succeeded,omitempty"`
+	Failed     int              `json:"failed,omitempty" sonic:"failed,omitempty"`
+	Message    string           `json:"message,omitempty" sonic:"message,omitempty"`
+}
+
 // SearchResponse 搜索响应
 type SearchResponse struct {
-	Total          int              `json:"total" sonic:"total"`
-	Results        []SearchResult   `json:"results,omitempty" sonic:"results,omitempty"`
-	MergedByType   MergedLinks      `json:"merged_by_type,omitempty" sonic:"merged_by_type,omitempty"`
-	Completion     SearchCompletion `json:"completion,omitempty" sonic:"completion,omitempty"`
-	PartialSources []string         `json:"partial_sources,omitempty" sonic:"partial_sources,omitempty"`
+	Total          int                     `json:"total" sonic:"total"`
+	Results        []SearchResult          `json:"results,omitempty" sonic:"results,omitempty"`
+	MergedByType   MergedLinks             `json:"merged_by_type,omitempty" sonic:"merged_by_type,omitempty"`
+	Completion     SearchCompletion        `json:"completion,omitempty" sonic:"completion,omitempty"`
+	PartialSources []string                `json:"partial_sources,omitempty" sonic:"partial_sources,omitempty"`
+	SourceStatuses map[string]SourceStatus `json:"source_statuses,omitempty" sonic:"source_statuses,omitempty"`
 }
 
 func (r SearchResponse) IsPartial() bool {

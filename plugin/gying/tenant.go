@@ -8,10 +8,13 @@ import (
 	"strings"
 	"time"
 
+	"pansou/config"
 	"pansou/credential"
 	"pansou/model"
 	"pansou/plugin"
 	"pansou/storage"
+
+	cloudscraper "github.com/Advik-B/cloudscraper/lib"
 )
 
 type tenantSecret struct {
@@ -85,7 +88,7 @@ func (p *GyingPlugin) LoginWithPassword(ctx context.Context, username, password 
 	if username == "" || password == "" {
 		return credential.LoginMaterial{}, errors.New("username and password are required")
 	}
-	_, cookie, err := p.doLogin(username, password)
+	_, cookie, err := p.doLoginContext(ctx, username, password)
 	if err != nil {
 		return credential.LoginMaterial{}, err
 	}
@@ -97,8 +100,58 @@ func (p *GyingPlugin) LoginWithPassword(ctx context.Context, username, password 
 	return credential.LoginMaterial{Secret: secret, StableID: []byte(strings.ToLower(username)), DisplayName: username, PublicMetadata: map[string]any{"account_hint": username}, ConfigBinding: []byte(p.getBaseURL()), ExpiresAt: &expires}, nil
 }
 
-func (p *GyingPlugin) SearchCredentialLayer(ctx context.Context, keyword string, _ map[string]interface{}, candidates []storage.PluginCredential, access credential.Access) ([]model.SearchResult, bool, error) {
+type managedSession struct {
+	scraper   *cloudscraper.Scraper
+	revision  int64
+	expiresAt time.Time
+}
+
+type managedSearchCacheEntry struct {
+	outcome    gyingSearchOutcome
+	freshUntil time.Time
+	staleUntil time.Time
+}
+
+type managedSearchFlightValue struct {
+	outcome gyingSearchOutcome
+	err     error
+}
+
+type managedLoginValue struct {
+	scraper *cloudscraper.Scraper
+	cookie  string
+}
+
+type gyingPartialError struct {
+	stats gyingSearchStats
+	cause error
+}
+
+func (e *gyingPartialError) Error() string {
+	message := fmt.Sprintf("gying 详情仅完成 %d/%d 条，失败 %d 条", e.stats.Succeeded, e.stats.Attempted, e.stats.Failed)
+	if e.cause != nil {
+		message += ": " + e.cause.Error()
+	}
+	return message
+}
+
+func (e *gyingPartialError) Unwrap() error { return e.cause }
+
+func (e *gyingPartialError) SourceStatus() model.SourceStatus {
+	return model.SourceStatus{
+		Completion: model.SearchCompletionPartial,
+		Candidates: e.stats.Candidates,
+		Attempted:  e.stats.Attempted,
+		Succeeded:  e.stats.Succeeded,
+		Failed:     e.stats.Failed,
+		Message:    e.Error(),
+	}
+}
+
+func (p *GyingPlugin) SearchCredentialLayer(ctx context.Context, keyword string, ext map[string]interface{}, candidates []storage.PluginCredential, access credential.Access) ([]model.SearchResult, bool, error) {
 	var lastErr error
+	sawHealthyZero := false
+	zeroSearches := 0
 	for _, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
 			return nil, false, err
@@ -119,39 +172,246 @@ func (p *GyingPlugin) SearchCredentialLayer(ctx context.Context, keyword string,
 			gyingFailure(ctx, access, candidate.PublicID, storage.CredentialStatusInvalid, "credential_payload_invalid")
 			continue
 		}
-		var scraperErr error
-		scraper, scraperErr := p.createScraperWithCookies(secret.Cookie)
-		if scraperErr != nil && secret.Username != "" && secret.Password != "" {
-			scraper, secret.Cookie, scraperErr = p.doLogin(secret.Username, secret.Password)
-		}
-		if scraperErr != nil {
-			lastErr = scraperErr
-			gyingFailure(ctx, access, candidate.PublicID, storage.CredentialStatusInvalid, "auth_failed")
-			continue
-		}
-		results, searchErr := p.searchWithScraper(keyword, scraper)
-		if searchErr != nil && strings.Contains(searchErr.Error(), "403") && secret.Password != "" {
-			scraper, _, scraperErr = p.doLogin(secret.Username, secret.Password)
-			if scraperErr == nil {
-				results, searchErr = p.searchWithScraper(keyword, scraper)
-			} else {
-				searchErr = scraperErr
-			}
-		}
-		if searchErr == nil {
+		outcome, searchErr := p.searchManagedCredential(ctx, keyword, ext, candidate, secret, access)
+		if searchErr == nil && outcome.Complete {
 			if access.Success != nil {
 				access.Success(ctx, candidate.PublicID)
 			}
-			return p.deduplicateResults(results), true, nil
+			if len(outcome.Results) > 0 {
+				return p.deduplicateResults(outcome.Results), true, nil
+			}
+			sawHealthyZero = true
+			zeroSearches++
+			// A healthy empty response can be an upstream session anomaly. Try
+			// one additional credential before asking the service for the shared
+			// layer.
+			if zeroSearches >= 2 {
+				return nil, false, credential.ErrNoResults
+			}
+			continue
+		}
+		if len(outcome.Results) > 0 {
+			partialErr := &gyingPartialError{stats: outcome.Stats, cause: searchErr}
+			if access.Success != nil {
+				access.Success(ctx, candidate.PublicID)
+			}
+			return p.deduplicateResults(outcome.Results), true, partialErr
 		}
 		lastErr = searchErr
 		status, code := storage.CredentialStatusActive, "upstream_error"
-		if strings.Contains(searchErr.Error(), "403") || strings.Contains(strings.ToLower(searchErr.Error()), "登录") {
+		if searchErr != nil && (strings.Contains(searchErr.Error(), "403") || strings.Contains(strings.ToLower(searchErr.Error()), "登录")) {
 			status, code = storage.CredentialStatusInvalid, "auth_failed"
 		}
 		gyingFailure(ctx, access, candidate.PublicID, status, code)
 	}
+	if sawHealthyZero {
+		return nil, false, credential.ErrNoResults
+	}
 	return nil, false, lastErr
+}
+
+func (p *GyingPlugin) searchManagedCredential(ctx context.Context, keyword string, ext map[string]interface{}, candidate storage.PluginCredential, secret tenantSecret, access credential.Access) (gyingSearchOutcome, error) {
+	forceRefresh := false
+	cacheScope := "managed"
+	if ext != nil {
+		forceRefresh, _ = ext["refresh"].(bool)
+		if value := strings.TrimSpace(fmt.Sprint(ext["credential_cache_scope"])); value != "" && value != "<nil>" {
+			cacheScope = value
+		}
+	}
+	key := p.managedSearchKey(cacheScope, candidate.PublicID, keyword)
+	now := time.Now()
+	p.cleanupManagedState(now)
+	var stale *managedSearchCacheEntry
+	if !forceRefresh {
+		if value, ok := p.managedSearchCache.Load(key); ok {
+			entry := value.(*managedSearchCacheEntry)
+			switch {
+			case now.Before(entry.freshUntil):
+				return cloneGyingOutcome(entry.outcome), nil
+			case now.Before(entry.staleUntil):
+				stale = entry
+				go p.refreshManagedSearch(key, keyword, candidate, secret, access)
+				return cloneGyingOutcome(entry.outcome), nil
+			default:
+				p.managedSearchCache.CompareAndDelete(key, entry)
+			}
+		}
+	}
+
+	result := p.managedSearchGroup.DoChan(key, func() (interface{}, error) {
+		searchCtx, cancel := context.WithTimeout(context.Background(), p.managedSearchTimeout())
+		defer cancel()
+		outcome, searchErr := p.searchManagedCredentialLive(searchCtx, keyword, candidate, secret, access)
+		if searchErr == nil && outcome.Complete {
+			p.storeManagedSearchCache(key, outcome)
+		}
+		return managedSearchFlightValue{outcome: outcome, err: searchErr}, nil
+	})
+	select {
+	case <-ctx.Done():
+		return gyingSearchOutcome{}, ctx.Err()
+	case shared := <-result:
+		if shared.Err != nil {
+			return gyingSearchOutcome{}, shared.Err
+		}
+		value := shared.Val.(managedSearchFlightValue)
+		if value.err != nil && stale != nil {
+			return cloneGyingOutcome(stale.outcome), nil
+		}
+		return value.outcome, value.err
+	}
+}
+
+func (p *GyingPlugin) refreshManagedSearch(key, keyword string, candidate storage.PluginCredential, secret tenantSecret, access credential.Access) {
+	result := p.managedSearchGroup.DoChan(key, func() (interface{}, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), p.managedSearchTimeout())
+		defer cancel()
+		outcome, err := p.searchManagedCredentialLive(ctx, keyword, candidate, secret, access)
+		if err == nil && outcome.Complete {
+			p.storeManagedSearchCache(key, outcome)
+		}
+		return managedSearchFlightValue{outcome: outcome, err: err}, nil
+	})
+	<-result
+}
+
+func (p *GyingPlugin) searchManagedCredentialLive(ctx context.Context, keyword string, candidate storage.PluginCredential, secret tenantSecret, access credential.Access) (gyingSearchOutcome, error) {
+	scraper, err := p.managedScraper(candidate, secret.Cookie)
+	if err != nil {
+		return gyingSearchOutcome{}, err
+	}
+	outcome, searchErr := p.searchWithScraperContext(ctx, keyword, scraper)
+	if searchErr != nil && isGyingAuthError(searchErr) && secret.Username != "" && secret.Password != "" {
+		scraper, err = p.reloginManagedCredential(ctx, candidate, secret, access)
+		if err != nil {
+			return outcome, err
+		}
+		outcome, searchErr = p.searchWithScraperContext(ctx, keyword, scraper)
+	}
+	return outcome, searchErr
+}
+
+func (p *GyingPlugin) managedScraper(candidate storage.PluginCredential, cookie string) (*cloudscraper.Scraper, error) {
+	key := p.managedSessionKey(candidate.PublicID)
+	now := time.Now()
+	if value, ok := p.managedSessions.Load(key); ok {
+		entry := value.(*managedSession)
+		if entry.revision >= candidate.Revision && now.Before(entry.expiresAt) && entry.scraper != nil {
+			return entry.scraper, nil
+		}
+		p.managedSessions.CompareAndDelete(key, entry)
+	}
+	scraper, err := p.createScraperWithCookies(cookie)
+	if err != nil {
+		return nil, err
+	}
+	p.managedSessions.Store(key, &managedSession{scraper: scraper, revision: candidate.Revision, expiresAt: now.Add(managedSessionTTL)})
+	return scraper, nil
+}
+
+func (p *GyingPlugin) reloginManagedCredential(ctx context.Context, candidate storage.PluginCredential, secret tenantSecret, access credential.Access) (*cloudscraper.Scraper, error) {
+	key := p.managedSessionKey(candidate.PublicID)
+	result := p.managedLoginGroup.DoChan(key, func() (interface{}, error) {
+		if err := ctx.Err(); err != nil {
+			return managedLoginValue{}, err
+		}
+		scraper, cookie, err := p.doLoginContext(ctx, secret.Username, secret.Password)
+		if err != nil {
+			return managedLoginValue{}, err
+		}
+		sessionRevision := candidate.Revision
+		if access.Refresh != nil {
+			payload, marshalErr := json.Marshal(tenantSecret{Username: secret.Username, Password: secret.Password, Cookie: cookie})
+			if marshalErr != nil {
+				return managedLoginValue{}, marshalErr
+			}
+			expires := time.Now().AddDate(0, 4, 0)
+			refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			refreshErr := access.Refresh(refreshCtx, candidate.PublicID, credential.LoginMaterial{
+				Secret: payload, StableID: []byte(strings.ToLower(secret.Username)), DisplayName: candidate.DisplayName,
+				PublicMetadata: candidate.PublicMetadata, ConfigBinding: []byte(p.getBaseURL()),
+				Status: storage.CredentialStatusActive, ExpiresAt: &expires,
+			})
+			cancel()
+			if refreshErr != nil {
+				return managedLoginValue{}, fmt.Errorf("持久化刷新Cookie失败: %w", refreshErr)
+			}
+			sessionRevision++
+		}
+		p.managedSessions.Store(key, &managedSession{scraper: scraper, revision: sessionRevision, expiresAt: time.Now().Add(managedSessionTTL)})
+		return managedLoginValue{scraper: scraper, cookie: cookie}, nil
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case shared := <-result:
+		if shared.Err != nil {
+			return nil, shared.Err
+		}
+		return shared.Val.(managedLoginValue).scraper, nil
+	}
+}
+
+func (p *GyingPlugin) managedSessionKey(publicID string) string {
+	return p.getBaseURL() + "\x00" + strings.TrimSpace(publicID)
+}
+
+func (p *GyingPlugin) managedSearchTimeout() time.Duration {
+	if config.AppConfig != nil && config.AppConfig.PluginTimeout > 0 {
+		return config.AppConfig.PluginTimeout
+	}
+	return 45 * time.Second
+}
+
+func (p *GyingPlugin) managedSearchKey(scope, publicID, keyword string) string {
+	return strings.Join([]string{
+		strings.TrimSpace(scope), p.getBaseURL(), strings.TrimSpace(publicID), strings.ToLower(strings.TrimSpace(keyword)),
+	}, "\x00")
+}
+
+func (p *GyingPlugin) storeManagedSearchCache(key string, outcome gyingSearchOutcome) {
+	now := time.Now()
+	p.managedSearchCache.Store(key, &managedSearchCacheEntry{
+		outcome: cloneGyingOutcome(outcome), freshUntil: now.Add(managedCacheFreshTTL), staleUntil: now.Add(managedCacheStaleTTL),
+	})
+}
+
+func (p *GyingPlugin) cleanupManagedState(now time.Time) {
+	p.managedSearchCache.Range(func(key, value interface{}) bool {
+		entry, ok := value.(*managedSearchCacheEntry)
+		if !ok || !now.Before(entry.staleUntil) {
+			p.managedSearchCache.Delete(key)
+		}
+		return true
+	})
+	p.managedSessions.Range(func(key, value interface{}) bool {
+		entry, ok := value.(*managedSession)
+		if !ok || !now.Before(entry.expiresAt) {
+			p.managedSessions.Delete(key)
+		}
+		return true
+	})
+}
+
+func cloneGyingOutcome(outcome gyingSearchOutcome) gyingSearchOutcome {
+	cloned := outcome
+	cloned.Results = make([]model.SearchResult, len(outcome.Results))
+	for index, result := range outcome.Results {
+		cloned.Results[index] = result
+		cloned.Results[index].Links = append([]model.Link(nil), result.Links...)
+		cloned.Results[index].Tags = append([]string(nil), result.Tags...)
+		cloned.Results[index].Images = append([]string(nil), result.Images...)
+	}
+	return cloned
+}
+
+func isGyingAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "403") || strings.Contains(message, "登录")
 }
 
 func gyingFailure(ctx context.Context, access credential.Access, id, status, code string) {

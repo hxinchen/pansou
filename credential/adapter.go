@@ -2,16 +2,23 @@ package credential
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"pansou/model"
 	"pansou/storage"
 )
 
+// ErrNoResults means at least one usable credential completed a healthy
+// upstream search but returned no results. The service may try the next
+// credential layer without misreporting the source as failed.
+var ErrNoResults = errors.New("credential search completed with no results")
+
 type SecretOpener func(storage.PluginCredential) ([]byte, error)
 
 type Access struct {
 	Open    SecretOpener
+	Refresh func(context.Context, string, LoginMaterial) error
 	Success func(context.Context, string)
 	Failure func(context.Context, string, string, string, *time.Time)
 }
