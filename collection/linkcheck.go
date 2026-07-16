@@ -4,9 +4,54 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
+
+const (
+	linkCheckMetricsWindow    = 5 * time.Minute
+	linkCheckETAMinimumWindow = time.Minute
+)
+
+const (
+	LinkCheckETAIdle                 = "idle"
+	LinkCheckETACalculating          = "calculating"
+	LinkCheckETAAvailable            = "available"
+	LinkCheckETABacklogNotDecreasing = "backlog_not_decreasing"
+	LinkCheckETAStopped              = "stopped"
+)
+
+type LinkCheckQueueSnapshot struct {
+	Started                  bool
+	Workers                  int
+	Queued                   int
+	Active                   int
+	DueCount                 int64
+	DueCountKnown            bool
+	CompletedLastFiveMinutes int64
+	FailedLastFiveMinutes    int64
+	ThroughputPerMinute      float64
+	NetDrainPerMinute        *float64
+	ETASeconds               *int64
+	ETAState                 string
+	MetricsWindow            time.Duration
+	MetricsSampleWindow      time.Duration
+	BacklogSampleWindow      time.Duration
+	BacklogUpdatedAt         time.Time
+}
+
+type linkCheckCompletionMetric struct {
+	at        time.Time
+	completed bool
+	failed    bool
+}
+
+type linkCheckBacklogSample struct {
+	at             time.Time
+	dueCount       int64
+	policyRevision string
+}
 
 type LinkCheckQueueConfig struct {
 	Workers      int
@@ -37,11 +82,17 @@ type LinkCheckQueue struct {
 	config     LinkCheckQueueConfig
 	jobs       chan LinkCheckCandidate
 
-	mu      sync.Mutex
-	started bool
-	cancel  context.CancelFunc
-	queued  map[int64]struct{}
-	wg      sync.WaitGroup
+	mu                sync.Mutex
+	started           bool
+	stopping          bool
+	cancel            context.CancelFunc
+	stopDone          chan struct{}
+	queued            map[int64]struct{}
+	active            int
+	startedAt         time.Time
+	completionMetrics []linkCheckCompletionMetric
+	backlogSamples    []linkCheckBacklogSample
+	wg                sync.WaitGroup
 }
 
 func NewLinkCheckQueue(repository LinkCheckRepository, checker LinkChecker, config LinkCheckQueueConfig) *LinkCheckQueue {
@@ -88,9 +139,16 @@ func (q *LinkCheckQueue) Start(parent context.Context) error {
 	if q.started {
 		return nil
 	}
+	if q.stopping {
+		return ErrQueueStopping
+	}
 	ctx, cancel := context.WithCancel(parent)
 	q.cancel = cancel
 	q.started = true
+	q.startedAt = q.config.Now().UTC()
+	q.active = 0
+	q.completionMetrics = nil
+	q.backlogSamples = nil
 	for i := 0; i < q.config.Workers; i++ {
 		q.wg.Add(1)
 		go q.worker(ctx)
@@ -105,25 +163,40 @@ func (q *LinkCheckQueue) Stop(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	q.mu.Lock()
-	if !q.started {
+	if !q.started && !q.stopping {
 		q.mu.Unlock()
 		return nil
 	}
-	q.started = false
-	q.cancel()
+	var done chan struct{}
+	if q.started {
+		q.started = false
+		q.stopping = true
+		q.cancel()
+		done = make(chan struct{})
+		q.stopDone = done
+		go q.finishStop(done)
+	} else {
+		done = q.stopDone
+	}
 	q.mu.Unlock()
-
-	done := make(chan struct{})
-	go func() {
-		q.wg.Wait()
-		close(done)
-	}()
 	select {
 	case <-done:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (q *LinkCheckQueue) finishStop(done chan struct{}) {
+	q.wg.Wait()
+	q.mu.Lock()
+	if q.stopDone == done {
+		q.stopping = false
+		q.cancel = nil
+		q.stopDone = nil
+	}
+	close(done)
+	q.mu.Unlock()
 }
 
 func (q *LinkCheckQueue) Enqueue(ctx context.Context, candidate LinkCheckCandidate) error {
@@ -162,6 +235,9 @@ func (q *LinkCheckQueue) worker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case candidate := <-q.jobs:
+			q.mu.Lock()
+			q.active++
+			q.mu.Unlock()
 			q.process(ctx, candidate)
 		}
 	}
@@ -183,7 +259,18 @@ func (q *LinkCheckQueue) schedule(ctx context.Context) {
 }
 
 func (q *LinkCheckQueue) dispatch(ctx context.Context) {
-	candidates, err := q.repository.DueLinkChecks(ctx, q.config.BatchSize, q.config.Now().UTC())
+	now := q.config.Now().UTC()
+	if counter, ok := q.repository.(LinkCheckBacklogCounter); ok {
+		observation, err := counter.CountDueLinkChecks(ctx, now)
+		if err != nil {
+			if ctx.Err() == nil {
+				q.report(fmt.Errorf("count due link checks: %w", err))
+			}
+		} else {
+			q.ObserveBacklog(observation.DueCount, now, observation.PolicyRevision)
+		}
+	}
+	candidates, err := q.repository.DueLinkChecks(ctx, q.config.BatchSize, now)
 	if err != nil {
 		if ctx.Err() == nil {
 			q.report(fmt.Errorf("list due link checks: %w", err))
@@ -204,6 +291,9 @@ func (q *LinkCheckQueue) process(parent context.Context, candidate LinkCheckCand
 	defer func() {
 		q.mu.Lock()
 		delete(q.queued, candidate.ResourceID)
+		if q.active > 0 {
+			q.active--
+		}
 		q.mu.Unlock()
 	}()
 
@@ -220,16 +310,173 @@ func (q *LinkCheckQueue) process(parent context.Context, candidate LinkCheckCand
 		status = DetectionUnknown
 	}
 
+	checkedAt := q.config.Now().UTC()
 	result := LinkCheckResult{
 		ResourceID: candidate.ResourceID,
 		Status:     status,
-		CheckedAt:  q.config.Now().UTC(),
+		CheckedAt:  checkedAt,
 	}
 	if checkErr != nil {
 		result.Error = checkErr.Error()
 	}
-	if err := q.repository.CompleteLinkCheck(parent, result); err != nil {
-		q.report(fmt.Errorf("complete link check for resource %d: %w", candidate.ResourceID, err))
+	completeErr := q.repository.CompleteLinkCheck(parent, result)
+	q.recordCompletion(completeErr == nil, checkErr != nil || completeErr != nil)
+	if completeErr != nil {
+		q.report(fmt.Errorf("complete link check for resource %d: %w", candidate.ResourceID, completeErr))
+	}
+}
+
+func (q *LinkCheckQueue) ObserveBacklog(dueCount int64, at time.Time, policyRevision string) {
+	if q == nil {
+		return
+	}
+	if dueCount < 0 {
+		dueCount = 0
+	}
+	if at.IsZero() {
+		at = q.config.Now()
+	}
+	at = at.UTC()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	last := len(q.backlogSamples) - 1
+	if last >= 0 {
+		if at.Before(q.backlogSamples[last].at) {
+			return
+		}
+		if policyRevision != q.backlogSamples[last].policyRevision {
+			q.backlogSamples = nil
+			last = -1
+		}
+	}
+	if last >= 0 {
+		if at.Equal(q.backlogSamples[last].at) {
+			q.backlogSamples[last].dueCount = dueCount
+			q.pruneBacklogSamplesLocked(at)
+			return
+		}
+	}
+	q.backlogSamples = append(q.backlogSamples, linkCheckBacklogSample{
+		at: at, dueCount: dueCount, policyRevision: policyRevision,
+	})
+	q.pruneBacklogSamplesLocked(at)
+}
+
+func (q *LinkCheckQueue) Snapshot() LinkCheckQueueSnapshot {
+	if q == nil {
+		return LinkCheckQueueSnapshot{ETAState: LinkCheckETAStopped, MetricsWindow: linkCheckMetricsWindow}
+	}
+	now := q.config.Now().UTC()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.pruneCompletionMetricsLocked(now)
+	q.pruneBacklogSamplesLocked(now)
+
+	snapshot := LinkCheckQueueSnapshot{
+		Started:       q.started,
+		Workers:       q.config.Workers,
+		Queued:        len(q.queued) - q.active,
+		Active:        q.active,
+		ETAState:      LinkCheckETACalculating,
+		MetricsWindow: linkCheckMetricsWindow,
+	}
+	if snapshot.Queued < 0 {
+		snapshot.Queued = 0
+	}
+	for _, metric := range q.completionMetrics {
+		if metric.completed {
+			snapshot.CompletedLastFiveMinutes++
+		}
+		if metric.failed {
+			snapshot.FailedLastFiveMinutes++
+		}
+	}
+	metricsStart := now.Add(-linkCheckMetricsWindow)
+	if !q.startedAt.IsZero() && q.startedAt.After(metricsStart) {
+		metricsStart = q.startedAt
+	}
+	metricsElapsed := now.Sub(metricsStart)
+	if metricsElapsed < 0 {
+		metricsElapsed = 0
+	}
+	snapshot.MetricsSampleWindow = metricsElapsed
+	if metricsElapsed >= linkCheckETAMinimumWindow {
+		snapshot.ThroughputPerMinute = float64(snapshot.CompletedLastFiveMinutes) / metricsElapsed.Minutes()
+	}
+
+	if !snapshot.Started {
+		snapshot.ETAState = LinkCheckETAStopped
+	}
+	if len(q.backlogSamples) == 0 {
+		return snapshot
+	}
+	oldest := q.backlogSamples[0]
+	latest := q.backlogSamples[len(q.backlogSamples)-1]
+	snapshot.DueCountKnown = true
+	snapshot.DueCount = latest.dueCount
+	snapshot.BacklogUpdatedAt = latest.at
+	snapshot.BacklogSampleWindow = latest.at.Sub(oldest.at)
+	if snapshot.BacklogSampleWindow < 0 {
+		snapshot.BacklogSampleWindow = 0
+	}
+	if !snapshot.Started {
+		return snapshot
+	}
+	if latest.dueCount == 0 {
+		zero := int64(0)
+		snapshot.ETASeconds = &zero
+		snapshot.ETAState = LinkCheckETAIdle
+		return snapshot
+	}
+	if snapshot.BacklogSampleWindow < linkCheckETAMinimumWindow {
+		return snapshot
+	}
+	drained := oldest.dueCount - latest.dueCount
+	if drained <= 0 {
+		snapshot.ETAState = LinkCheckETABacklogNotDecreasing
+		return snapshot
+	}
+	rate := float64(drained) / snapshot.BacklogSampleWindow.Minutes()
+	if rate <= 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
+		snapshot.ETAState = LinkCheckETABacklogNotDecreasing
+		return snapshot
+	}
+	etaSeconds := int64(math.Ceil(float64(latest.dueCount) / rate * 60))
+	snapshot.NetDrainPerMinute = &rate
+	snapshot.ETASeconds = &etaSeconds
+	snapshot.ETAState = LinkCheckETAAvailable
+	return snapshot
+}
+
+func (q *LinkCheckQueue) recordCompletion(completed, failed bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	at := q.config.Now().UTC()
+	q.completionMetrics = append(q.completionMetrics, linkCheckCompletionMetric{
+		at: at, completed: completed, failed: failed,
+	})
+	q.pruneCompletionMetricsLocked(at)
+}
+
+func (q *LinkCheckQueue) pruneCompletionMetricsLocked(at time.Time) {
+	cutoff := at.Add(-linkCheckMetricsWindow)
+	kept := q.completionMetrics[:0]
+	for _, metric := range q.completionMetrics {
+		if !metric.at.Before(cutoff) {
+			kept = append(kept, metric)
+		}
+	}
+	q.completionMetrics = kept
+}
+
+func (q *LinkCheckQueue) pruneBacklogSamplesLocked(at time.Time) {
+	cutoff := at.Add(-linkCheckMetricsWindow)
+	first := 0
+	for first < len(q.backlogSamples) && q.backlogSamples[first].at.Before(cutoff) {
+		first++
+	}
+	if first > 0 {
+		q.backlogSamples = append([]linkCheckBacklogSample(nil), q.backlogSamples[first:]...)
 	}
 }
 

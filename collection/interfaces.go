@@ -91,3 +91,14 @@ type LinkCheckRepository interface {
 	CompleteLinkCheck(context.Context, LinkCheckResult) error
 	DueLinkChecks(context.Context, int, time.Time) ([]LinkCheckCandidate, error)
 }
+
+// LinkCheckBacklogCounter is optional. Repositories that implement it let the
+// queue sample the exact due backlog even when no administrator is watching.
+type LinkCheckBacklogObservation struct {
+	DueCount       int64
+	PolicyRevision string
+}
+
+type LinkCheckBacklogCounter interface {
+	CountDueLinkChecks(context.Context, time.Time) (LinkCheckBacklogObservation, error)
+}

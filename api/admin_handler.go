@@ -20,12 +20,15 @@ import (
 )
 
 type AdminHandler struct {
-	store          *storage.Store
-	runner         *collection.Runner
-	sources        *sourceconfig.Service
-	credentials    *credential.Service
-	keywordSources *keywordsync.Service
-	overviewCache  *adminOverviewCache
+	store                *storage.Store
+	runner               *collection.Runner
+	linkChecks           linkCheckRuntime
+	sources              *sourceconfig.Service
+	credentials          *credential.Service
+	keywordSources       *keywordsync.Service
+	overviewCache        *adminOverviewCache
+	linkCheckStatusCache *adminLinkCheckStatusCache
+	now                  func() time.Time
 }
 
 type adminOverviewResponse struct {
@@ -41,7 +44,10 @@ func NewAdminHandler(store *storage.Store, runner *collection.Runner, sources ..
 	if len(sources) > 0 {
 		runtime = sources[0]
 	}
-	handler := &AdminHandler{store: store, runner: runner, sources: runtime}
+	handler := &AdminHandler{
+		store: store, runner: runner, sources: runtime, now: time.Now,
+		linkCheckStatusCache: &adminLinkCheckStatusCache{},
+	}
 	if store != nil {
 		handler.overviewCache = newAdminOverviewCache(store)
 	}
@@ -57,6 +63,7 @@ func (h *AdminHandler) Register(group *gin.RouterGroup) {
 	group.GET("/resources/:id", h.getResource)
 	group.GET("/resources/:id/sources", h.listResourceSources)
 	group.GET("/resources/:id/keywords", h.listResourceKeywords)
+	group.GET("/link-check-status", h.getLinkCheckStatus)
 	group.GET("/link-check-policy", h.getLinkCheckPolicy)
 	group.PUT("/link-check-policy", h.updateLinkCheckPolicy)
 	group.GET("/keywords", h.listKeywords)

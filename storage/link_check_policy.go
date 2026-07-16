@@ -33,6 +33,10 @@ type LinkCheckPolicy struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
+func (p LinkCheckPolicy) Revision() string {
+	return fmt.Sprintf("%t|%d|%s", p.Enabled, p.IntervalSeconds, strings.Join(p.Statuses, ","))
+}
+
 type UpdateLinkCheckPolicyInput struct {
 	Enabled         bool     `json:"enabled"`
 	Statuses        []string `json:"statuses"`

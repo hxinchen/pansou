@@ -116,6 +116,20 @@ func TestPostgresListResourcesDueForCheck(t *testing.T) {
 	policy := LinkCheckPolicy{
 		Enabled: true, Statuses: []string{CheckUnknown, CheckValid}, IntervalSeconds: DefaultLinkCheckIntervalSeconds,
 	}
+	dueCount, err := store.CountResourcesDueForCheck(ctx, policy, at)
+	if err != nil {
+		t.Fatalf("CountResourcesDueForCheck: %v", err)
+	}
+	if dueCount != 6 {
+		t.Fatalf("due count = %d, want 6", dueCount)
+	}
+	limited, err := store.ListResourcesDueForCheck(ctx, policy, 2, at)
+	if err != nil {
+		t.Fatalf("ListResourcesDueForCheck(limit=2): %v", err)
+	}
+	if len(limited) != 2 || dueCount != 6 {
+		t.Fatalf("limited due resources = %d, exact count = %d; want 2 and 6", len(limited), dueCount)
+	}
 	due, err := store.ListResourcesDueForCheck(ctx, policy, 500, at)
 	if err != nil {
 		t.Fatalf("ListResourcesDueForCheck: %v", err)
@@ -142,6 +156,13 @@ func TestPostgresListResourcesDueForCheck(t *testing.T) {
 
 	disabled := LinkCheckPolicy{
 		Enabled: false, Statuses: []string{CheckValid, CheckUnknown}, IntervalSeconds: DefaultLinkCheckIntervalSeconds,
+	}
+	disabledCount, err := store.CountResourcesDueForCheck(ctx, disabled, at)
+	if err != nil {
+		t.Fatalf("CountResourcesDueForCheck(disabled): %v", err)
+	}
+	if disabledCount != 2 {
+		t.Fatalf("disabled due count = %d, want 2", disabledCount)
 	}
 	due, err = store.ListResourcesDueForCheck(ctx, disabled, 500, at)
 	if err != nil {

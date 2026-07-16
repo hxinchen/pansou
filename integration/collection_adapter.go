@@ -212,6 +212,21 @@ func (r *CollectionRepository) DueLinkChecks(ctx context.Context, limit int, at 
 	return toLinkCheckCandidates(resources), nil
 }
 
+func (r *CollectionRepository) CountDueLinkChecks(ctx context.Context, at time.Time) (collection.LinkCheckBacklogObservation, error) {
+	if r == nil || r.Store == nil {
+		return collection.LinkCheckBacklogObservation{}, errors.New("resource library is disabled")
+	}
+	policy, err := r.Store.GetLinkCheckPolicy(ctx)
+	if err != nil {
+		return collection.LinkCheckBacklogObservation{}, err
+	}
+	count, err := r.Store.CountResourcesDueForCheck(ctx, policy, at)
+	if err != nil {
+		return collection.LinkCheckBacklogObservation{}, err
+	}
+	return collection.LinkCheckBacklogObservation{DueCount: count, PolicyRevision: policy.Revision()}, nil
+}
+
 func toLinkCheckCandidates(resources []storage.Resource) []collection.LinkCheckCandidate {
 	result := make([]collection.LinkCheckCandidate, 0, len(resources))
 	for _, resource := range resources {

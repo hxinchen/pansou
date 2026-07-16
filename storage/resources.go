@@ -933,6 +933,44 @@ func (s *Store) CompleteResourceCheck(ctx context.Context, id int64, status stri
 	return nil
 }
 
+const resourcesDueForCheckWhere = `(check_status='pending' AND candidate_check_status IS NULL)
+	OR (check_status='pending'
+		AND candidate_check_status IS NOT NULL
+		AND candidate_checked_at <= $3)
+	OR ($1::boolean
+		AND check_status=ANY($2::text[])
+		AND (
+			(candidate_check_status IS NOT NULL AND candidate_checked_at <= $3)
+			OR (candidate_check_status IS NULL AND (last_checked_at IS NULL OR last_checked_at <= $4))
+		))`
+
+func (s *Store) linkCheckDueParameters(policy LinkCheckPolicy, at time.Time) (LinkCheckPolicy, time.Time, time.Time, error) {
+	normalizedPolicy, err := normalizeLinkCheckPolicy(policy.Enabled, policy.Statuses, policy.IntervalSeconds)
+	if err != nil {
+		return LinkCheckPolicy{}, time.Time{}, time.Time{}, err
+	}
+	if at.IsZero() {
+		at = s.now()
+	}
+	return normalizedPolicy, at.Add(-time.Hour), at.Add(-time.Duration(normalizedPolicy.IntervalSeconds) * time.Second), nil
+}
+
+func (s *Store) CountResourcesDueForCheck(ctx context.Context, policy LinkCheckPolicy, at time.Time) (int64, error) {
+	if s == nil || s.pool == nil {
+		return 0, fmt.Errorf("storage is disabled")
+	}
+	normalizedPolicy, confirmationDueBefore, regularDueBefore, err := s.linkCheckDueParameters(policy, at)
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM resources WHERE `+resourcesDueForCheckWhere,
+		normalizedPolicy.Enabled, normalizedPolicy.Statuses, confirmationDueBefore, regularDueBefore).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count resources due for check: %w", err)
+	}
+	return count, nil
+}
+
 func (s *Store) ListResourcesDueForCheck(ctx context.Context, policy LinkCheckPolicy, limit int, at time.Time) ([]Resource, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("storage is disabled")
@@ -943,26 +981,12 @@ func (s *Store) ListResourcesDueForCheck(ctx context.Context, policy LinkCheckPo
 	if limit > 1000 {
 		limit = 1000
 	}
-	normalizedPolicy, err := normalizeLinkCheckPolicy(policy.Enabled, policy.Statuses, policy.IntervalSeconds)
+	normalizedPolicy, confirmationDueBefore, regularDueBefore, err := s.linkCheckDueParameters(policy, at)
 	if err != nil {
 		return nil, err
 	}
-	if at.IsZero() {
-		at = s.now()
-	}
-	confirmationDueBefore := at.Add(-time.Hour)
-	regularDueBefore := at.Add(-time.Duration(normalizedPolicy.IntervalSeconds) * time.Second)
 	rows, err := s.pool.Query(ctx, "SELECT "+resourceColumns+` FROM resources
-		WHERE (check_status='pending' AND candidate_check_status IS NULL)
-			OR (check_status='pending'
-				AND candidate_check_status IS NOT NULL
-				AND candidate_checked_at <= $3)
-			OR ($1::boolean
-				AND check_status=ANY($2::text[])
-				AND (
-					(candidate_check_status IS NOT NULL AND candidate_checked_at <= $3)
-					OR (candidate_check_status IS NULL AND (last_checked_at IS NULL OR last_checked_at <= $4))
-				))
+		WHERE `+resourcesDueForCheckWhere+`
 		ORDER BY
 			CASE
 				WHEN check_status='pending' AND candidate_check_status IS NULL THEN 0

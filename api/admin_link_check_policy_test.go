@@ -44,6 +44,7 @@ func TestAdminHandlerRegistersLinkCheckPolicyRoutes(t *testing.T) {
 		routes[route.Method+" "+route.Path] = true
 	}
 	for _, route := range []string{
+		"GET /api/admin/link-check-status",
 		"GET /api/admin/link-check-policy",
 		"PUT /api/admin/link-check-policy",
 	} {

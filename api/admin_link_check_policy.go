@@ -45,5 +45,6 @@ func (h *AdminHandler) updateLinkCheckPolicy(c *gin.Context) {
 		respondAdminError(c, err)
 		return
 	}
+	h.linkCheckStatusCache.invalidate()
 	c.JSON(http.StatusOK, model.NewSuccessResponse(policy))
 }

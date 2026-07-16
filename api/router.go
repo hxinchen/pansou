@@ -22,6 +22,7 @@ import (
 type RouterDependencies struct {
 	Store              *storage.Store
 	Runner             *collection.Runner
+	LinkChecks         *collection.LinkCheckQueue
 	SourceRuntime      *sourceconfig.Service
 	Credentials        *credential.Service
 	CredentialAdapters map[string]any
@@ -149,6 +150,7 @@ func SetupRouter(searchService service.SearchProvider, options ...RouterDependen
 	adminAPI := api.Group("/admin")
 	adminAPI.Use(RequireAdminAuth())
 	adminHandler := NewAdminHandler(dependencies.Store, dependencies.Runner, dependencies.SourceRuntime)
+	adminHandler.linkChecks = dependencies.LinkChecks
 	adminHandler.credentials = dependencies.Credentials
 	adminHandler.keywordSources = dependencies.KeywordSources
 	if adminHandler.overviewCache != nil {

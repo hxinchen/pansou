@@ -6,6 +6,7 @@
     search: '/api/search',
     trends: '/api/admin/trends',
     resources: '/api/admin/resources',
+    linkCheckStatus: '/api/admin/link-check-status',
     linkCheckPolicy: '/api/admin/link-check-policy',
     keywords: '/api/admin/keywords',
     keywordAPISources: '/api/admin/keyword-api-sources',
@@ -57,6 +58,7 @@
     overview: null,
     overviewTrends: [],
     overviewRecentSort: { sortBy: '', sortDir: '' },
+    linkCheckStatus: { data: null, timer: null, controller: null },
     linkCheckPolicy: { data: null, controller: null, loading: false },
     sourceContributions: {
       scope: 'plugin', items: [], page: 1, pageSize: 20, total: 0, pages: 1,
@@ -121,6 +123,9 @@
     interval_seconds: 7 * 24 * 60 * 60,
     updated_at: ''
   };
+  var LINK_CHECK_STATUS_ACTIVE_POLL_MS = 10000;
+  var LINK_CHECK_STATUS_IDLE_POLL_MS = 30000;
+  var LINK_CHECK_STATUS_TIMEOUT_MS = 8000;
 
   var diskLabels = {
     baidu: '百度',
@@ -634,6 +639,7 @@
 
   function showLogin(message) {
     stopOverviewRefresh(true);
+    stopLinkCheckStatusPolling(true);
     byId('app-shell').hidden = true;
     byId('login-view').hidden = false;
     var error = byId('login-error');
@@ -756,6 +762,7 @@
     if (!force && state.view === view && state.loaded[view]) return;
     var previousView = state.view;
     if (previousView === 'overview' && view !== 'overview') stopOverviewRefresh(true);
+    if (previousView === 'resources' && view !== 'resources') stopLinkCheckStatusPolling(true);
     if (previousView === 'run-detail' && view !== 'run-detail') cancelRunDetailRequests();
     if (previousView !== view && previousView !== 'run-detail') cancelViewRequests(previousView);
     state.view = view;
@@ -783,7 +790,10 @@
 
   function loadView(view, force) {
     if (view === 'overview') return loadOverview(force);
-    if (view === 'resources') return loadResources(force);
+    if (view === 'resources') {
+      loadLinkCheckStatus({ force: Boolean(force), silent: Boolean(state.linkCheckStatus.data) });
+      return loadResources(force);
+    }
     if (view === 'keywords') {
       if (state.keywords.tab === 'api') return loadKeywordSources(force);
       if (state.keywords.tab === 'history') return loadKeywordSyncRuns({ force: force });
@@ -1645,6 +1655,185 @@
     } finally { finishRequestController('resources', controller); }
   }
 
+  function normalizeLinkCheckStatus(data) {
+    data = data || {};
+    var etaSeconds = pick(data, ['eta_seconds'], null);
+    etaSeconds = etaSeconds === null || etaSeconds === undefined ? null : Number(etaSeconds);
+    if (etaSeconds !== null && (!Number.isFinite(etaSeconds) || etaSeconds < 0)) etaSeconds = null;
+    var etaState = String(pick(data, ['eta_state'], 'calculating') || 'calculating').toLowerCase();
+    if (['idle', 'calculating', 'available', 'backlog_not_decreasing', 'stopped'].indexOf(etaState) < 0) etaState = 'calculating';
+    return {
+      queue_started: boolValue(pick(data, ['queue_started'], false), false),
+      due_count: Math.max(0, Math.trunc(numberValue(pick(data, ['due_count'], 0), 0))),
+      queued_count: Math.max(0, Math.trunc(numberValue(pick(data, ['queued_count'], 0), 0))),
+      active_count: Math.max(0, Math.trunc(numberValue(pick(data, ['active_count'], 0), 0))),
+      worker_count: Math.max(0, Math.trunc(numberValue(pick(data, ['worker_count'], 0), 0))),
+      completed_last_5m: Math.max(0, Math.trunc(numberValue(pick(data, ['completed_last_5m'], 0), 0))),
+      failed_last_5m: Math.max(0, Math.trunc(numberValue(pick(data, ['failed_last_5m'], 0), 0))),
+      throughput_per_minute: Math.max(0, numberValue(pick(data, ['throughput_per_minute'], 0), 0)),
+      net_drain_per_minute: Math.max(0, numberValue(pick(data, ['net_drain_per_minute'], 0), 0)),
+      eta_seconds: etaSeconds,
+      eta_state: etaState,
+      metrics_sample_window_seconds: Math.max(0, Math.trunc(numberValue(pick(data, ['metrics_sample_window_seconds'], 0), 0))),
+      backlog_sample_window_seconds: Math.max(0, Math.trunc(numberValue(pick(data, ['backlog_sample_window_seconds'], 0), 0))),
+      observed_at: pick(data, ['observed_at'], null)
+    };
+  }
+
+  function formatLinkCheckRate(value) {
+    return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 1 }).format(Math.max(0, numberValue(value, 0))) + ' / 分';
+  }
+
+  function formatLinkCheckETA(seconds) {
+    seconds = Math.max(0, numberValue(seconds, 0));
+    if (seconds < 60) return '不到 1 分钟';
+    var minutes = Math.ceil(seconds / 60);
+    if (minutes < 60) return minutes + ' 分钟';
+    var hours = Math.floor(minutes / 60);
+    var remaining = Math.ceil((minutes % 60) / 5) * 5;
+    if (remaining >= 60) {
+      hours += 1;
+      remaining = 0;
+    }
+    return hours + ' 小时' + (remaining ? ' ' + remaining + ' 分钟' : '');
+  }
+
+  function setLinkCheckStatusText(id, value) {
+    var element = byId(id);
+    if (element && element.textContent !== value) element.textContent = value;
+  }
+
+  function showLinkCheckStatusAlert(message) {
+    var element = byId('link-check-status-error');
+    if (!message && element.hidden) return;
+    if (message && !element.hidden && element.textContent === message) return;
+    showAlert('link-check-status-error', message || '');
+  }
+
+  function renderLinkCheckStatus(data, errorMessage) {
+    var panel = byId('link-check-status-panel');
+    if (!data) {
+      panel.dataset.etaState = 'error';
+      setLinkCheckStatusText('link-check-runtime-title', '检测状态读取失败');
+      setLinkCheckStatusText('link-check-status-detail', errorMessage || '请稍后重试。');
+      setLinkCheckStatusText('link-check-status-updated', '尚无状态数据');
+      ['link-check-status-due', 'link-check-status-active', 'link-check-status-throughput', 'link-check-status-failed'].forEach(function (id) {
+        byId(id).textContent = '—';
+      });
+      byId('link-check-status-queued').textContent = '队列中 —';
+      byId('link-check-status-completed').textContent = '完成 —';
+      showLinkCheckStatusAlert(errorMessage || '检测状态加载失败');
+      return;
+    }
+
+    panel.dataset.etaState = data.queue_started ? data.eta_state : 'stopped';
+    var titleText;
+    var detailText;
+    if (!data.queue_started) {
+      titleText = '检测队列未运行';
+      detailText = '待处理资源仍会保留，队列恢复后继续检测。';
+    } else if (data.due_count === 0 || data.eta_state === 'idle') {
+      titleText = '当前积压已清空';
+      detailText = '检测器正在持续监听新发现资源和后续到期复检。';
+    } else if (data.eta_state === 'available' && data.eta_seconds !== null) {
+      titleText = '预计 ' + formatLinkCheckETA(data.eta_seconds) + ' 清空';
+      detailText = '按最近 ' + durationFrom({ duration_seconds: data.backlog_sample_window_seconds }) + ' 的净消化速度估算，不包含未来新增。';
+    } else if (data.eta_state === 'backlog_not_decreasing') {
+      titleText = '当前积压未下降';
+      detailText = '最近 ' + durationFrom({ duration_seconds: data.backlog_sample_window_seconds }) + ' 内新增量抵消了处理量，暂不显示清空时间。';
+    } else {
+      titleText = '正在计算预计清空时间';
+      detailText = '至少需要 1 分钟的积压变化样本；检测工作正在继续。';
+    }
+    setLinkCheckStatusText('link-check-runtime-title', titleText);
+    setLinkCheckStatusText('link-check-status-detail', detailText);
+
+    byId('link-check-status-due').textContent = formatNumber(data.due_count);
+    byId('link-check-status-active').textContent = formatNumber(data.active_count) + ' / ' + formatNumber(data.worker_count);
+    byId('link-check-status-queued').textContent = '队列中 ' + formatNumber(data.queued_count);
+    byId('link-check-status-throughput').textContent = data.metrics_sample_window_seconds >= 60
+      ? formatLinkCheckRate(data.throughput_per_minute)
+      : '计算中';
+    byId('link-check-status-completed').textContent = '完成 ' + formatNumber(data.completed_last_5m);
+    byId('link-check-status-failed').textContent = formatNumber(data.failed_last_5m);
+    setLinkCheckStatusText('link-check-status-updated', data.observed_at ? '观测于 ' + formatDate(data.observed_at, true) : '刚刚更新');
+    showLinkCheckStatusAlert(errorMessage || '');
+  }
+
+  function setLinkCheckStatusLoading(loading) {
+    var button = byId('link-check-status-refresh');
+    if (!button) return;
+    button.disabled = loading;
+    var iconElement = button.querySelector('svg');
+    if (iconElement) iconElement.classList.toggle('spin', loading);
+  }
+
+  function stopLinkCheckStatusPolling(abortRequest) {
+    if (state.linkCheckStatus.timer) {
+      window.clearTimeout(state.linkCheckStatus.timer);
+      state.linkCheckStatus.timer = null;
+    }
+    if (abortRequest && state.linkCheckStatus.controller) {
+      state.linkCheckStatus.controller.abort();
+      state.linkCheckStatus.controller = null;
+      setLinkCheckStatusLoading(false);
+    }
+  }
+
+  function scheduleLinkCheckStatusPolling() {
+    if (state.linkCheckStatus.timer) window.clearTimeout(state.linkCheckStatus.timer);
+    state.linkCheckStatus.timer = null;
+    if (!state.token || state.view !== 'resources' || document.visibilityState !== 'visible') return;
+    var data = state.linkCheckStatus.data;
+    var active = data && (data.due_count > 0 || data.queued_count > 0 || data.active_count > 0);
+    state.linkCheckStatus.timer = window.setTimeout(function () {
+      state.linkCheckStatus.timer = null;
+      loadLinkCheckStatus({ silent: true });
+    }, active ? LINK_CHECK_STATUS_ACTIVE_POLL_MS : LINK_CHECK_STATUS_IDLE_POLL_MS);
+  }
+
+  async function loadLinkCheckStatus(options) {
+    options = options || {};
+    if (!state.token || state.view !== 'resources') return;
+    if (state.linkCheckStatus.controller) {
+      if (!options.force) return;
+      state.linkCheckStatus.controller.abort();
+    }
+    stopLinkCheckStatusPolling(false);
+    var controller = new AbortController();
+    var timedOut = false;
+    var timeout = window.setTimeout(function () {
+      timedOut = true;
+      controller.abort();
+    }, LINK_CHECK_STATUS_TIMEOUT_MS);
+    state.linkCheckStatus.controller = controller;
+    setLinkCheckStatusLoading(true);
+    if (!options.silent && !state.linkCheckStatus.data) {
+      byId('link-check-status-panel').dataset.etaState = 'calculating';
+      setLinkCheckStatusText('link-check-runtime-title', '正在读取检测状态');
+      setLinkCheckStatusText('link-check-status-detail', '预计清空时间会根据最近 5 分钟的净消化速度计算。');
+      showLinkCheckStatusAlert('');
+    }
+    try {
+      var response = await apiRequest(API.linkCheckStatus, { signal: controller.signal });
+      if (state.linkCheckStatus.controller !== controller || state.view !== 'resources') return;
+      var data = normalizeLinkCheckStatus(response);
+      state.linkCheckStatus.data = data;
+      renderLinkCheckStatus(data, '');
+    } catch (error) {
+      if (error.name === 'AbortError' && !timedOut) return;
+      if (state.linkCheckStatus.controller !== controller) return;
+      renderLinkCheckStatus(state.linkCheckStatus.data, timedOut ? '检测状态请求超时，正在保留上次数据。' : (error.message || '检测状态更新失败，正在保留上次数据。'));
+    } finally {
+      window.clearTimeout(timeout);
+      if (state.linkCheckStatus.controller === controller) {
+        state.linkCheckStatus.controller = null;
+        setLinkCheckStatusLoading(false);
+        scheduleLinkCheckStatusPolling();
+      }
+    }
+  }
+
   function normalizeLinkCheckPolicy(data) {
     data = pick(data, ['policy'], data || {});
     var rawStatuses = pick(data, ['statuses'], LINK_CHECK_POLICY_DEFAULT.statuses);
@@ -1816,6 +2005,7 @@
       state.linkCheckPolicy.data = policy;
       populateLinkCheckPolicyForm(policy);
       dialog.close();
+      if (state.view === 'resources') loadLinkCheckStatus({ force: true, silent: true });
       toast('检测策略已保存，将在 1 分钟内生效', 'success');
     } catch (error) {
       if (error.name === 'AbortError') return;
@@ -5430,6 +5620,7 @@
     else if (action === 'logout') logout();
     else if (action === 'refresh-view') refreshCurrentView();
     else if (action === 'close-dialog') actionElement.closest('dialog').close();
+    else if (action === 'refresh-link-check-status') loadLinkCheckStatus({ force: true });
     else if (action === 'open-link-check-policy') openLinkCheckPolicy();
     else if (action === 'retry-link-check-policy') openLinkCheckPolicy();
     else if (action === 'reset-resource-filters') {
@@ -5665,11 +5856,13 @@
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState !== 'visible') {
         stopOverviewRefresh(true);
+        stopLinkCheckStatusPolling(true);
         stopKeywordSourcePolling();
         stopKeywordSyncDetailPolling();
         return;
       }
       if (state.view === 'overview') loadOverview(true, { background: true });
+      if (state.view === 'resources') loadLinkCheckStatus({ force: true, silent: Boolean(state.linkCheckStatus.data) });
       if (document.visibilityState === 'visible' && state.view === 'runs') loadRuns({ silent: true, force: true });
       if (document.visibilityState === 'visible' && state.view === 'keywords' && state.keywords.tab === 'api' && keywordSourcesHaveActiveRun()) loadKeywordSources(true, { silent: true });
       if (document.visibilityState === 'visible' && state.view === 'keywords' && state.keywords.tab === 'history' && keywordSyncHistoryHasActiveRun()) loadKeywordSyncRuns({ force: true, silent: true });

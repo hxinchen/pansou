@@ -24,6 +24,7 @@ var (
 	ErrEmptyKeyword      = errors.New("keyword is empty")
 	ErrQueueFull         = errors.New("link check queue is full")
 	ErrQueueNotStarted   = errors.New("link check queue is not started")
+	ErrQueueStopping     = errors.New("link check queue is stopping")
 )
 
 type Trigger string

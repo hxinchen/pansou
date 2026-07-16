@@ -9,14 +9,15 @@ import (
 )
 
 type fakeLinkCheckRepository struct {
-	mu       sync.Mutex
-	results  []LinkCheckResult
-	due      []LinkCheckCandidate
-	dueCalls int
-	dueAfter int
-	dueOnce  bool
-	dueErr   error
-	done     chan struct{}
+	mu          sync.Mutex
+	results     []LinkCheckResult
+	completeErr error
+	due         []LinkCheckCandidate
+	dueCalls    int
+	dueAfter    int
+	dueOnce     bool
+	dueErr      error
+	done        chan struct{}
 }
 
 func (f *fakeLinkCheckRepository) CompleteLinkCheck(_ context.Context, result LinkCheckResult) error {
@@ -27,7 +28,38 @@ func (f *fakeLinkCheckRepository) CompleteLinkCheck(_ context.Context, result Li
 	case f.done <- struct{}{}:
 	default:
 	}
-	return nil
+	return f.completeErr
+}
+
+type linkCheckTestClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+type fakeLinkCheckBacklogRepository struct {
+	*fakeLinkCheckRepository
+	count int64
+	done  chan struct{}
+}
+
+func (f *fakeLinkCheckBacklogRepository) CountDueLinkChecks(_ context.Context, _ time.Time) (LinkCheckBacklogObservation, error) {
+	select {
+	case f.done <- struct{}{}:
+	default:
+	}
+	return LinkCheckBacklogObservation{DueCount: f.count, PolicyRevision: "policy-v1"}, nil
+}
+
+func (c *linkCheckTestClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *linkCheckTestClock) Advance(duration time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(duration)
+	c.mu.Unlock()
 }
 
 func (f *fakeLinkCheckRepository) DueLinkChecks(_ context.Context, limit int, _ time.Time) ([]LinkCheckCandidate, error) {
@@ -129,6 +161,10 @@ func TestLinkCheckQueueStoresUnknownOnCheckerErrorAndDeduplicates(t *testing.T) 
 	if err := queue.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
+	snapshot := queue.Snapshot()
+	if snapshot.CompletedLastFiveMinutes != 1 || snapshot.FailedLastFiveMinutes != 1 {
+		t.Fatalf("queue metrics = completed %d failed %d, want 1 and 1", snapshot.CompletedLastFiveMinutes, snapshot.FailedLastFiveMinutes)
+	}
 
 	checksMu.Lock()
 	if checks != 1 {
@@ -174,6 +210,37 @@ func TestLinkCheckQueueDispatchesDueLinksImmediately(t *testing.T) {
 	defer repository.mu.Unlock()
 	if repository.dueCalls != 1 || len(repository.results) != 1 || repository.results[0].ResourceID != candidate.ResourceID {
 		t.Fatalf("dispatch calls=%d results=%+v", repository.dueCalls, repository.results)
+	}
+}
+
+func TestLinkCheckQueueSamplesBacklogDuringDispatch(t *testing.T) {
+	repository := &fakeLinkCheckBacklogRepository{
+		fakeLinkCheckRepository: &fakeLinkCheckRepository{done: make(chan struct{}, 1)},
+		count:                   42,
+		done:                    make(chan struct{}, 1),
+	}
+	config := DefaultLinkCheckQueueConfig()
+	config.Workers = 1
+	config.PollInterval = time.Hour
+	queue := NewLinkCheckQueue(repository, LinkCheckerFunc(func(context.Context, LinkCheckCandidate) (DetectionStatus, error) {
+		return DetectionValid, nil
+	}), config)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := queue.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-repository.done:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	snapshot := queue.Snapshot()
+	if !snapshot.DueCountKnown || snapshot.DueCount != 42 || snapshot.ETAState != LinkCheckETACalculating {
+		t.Fatalf("backlog snapshot = %+v", snapshot)
+	}
+	if err := queue.Stop(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -228,6 +295,229 @@ func TestLinkCheckQueueReturnsFullWithoutDroppingQueuedWork(t *testing.T) {
 	defer repository.mu.Unlock()
 	if len(repository.results) != 2 {
 		t.Fatalf("completed results = %d, want 2", len(repository.results))
+	}
+}
+
+func TestLinkCheckQueueSnapshotTracksQueuedActiveAndRecentMetrics(t *testing.T) {
+	clock := &linkCheckTestClock{now: time.Date(2026, 7, 17, 8, 0, 0, 0, time.UTC)}
+	repository := &fakeLinkCheckRepository{done: make(chan struct{}, 2)}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	config := DefaultLinkCheckQueueConfig()
+	config.Workers = 1
+	config.Buffer = 2
+	config.PollInterval = time.Hour
+	config.Now = clock.Now
+	queue := NewLinkCheckQueue(repository, LinkCheckerFunc(func(context.Context, LinkCheckCandidate) (DetectionStatus, error) {
+		once.Do(func() { close(entered) })
+		<-release
+		return DetectionValid, nil
+	}), config)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := queue.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	first := LinkCheckCandidate{ResourceID: 31, URL: "https://example.test/share/31"}
+	second := LinkCheckCandidate{ResourceID: 32, URL: "https://example.test/share/32"}
+	if err := queue.Enqueue(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if snapshot := queue.Snapshot(); snapshot.Active != 1 || snapshot.Queued != 0 || !snapshot.Started {
+		t.Fatalf("active snapshot = %+v", snapshot)
+	}
+	if err := queue.Enqueue(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Enqueue(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := queue.Snapshot(); snapshot.Active != 1 || snapshot.Queued != 1 {
+		t.Fatalf("queued snapshot = %+v", snapshot)
+	}
+	close(release)
+	for range 2 {
+		select {
+		case <-repository.done:
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	for {
+		snapshot := queue.Snapshot()
+		if snapshot.Active == 0 && snapshot.Queued == 0 {
+			if snapshot.CompletedLastFiveMinutes != 2 || snapshot.FailedLastFiveMinutes != 0 {
+				t.Fatalf("completed snapshot = %+v", snapshot)
+			}
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err := queue.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := queue.Snapshot(); snapshot.Started || snapshot.ETAState != LinkCheckETAStopped {
+		t.Fatalf("stopped snapshot = %+v", snapshot)
+	}
+}
+
+func TestLinkCheckQueueSnapshotExcludesFailedPersistenceFromThroughput(t *testing.T) {
+	clock := &linkCheckTestClock{now: time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)}
+	repository := &fakeLinkCheckRepository{completeErr: errors.New("write failed"), done: make(chan struct{}, 1)}
+	config := DefaultLinkCheckQueueConfig()
+	config.Workers = 1
+	config.PollInterval = time.Hour
+	config.Now = clock.Now
+	queue := NewLinkCheckQueue(repository, LinkCheckerFunc(func(context.Context, LinkCheckCandidate) (DetectionStatus, error) {
+		return DetectionValid, nil
+	}), config)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := queue.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Enqueue(ctx, LinkCheckCandidate{ResourceID: 41, URL: "https://example.test/share/41"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-repository.done:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if err := queue.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := queue.Snapshot()
+	if snapshot.CompletedLastFiveMinutes != 0 || snapshot.FailedLastFiveMinutes != 1 {
+		t.Fatalf("failed persistence snapshot = %+v", snapshot)
+	}
+	clock.Advance(linkCheckMetricsWindow + time.Second)
+	snapshot = queue.Snapshot()
+	if snapshot.CompletedLastFiveMinutes != 0 || snapshot.FailedLastFiveMinutes != 0 {
+		t.Fatalf("expired metrics snapshot = %+v", snapshot)
+	}
+}
+
+func TestLinkCheckQueueSnapshotPrunesOutOfOrderCompletionMetrics(t *testing.T) {
+	now := time.Date(2026, 7, 17, 9, 30, 0, 0, time.UTC)
+	config := DefaultLinkCheckQueueConfig()
+	config.Now = func() time.Time { return now }
+	queue := NewLinkCheckQueue(&fakeLinkCheckRepository{}, LinkCheckerFunc(func(context.Context, LinkCheckCandidate) (DetectionStatus, error) {
+		return DetectionValid, nil
+	}), config)
+	queue.mu.Lock()
+	queue.started = true
+	queue.startedAt = now.Add(-10 * time.Minute)
+	queue.completionMetrics = []linkCheckCompletionMetric{
+		{at: now.Add(-time.Minute), completed: true},
+		{at: now.Add(-6 * time.Minute), completed: true, failed: true},
+	}
+	queue.mu.Unlock()
+	snapshot := queue.Snapshot()
+	if snapshot.CompletedLastFiveMinutes != 1 || snapshot.FailedLastFiveMinutes != 0 {
+		t.Fatalf("out-of-order metrics snapshot = %+v", snapshot)
+	}
+}
+
+func TestLinkCheckQueueRejectsRestartWhileTimedOutStopIsFinishing(t *testing.T) {
+	repository := &fakeLinkCheckRepository{done: make(chan struct{}, 1)}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	config := DefaultLinkCheckQueueConfig()
+	config.Workers = 1
+	config.PollInterval = time.Hour
+	queue := NewLinkCheckQueue(repository, LinkCheckerFunc(func(context.Context, LinkCheckCandidate) (DetectionStatus, error) {
+		once.Do(func() { close(entered) })
+		<-release
+		return DetectionValid, nil
+	}), config)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := queue.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Enqueue(ctx, LinkCheckCandidate{ResourceID: 51, URL: "https://example.test/share/51"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	err := queue.Stop(stopCtx)
+	stopCancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timed stop error = %v, want deadline exceeded", err)
+	}
+	if err := queue.Start(ctx); !errors.Is(err, ErrQueueStopping) {
+		t.Fatalf("restart error = %v, want ErrQueueStopping", err)
+	}
+	close(release)
+	if err := queue.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Start(ctx); err != nil {
+		t.Fatalf("restart after stop: %v", err)
+	}
+	if err := queue.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLinkCheckQueueBacklogETAStates(t *testing.T) {
+	clock := &linkCheckTestClock{now: time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)}
+	repository := &fakeLinkCheckRepository{done: make(chan struct{}, 1)}
+	config := DefaultLinkCheckQueueConfig()
+	config.Workers = 1
+	config.PollInterval = time.Hour
+	config.Now = clock.Now
+	queue := NewLinkCheckQueue(repository, LinkCheckerFunc(func(context.Context, LinkCheckCandidate) (DetectionStatus, error) {
+		return DetectionValid, nil
+	}), config)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := queue.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	queue.ObserveBacklog(120, clock.Now(), "policy-v1")
+	if snapshot := queue.Snapshot(); snapshot.ETAState != LinkCheckETACalculating || snapshot.ETASeconds != nil {
+		t.Fatalf("calculating snapshot = %+v", snapshot)
+	}
+	clock.Advance(time.Minute)
+	queue.ObserveBacklog(100, clock.Now(), "policy-v1")
+	snapshot := queue.Snapshot()
+	if snapshot.ETAState != LinkCheckETAAvailable || snapshot.NetDrainPerMinute == nil || *snapshot.NetDrainPerMinute != 20 || snapshot.ETASeconds == nil || *snapshot.ETASeconds != 300 {
+		t.Fatalf("available ETA snapshot = %+v", snapshot)
+	}
+	clock.Advance(time.Minute)
+	queue.ObserveBacklog(10, clock.Now(), "policy-v2")
+	if snapshot := queue.Snapshot(); snapshot.ETAState != LinkCheckETACalculating || snapshot.BacklogSampleWindow != 0 {
+		t.Fatalf("policy reset snapshot = %+v", snapshot)
+	}
+	clock.Advance(time.Minute)
+	queue.ObserveBacklog(130, clock.Now(), "policy-v2")
+	if snapshot := queue.Snapshot(); snapshot.ETAState != LinkCheckETABacklogNotDecreasing || snapshot.ETASeconds != nil {
+		t.Fatalf("non-decreasing snapshot = %+v", snapshot)
+	}
+	clock.Advance(time.Minute)
+	queue.ObserveBacklog(0, clock.Now(), "policy-v2")
+	if snapshot := queue.Snapshot(); snapshot.ETAState != LinkCheckETAIdle || snapshot.ETASeconds == nil || *snapshot.ETASeconds != 0 {
+		t.Fatalf("idle snapshot = %+v", snapshot)
+	}
+	if err := queue.Stop(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 

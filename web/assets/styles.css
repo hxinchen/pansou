@@ -651,6 +651,148 @@ button {
   gap: 14px;
 }
 
+.panel.link-check-status-panel {
+  min-height: 0;
+  margin-bottom: 16px;
+  padding: 17px 19px;
+  display: grid;
+  gap: 16px;
+}
+
+.link-check-status-main {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 13px;
+}
+
+.link-check-status-icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.link-check-status-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.link-check-status-panel[data-eta-state="idle"] .link-check-status-icon,
+.link-check-status-panel[data-eta-state="available"] .link-check-status-icon {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.link-check-status-panel[data-eta-state="backlog_not_decreasing"] .link-check-status-icon {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.link-check-status-panel[data-eta-state="stopped"] .link-check-status-icon,
+.link-check-status-panel[data-eta-state="error"] .link-check-status-icon {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.link-check-status-copy {
+  min-width: 0;
+}
+
+.link-check-status-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.link-check-status-heading .panel-kicker {
+  margin: 0;
+}
+
+.link-check-status-updated {
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.link-check-status-title {
+  margin: 2px 0 0;
+  font-size: 19px;
+  line-height: 1.25;
+  font-weight: 720;
+}
+
+.link-check-status-detail {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.link-check-status-refresh svg.spin {
+  animation: spin 0.8s linear infinite;
+}
+
+.link-check-status-metrics {
+  margin: 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.link-check-status-metric {
+  min-width: 0;
+  padding: 0 15px;
+  border-left: 1px solid var(--line);
+}
+
+.link-check-status-metric:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.link-check-status-metric:last-child {
+  padding-right: 0;
+}
+
+.link-check-status-metric dt {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.link-check-status-metric dd {
+  margin: 2px 0 0;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1.35;
+  font-weight: 700;
+}
+
+.link-check-status-metric dd > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link-check-status-metric small {
+  display: block;
+  margin-top: 1px;
+  overflow: hidden;
+  color: var(--subtle);
+  font-family: var(--font-sans);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link-check-status-error {
+  margin: 0;
+}
+
 .date-chip svg {
   width: 15px;
 }
@@ -2347,6 +2489,21 @@ input[type="checkbox"] {
     padding: 15px;
   }
 
+  .panel.link-check-status-panel {
+    min-height: 0;
+    padding: 15px;
+  }
+
+  .link-check-status-metrics {
+    grid-template-columns: 1fr 1fr;
+    gap: 13px 0;
+  }
+
+  .link-check-status-metric:nth-child(3) {
+    padding-left: 0;
+    border-left: 0;
+  }
+
   .trend-panel {
     min-height: 330px;
   }
@@ -2467,6 +2624,36 @@ input[type="checkbox"] {
   .resource-heading-actions {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .link-check-status-main {
+    grid-template-columns: 36px minmax(0, 1fr) auto;
+    gap: 10px;
+  }
+
+  .link-check-status-icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .link-check-status-title {
+    font-size: 16px;
+  }
+
+  .link-check-status-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .link-check-status-metric,
+  .link-check-status-metric:nth-child(3) {
+    padding: 0 0 10px;
+    border-bottom: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .link-check-status-metric:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
   }
 }
 

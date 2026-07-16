@@ -314,7 +314,7 @@ func startServer() {
 
 	// 设置路由
 	router := api.SetupRouter(searchService, api.RouterDependencies{
-		Store: store, Runner: runner, SourceRuntime: sourceRuntime,
+		Store: store, Runner: runner, LinkChecks: linkChecks, SourceRuntime: sourceRuntime,
 		Credentials: credentialService, CredentialAdapters: credentialAdapterMap(pluginManager),
 		KeywordSources: keywordSourceSync,
 	})

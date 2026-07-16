@@ -261,6 +261,42 @@
             </div>
           </div>
 
+          <section id="link-check-status-panel" class="panel link-check-status-panel" aria-labelledby="link-check-runtime-title">
+            <div class="link-check-status-main">
+              <div class="link-check-status-icon" aria-hidden="true"><i data-lucide="activity"></i></div>
+              <div class="link-check-status-copy">
+                <div class="link-check-status-heading">
+                  <p class="panel-kicker">资源检测</p>
+                  <span id="link-check-status-updated" class="link-check-status-updated">正在读取</span>
+                </div>
+                <h2 id="link-check-runtime-title" class="link-check-status-title" aria-live="polite">正在读取检测状态</h2>
+                <p id="link-check-status-detail" class="link-check-status-detail">预计清空时间会根据最近 5 分钟的净消化速度计算。</p>
+              </div>
+              <button id="link-check-status-refresh" class="icon-button link-check-status-refresh" type="button" data-action="refresh-link-check-status" aria-label="刷新检测状态" title="刷新检测状态">
+                <i data-lucide="refresh-cw" aria-hidden="true"></i>
+              </button>
+            </div>
+            <dl class="link-check-status-metrics">
+              <div class="link-check-status-metric">
+                <dt>当前积压</dt>
+                <dd><span id="link-check-status-due">—</span><small>已含排队和检测中</small></dd>
+              </div>
+              <div class="link-check-status-metric">
+                <dt>检测中</dt>
+                <dd><span id="link-check-status-active">—</span><small id="link-check-status-queued">队列中 —</small></dd>
+              </div>
+              <div class="link-check-status-metric">
+                <dt>近 5 分钟速度</dt>
+                <dd><span id="link-check-status-throughput">—</span><small id="link-check-status-completed">完成 —</small></dd>
+              </div>
+              <div class="link-check-status-metric" title="包括检测请求失败和检测结果写入失败">
+                <dt>近 5 分钟失败</dt>
+                <dd><span id="link-check-status-failed">—</span><small>请求或写入失败</small></dd>
+              </div>
+            </dl>
+            <div id="link-check-status-error" class="inline-alert error link-check-status-error" role="alert" hidden></div>
+          </section>
+
           <form id="resource-filters" class="filter-bar" aria-label="资源筛选">
             <label class="search-field grow">
               <i data-lucide="search" aria-hidden="true"></i>
