@@ -41,6 +41,30 @@ type PasswordLoginAdapter interface {
 	LoginWithPassword(context.Context, string, string) (LoginMaterial, error)
 }
 
+// TokenLoginAdapter stores a caller-supplied bearer token after the plugin has
+// validated it with its upstream service. The raw token remains inside the
+// encrypted credential envelope and must never be copied into public metadata.
+type TokenLoginAdapter interface {
+	LoginWithToken(context.Context, string) (LoginMaterial, error)
+}
+
+// CredentialScopePolicy lets account plugins restrict which ownership scopes
+// may hold their credentials. Plugins that do not implement it retain the
+// existing behavior and support every credential scope.
+type CredentialScopePolicy interface {
+	SupportsCredentialScope(string) bool
+}
+
+type HealthCheckResult struct {
+	HealthStatus     string
+	CredentialStatus string
+	ErrorCode        string
+}
+
+type HealthCheckAdapter interface {
+	CheckCredentialHealth(context.Context, storage.PluginCredential, Access) (HealthCheckResult, error)
+}
+
 type QRBeginResult struct {
 	State      any
 	QRCodeData string

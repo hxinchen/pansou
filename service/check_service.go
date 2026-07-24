@@ -21,6 +21,7 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+	"golang.org/x/sync/singleflight"
 
 	"pansou/model"
 	"pansou/util"
@@ -38,6 +39,8 @@ const (
 	checkStateUnsupported = "unsupported"
 	checkStateUncertain   = "uncertain"
 	checkCacheBucketName  = "check_results"
+	checkCachePrunePeriod = time.Hour
+	xunleiCaptchaTokenTTL = 5 * time.Minute
 )
 
 type cachedCheckResult struct {
@@ -49,6 +52,11 @@ type activeCheckCall struct {
 	done   chan struct{}
 	result model.CheckResult
 	err    error
+}
+
+type xunleiCaptchaTokenEntry struct {
+	token     string
+	expiresAt time.Time
 }
 
 type checkHTTPClientContextKey struct{}
@@ -75,25 +83,47 @@ type CheckService struct {
 	client    *http.Client
 	cacheFile string
 	cacheDB   *bolt.DB
+
+	xunleiMu     sync.Mutex
+	xunleiTokens map[string]xunleiCaptchaTokenEntry
+	xunleiGroup  singleflight.Group
+
+	maintenanceCancel context.CancelFunc
+	maintenanceDone   chan struct{}
+	closeOnce         sync.Once
+	closeErr          error
 }
 
 func NewCheckService() *CheckService {
 	service := &CheckService{
-		cache:     make(map[string]cachedCheckResult),
-		inflight:  make(map[string]*activeCheckCall),
-		client:    util.GetHTTPClient(),
-		cacheFile: filepath.Join(".", "cache", "check_cache.db"),
+		cache:        make(map[string]cachedCheckResult),
+		inflight:     make(map[string]*activeCheckCall),
+		client:       util.GetHTTPClient(),
+		cacheFile:    filepath.Join(".", "cache", "check_cache.db"),
+		xunleiTokens: make(map[string]xunleiCaptchaTokenEntry),
 	}
 	service.openCacheStore()
-	service.pruneExpiredCacheStore()
+	service.pruneExpiredCaches()
+	service.startCacheMaintenance(checkCachePrunePeriod)
 	return service
 }
 
 func (s *CheckService) Close() error {
-	if s == nil || s.cacheDB == nil {
+	if s == nil {
 		return nil
 	}
-	return s.cacheDB.Close()
+	s.closeOnce.Do(func() {
+		if s.maintenanceCancel != nil {
+			s.maintenanceCancel()
+		}
+		if s.maintenanceDone != nil {
+			<-s.maintenanceDone
+		}
+		if s.cacheDB != nil {
+			s.closeErr = s.cacheDB.Close()
+		}
+	})
+	return s.closeErr
 }
 
 func (s *CheckService) Check(items []model.CheckItem) model.CheckResponse {
@@ -102,6 +132,26 @@ func (s *CheckService) Check(items []model.CheckItem) model.CheckResponse {
 }
 
 func (s *CheckService) CheckWithProxy(items []model.CheckItem, proxyURL string) (model.CheckResponse, error) {
+	return s.checkWithProxyContext(context.Background(), items, proxyURL, false)
+}
+
+// CheckItemContext checks one link while preserving cancellation and the
+// underlying transport error for background schedulers and circuit breakers.
+func (s *CheckService) CheckItemContext(ctx context.Context, item model.CheckItem, proxyURL string) (model.CheckResult, error) {
+	response, err := s.checkWithProxyContext(ctx, []model.CheckItem{item}, proxyURL, true)
+	if len(response.Results) != 1 {
+		if err != nil {
+			return model.CheckResult{}, err
+		}
+		return model.CheckResult{}, fmt.Errorf("link checker returned %d results", len(response.Results))
+	}
+	return response.Results[0], err
+}
+
+func (s *CheckService) checkWithProxyContext(ctx context.Context, items []model.CheckItem, proxyURL string, returnItemError bool) (model.CheckResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	proxyURL = strings.TrimSpace(proxyURL)
 	client := s.client
 	cacheScope := ""
@@ -120,7 +170,11 @@ func (s *CheckService) CheckWithProxy(items []model.CheckItem, proxyURL string) 
 	results := make([]model.CheckResult, 0, len(items))
 
 	for _, item := range items {
-		results = append(results, s.checkOne(item, client, cacheScope))
+		result, checkErr := s.checkOneContext(ctx, item, client, cacheScope)
+		results = append(results, result)
+		if checkErr != nil && returnItemError {
+			return model.CheckResponse{Results: results}, checkErr
+		}
 	}
 
 	return model.CheckResponse{
@@ -129,36 +183,48 @@ func (s *CheckService) CheckWithProxy(items []model.CheckItem, proxyURL string) 
 }
 
 func (s *CheckService) checkOne(item model.CheckItem, client *http.Client, cacheScope string) model.CheckResult {
+	result, _ := s.checkOneContext(context.Background(), item, client, cacheScope)
+	return result
+}
+
+func (s *CheckService) checkOneContext(ctx context.Context, item model.CheckItem, client *http.Client, cacheScope string) (model.CheckResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	normalized := s.normalizeShareLink(item.DiskType, item.URL, item.Password)
 	if normalized == "" {
-		return s.buildResult(item, "", checkStateUncertain, false, "链接格式无效")
+		return s.buildResult(item, "", checkStateUncertain, false, "链接格式无效"), nil
 	}
 
 	cacheKey := checkCacheKey(item.DiskType, normalized, cacheScope)
 	if cached, ok := s.getCached(cacheKey); ok {
 		cached.CacheHit = true
-		return cached
+		return cached, nil
 	}
 
 	call, wait := s.acquireInflight(cacheKey)
 	if wait {
-		<-call.done
+		select {
+		case <-call.done:
+		case <-ctx.Done():
+			return s.buildResult(item, normalized, checkStateUncertain, false, "检测已取消"), ctx.Err()
+		}
 		if call.err != nil {
-			return s.buildResult(item, normalized, checkStateUncertain, false, "检测失败")
+			return s.buildResult(item, normalized, checkStateUncertain, false, "检测失败"), call.err
 		}
 		result := call.result
 		result.CacheHit = false
-		return result
+		return result, nil
 	}
 
-	result, err := s.runCheck(item, normalized, client)
+	result, err := s.runCheck(ctx, item, normalized, client, cacheScope)
 	s.finishInflight(cacheKey, call, result, err)
 
 	if err != nil {
-		return s.buildResult(item, normalized, checkStateUncertain, false, "检测失败")
+		return s.buildResult(item, normalized, checkStateUncertain, false, "检测失败"), err
 	}
 
-	return result
+	return result, nil
 }
 
 func (s *CheckService) getCached(key string) (model.CheckResult, bool) {
@@ -233,38 +299,38 @@ func (s *CheckService) finishInflight(key string, call *activeCheckCall, result 
 	}
 }
 
-func (s *CheckService) runCheck(item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
+func (s *CheckService) runCheck(ctx context.Context, item model.CheckItem, normalized string, client *http.Client, cacheScope string) (model.CheckResult, error) {
 	switch item.DiskType {
 	case "aliyun":
-		return s.checkAliyun(item, normalized, client)
+		return s.checkAliyun(ctx, item, normalized, client)
 	case "quark":
-		return s.checkQuark(item, normalized, client)
+		return s.checkQuark(ctx, item, normalized, client)
 	case "uc":
-		return s.checkUC(item, normalized, client)
+		return s.checkUC(ctx, item, normalized, client)
 	case "baidu":
-		return s.checkBaidu(item, normalized, client)
+		return s.checkBaidu(ctx, item, normalized, client)
 	case "tianyi":
-		return s.checkTianyi(item, normalized, client)
+		return s.checkTianyi(ctx, item, normalized, client)
 	case "123":
-		return s.check123(item, normalized, client)
+		return s.check123(ctx, item, normalized, client)
 	case "xunlei":
-		return s.checkXunlei(item, normalized, client)
+		return s.checkXunlei(ctx, item, normalized, client, cacheScope)
 	case "115":
-		return s.check115(item, normalized, client)
+		return s.check115(ctx, item, normalized, client)
 	case "mobile":
-		return s.checkMobile(item, normalized, client)
+		return s.checkMobile(ctx, item, normalized, client)
 	default:
 		return s.buildResult(item, normalized, checkStateUnsupported, false, "当前平台暂不支持检测"), nil
 	}
 }
 
-func (s *CheckService) checkAliyun(item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
+func (s *CheckService) checkAliyun(parent context.Context, item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
 	shareID := extractAliyunShareID(normalized)
 	if shareID == "" {
 		return s.buildResult(item, normalized, checkStateUncertain, false, "无法解析分享地址"), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(checkParentContext(parent), 10*time.Second)
 	defer cancel()
 	ctx = contextWithCheckHTTPClient(ctx, client)
 
@@ -326,13 +392,13 @@ func (s *CheckService) checkAliyun(item model.CheckItem, normalized string, clie
 	}
 }
 
-func (s *CheckService) checkQuark(item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
+func (s *CheckService) checkQuark(parent context.Context, item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
 	resourceID, password := extractQuarkShareIDAndPassword(normalized)
 	if resourceID == "" {
 		return s.buildResult(item, normalized, checkStateUncertain, false, "无法解析分享地址"), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(checkParentContext(parent), 10*time.Second)
 	defer cancel()
 	ctx = contextWithCheckHTTPClient(ctx, client)
 
@@ -534,8 +600,8 @@ func hasQuarkFilteredFile(files []quarkShareFile) bool {
 	return false
 }
 
-func (s *CheckService) checkUC(item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+func (s *CheckService) checkUC(parent context.Context, item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
+	ctx, cancel := context.WithTimeout(checkParentContext(parent), 8*time.Second)
 	defer cancel()
 	ctx = contextWithCheckHTTPClient(ctx, client)
 
@@ -565,13 +631,13 @@ func (s *CheckService) checkUC(item model.CheckItem, normalized string, client *
 	}
 }
 
-func (s *CheckService) checkBaidu(item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
+func (s *CheckService) checkBaidu(parent context.Context, item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
 	shareID, shortURL, password := extractBaiduShareInfo(normalized)
 	if shareID == "" || shortURL == "" {
 		return s.buildResult(item, normalized, checkStateUncertain, false, "无法解析分享地址"), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	ctx, cancel := context.WithTimeout(checkParentContext(parent), 12*time.Second)
 	defer cancel()
 	ctx = contextWithCheckHTTPClient(ctx, client)
 
@@ -658,13 +724,13 @@ func (s *CheckService) checkBaidu(item model.CheckItem, normalized string, clien
 	}
 }
 
-func (s *CheckService) checkTianyi(item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
+func (s *CheckService) checkTianyi(parent context.Context, item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
 	shareCode, password, referer := extractTianyiShareInfo(normalized, item.Password)
 	if shareCode == "" {
 		return s.buildResult(item, normalized, checkStateUncertain, false, "无法解析分享地址"), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(checkParentContext(parent), 10*time.Second)
 	defer cancel()
 	ctx = contextWithCheckHTTPClient(ctx, client)
 
@@ -788,13 +854,13 @@ func (s *CheckService) checkTianyi(item model.CheckItem, normalized string, clie
 	}
 }
 
-func (s *CheckService) check123(item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
+func (s *CheckService) check123(parent context.Context, item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
 	shareKey := extract123ShareKey(normalized)
 	if shareKey == "" {
 		return s.buildResult(item, normalized, checkStateUncertain, false, "无法解析分享地址"), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(checkParentContext(parent), 8*time.Second)
 	defer cancel()
 	ctx = contextWithCheckHTTPClient(ctx, client)
 
@@ -862,41 +928,60 @@ func (s *CheckService) check123(item model.CheckItem, normalized string, client 
 	}
 }
 
-func (s *CheckService) checkXunlei(item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
+func (s *CheckService) checkXunlei(parent context.Context, item model.CheckItem, normalized string, client *http.Client, cacheScope string) (model.CheckResult, error) {
 	shareID, password := extractXunleiShareInfo(normalized)
 	if shareID == "" {
 		return s.buildResult(item, normalized, checkStateUncertain, false, "无法解析分享地址"), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	ctx, cancel := context.WithTimeout(checkParentContext(parent), 12*time.Second)
 	defer cancel()
 	ctx = contextWithCheckHTTPClient(ctx, client)
 
-	captchaToken, _ := s.fetchXunleiCaptchaToken(ctx)
+	tokenScope := strings.TrimSpace(cacheScope)
+	if tokenScope == "" {
+		tokenScope = "default"
+	}
+	captchaToken, _ := s.getXunleiCaptchaToken(ctx, tokenScope)
 
 	apiURL := fmt.Sprintf("https://api-pan.xunlei.com/drive/v1/share?share_id=%s&pass_code=%s&limit=100&pass_code_token=&page_token=&thumbnail_size=SIZE_SMALL",
 		url.QueryEscape(shareID), url.QueryEscape(password))
 
-	headers := map[string]string{
-		"accept":          "*/*",
-		"content-type":    "application/json",
-		"origin":          "https://pan.xunlei.com",
-		"referer":         "https://pan.xunlei.com/",
-		"user-agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-		"accept-encoding": "gzip, deflate",
-		"x-client-id":     "ZUBzD9J_XPXfn7f7",
-		"x-device-id":     "5505bd0cab8c9469b98e5891d9fb3e0d",
-	}
-	if captchaToken != "" {
-		headers["x-captcha-token"] = captchaToken
-	}
+	var body []byte
+	var statusCode int
+	for attempt := 0; attempt < 2; attempt++ {
+		headers := map[string]string{
+			"accept":          "*/*",
+			"content-type":    "application/json",
+			"origin":          "https://pan.xunlei.com",
+			"referer":         "https://pan.xunlei.com/",
+			"user-agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+			"accept-encoding": "gzip, deflate",
+			"x-client-id":     "ZUBzD9J_XPXfn7f7",
+			"x-device-id":     "5505bd0cab8c9469b98e5891d9fb3e0d",
+		}
+		if captchaToken != "" {
+			headers["x-captcha-token"] = captchaToken
+		}
 
-	body, statusCode, err := s.doRequest(ctx, "GET", apiURL, nil, headers)
-	if err != nil {
-		return s.buildResult(item, normalized, checkStateUncertain, false, "请求失败"), err
+		var err error
+		body, statusCode, err = s.doRequest(ctx, "GET", apiURL, nil, headers)
+		if err != nil {
+			return s.buildResult(item, normalized, checkStateUncertain, false, "请求失败"), err
+		}
+		body, _ = decompressResponseBody(body, headers["accept-encoding"], "")
+		if xunleiCaptchaRejected(statusCode, body) {
+			if captchaToken != "" {
+				s.invalidateXunleiCaptchaToken(tokenScope)
+			}
+			if attempt == 0 && captchaToken != "" {
+				captchaToken, _ = s.getXunleiCaptchaToken(ctx, tokenScope)
+				continue
+			}
+			return s.buildResult(item, normalized, checkStateUncertain, false, "迅雷 captcha token 被拒绝"), fmt.Errorf("xunlei captcha token rejected")
+		}
+		break
 	}
-
-	body, _ = decompressResponseBody(body, headers["accept-encoding"], "")
 
 	if statusCode == http.StatusNotFound || statusCode == http.StatusForbidden {
 		state := classifyFailureState(string(body), fmt.Sprintf("HTTP状态码: %d", statusCode))
@@ -941,7 +1026,7 @@ func (s *CheckService) checkXunlei(item model.CheckItem, normalized string, clie
 	}
 }
 
-func (s *CheckService) check115(item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
+func (s *CheckService) check115(parent context.Context, item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
 	shareCode, password := extract115ShareInfo(normalized, item.Password)
 	if shareCode == "" {
 		return s.buildResult(item, normalized, checkStateUncertain, false, "无法解析分享地址"), nil
@@ -950,7 +1035,7 @@ func (s *CheckService) check115(item model.CheckItem, normalized string, client 
 		return s.buildResult(item, normalized, checkStateLocked, false, "115 需要提取码"), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(checkParentContext(parent), 10*time.Second)
 	defer cancel()
 	ctx = contextWithCheckHTTPClient(ctx, client)
 
@@ -1033,14 +1118,14 @@ func (s *CheckService) check115(item model.CheckItem, normalized string, client 
 	return s.buildResult(item, normalized, state, false, failureSummary(state, response.Error)), nil
 }
 
-func (s *CheckService) checkMobile(item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
+func (s *CheckService) checkMobile(parent context.Context, item model.CheckItem, normalized string, client *http.Client) (model.CheckResult, error) {
 	shareID := extractMobileShareID(normalized)
 	if shareID == "" {
 		return s.buildResult(item, normalized, checkStateUncertain, false, "无法解析分享地址"), nil
 	}
 	password := extractMobilePassword(normalized, item.Password)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(checkParentContext(parent), 10*time.Second)
 	defer cancel()
 	ctx = contextWithCheckHTTPClient(ctx, client)
 
@@ -1188,6 +1273,84 @@ func checkCacheKey(diskType, normalized, cacheScope string) string {
 func proxyCacheScope(proxyURL string) string {
 	sum := md5.Sum([]byte(strings.TrimSpace(proxyURL)))
 	return fmt.Sprintf("proxy:%x", sum)
+}
+
+func checkParentContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+func (s *CheckService) getXunleiCaptchaToken(ctx context.Context, scope string) (string, error) {
+	ctx = checkParentContext(ctx)
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		scope = "default"
+	}
+	if token, ok := s.cachedXunleiCaptchaToken(scope, time.Now()); ok {
+		return token, nil
+	}
+
+	result := s.xunleiGroup.DoChan(scope, func() (any, error) {
+		now := time.Now()
+		if token, ok := s.cachedXunleiCaptchaToken(scope, now); ok {
+			return token, nil
+		}
+		token, err := s.fetchXunleiCaptchaToken(ctx)
+		if err != nil || token == "" {
+			return token, err
+		}
+		s.xunleiMu.Lock()
+		if s.xunleiTokens == nil {
+			s.xunleiTokens = make(map[string]xunleiCaptchaTokenEntry)
+		}
+		s.xunleiTokens[scope] = xunleiCaptchaTokenEntry{token: token, expiresAt: now.Add(xunleiCaptchaTokenTTL)}
+		s.xunleiMu.Unlock()
+		return token, nil
+	})
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case outcome := <-result:
+		if outcome.Err != nil {
+			return "", outcome.Err
+		}
+		token, _ := outcome.Val.(string)
+		return token, nil
+	}
+}
+
+func (s *CheckService) cachedXunleiCaptchaToken(scope string, now time.Time) (string, bool) {
+	s.xunleiMu.Lock()
+	defer s.xunleiMu.Unlock()
+	entry, ok := s.xunleiTokens[scope]
+	if !ok {
+		return "", false
+	}
+	if !now.Before(entry.expiresAt) {
+		delete(s.xunleiTokens, scope)
+		return "", false
+	}
+	return entry.token, entry.token != ""
+}
+
+func (s *CheckService) invalidateXunleiCaptchaToken(scope string) {
+	s.xunleiMu.Lock()
+	delete(s.xunleiTokens, scope)
+	s.xunleiMu.Unlock()
+	s.xunleiGroup.Forget(scope)
+}
+
+func xunleiCaptchaRejected(statusCode int, body []byte) bool {
+	text := strings.ToLower(string(body))
+	if statusCode == http.StatusUnauthorized {
+		return true
+	}
+	if statusCode != http.StatusBadRequest && statusCode != http.StatusForbidden {
+		return false
+	}
+	return strings.Contains(text, "captcha") || strings.Contains(text, "token") || strings.Contains(text, "shield")
 }
 
 func (s *CheckService) fetchXunleiCaptchaToken(ctx context.Context) (string, error) {
@@ -1413,12 +1576,58 @@ func (s *CheckService) deletePersistentCache(key string) {
 	})
 }
 
+func (s *CheckService) startCacheMaintenance(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.maintenanceCancel = cancel
+	s.maintenanceDone = make(chan struct{})
+	go func() {
+		defer close(s.maintenanceDone)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.pruneExpiredCaches()
+			}
+		}
+	}()
+}
+
+func (s *CheckService) pruneExpiredCaches() {
+	now := time.Now()
+	s.mu.Lock()
+	for key, entry := range s.cache {
+		if !now.Before(entry.expiresAt) {
+			delete(s.cache, key)
+		}
+	}
+	s.mu.Unlock()
+
+	s.xunleiMu.Lock()
+	for scope, entry := range s.xunleiTokens {
+		if !now.Before(entry.expiresAt) {
+			delete(s.xunleiTokens, scope)
+		}
+	}
+	s.xunleiMu.Unlock()
+
+	s.pruneExpiredCacheStoreAt(now)
+}
+
 func (s *CheckService) pruneExpiredCacheStore() {
+	s.pruneExpiredCacheStoreAt(time.Now())
+}
+
+func (s *CheckService) pruneExpiredCacheStoreAt(now time.Time) {
 	if s.cacheDB == nil {
 		return
 	}
 
-	now := time.Now()
 	_ = s.cacheDB.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(checkCacheBucketName))
 		if bucket == nil {

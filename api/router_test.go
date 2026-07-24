@@ -87,6 +87,116 @@ func TestAdminRoutesRequireJWT(t *testing.T) {
 	}
 }
 
+func TestRuntimeDiagnosticsRequireAdminJWT(t *testing.T) {
+	previous := config.AppConfig
+	config.AppConfig = testConfig(true)
+	defer func() { config.AppConfig = previous }()
+
+	router := SetupRouter(routerTestSearch{})
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/runtime-diagnostics", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRuntimeDiagnosticsRemainAvailableWithoutDatabase(t *testing.T) {
+	previous := config.AppConfig
+	config.AppConfig = testConfig(true)
+	defer func() { config.AppConfig = previous }()
+	token, err := util.GenerateToken("admin", config.AppConfig.AuthJWTSecret, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	router := SetupRouter(routerTestSearch{})
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/runtime-diagnostics", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Data struct {
+			Go struct {
+				GoVersion string `json:"go_version"`
+			} `json:"go"`
+			Database struct {
+				Configured  bool `json:"configured"`
+				SlowQueries struct {
+					Available bool   `json:"available"`
+					Message   string `json:"message"`
+				} `json:"slow_queries"`
+			} `json:"database"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Data.Go.GoVersion == "" {
+		t.Fatal("missing Go runtime diagnostics")
+	}
+	if payload.Data.Database.Configured || payload.Data.Database.SlowQueries.Available || payload.Data.Database.SlowQueries.Message == "" {
+		t.Fatalf("unexpected database diagnostics: %+v", payload.Data.Database)
+	}
+}
+
+func TestPprofIsOptInAndAdminAuthenticated(t *testing.T) {
+	previous := config.AppConfig
+	config.AppConfig = testConfig(true)
+	defer func() { config.AppConfig = previous }()
+	token, err := util.GenerateToken("admin", config.AppConfig.AuthJWTSecret, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	disabledRouter := SetupRouter(routerTestSearch{})
+	disabledRequest := httptest.NewRequest(http.MethodGet, "/api/admin/debug/pprof/", nil)
+	disabledRequest.Header.Set("Authorization", "Bearer "+token)
+	disabledResponse := httptest.NewRecorder()
+	disabledRouter.ServeHTTP(disabledResponse, disabledRequest)
+	if disabledResponse.Code != http.StatusNotFound {
+		t.Fatalf("disabled status = %d, want 404", disabledResponse.Code)
+	}
+
+	config.AppConfig.PprofEnabled = true
+	enabledRouter := SetupRouter(routerTestSearch{})
+	unauthorizedRequest := httptest.NewRequest(http.MethodGet, "/api/admin/debug/pprof/", nil)
+	unauthorizedResponse := httptest.NewRecorder()
+	enabledRouter.ServeHTTP(unauthorizedResponse, unauthorizedRequest)
+	if unauthorizedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d, want 401", unauthorizedResponse.Code)
+	}
+	authorizedRequest := httptest.NewRequest(http.MethodGet, "/api/admin/debug/pprof/", nil)
+	authorizedRequest.Header.Set("Authorization", "Bearer "+token)
+	authorizedResponse := httptest.NewRecorder()
+	enabledRouter.ServeHTTP(authorizedResponse, authorizedRequest)
+	if authorizedResponse.Code != http.StatusOK {
+		t.Fatalf("authorized status = %d, want 200; body=%s", authorizedResponse.Code, authorizedResponse.Body.String())
+	}
+}
+
+func TestAdminShellAndAssetsDisableCaching(t *testing.T) {
+	previous := config.AppConfig
+	config.AppConfig = testConfig(true)
+	defer func() { config.AppConfig = previous }()
+
+	router := SetupRouter(routerTestSearch{})
+	for _, path := range []string{"/admin/", "/admin/assets/app.js?v=202607191945"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200; body=%s", path, response.Code, response.Body.String())
+		}
+		if got := response.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
+			t.Fatalf("GET %s Cache-Control = %q, want no-store", path, got)
+		}
+	}
+}
+
 func TestAdminRoutesReturnUnavailableWithoutDatabase(t *testing.T) {
 	previous := config.AppConfig
 	config.AppConfig = testConfig(true)

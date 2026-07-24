@@ -16,6 +16,11 @@ const (
 	CredentialStatusActive  = "active"
 	CredentialStatusInvalid = "invalid"
 	CredentialStatusExpired = "expired"
+
+	CredentialHealthUnknown = "unknown"
+	CredentialHealthHealthy = "healthy"
+	CredentialHealthError   = "error"
+	CredentialHealthInvalid = "invalid"
 )
 
 type SearchSourceConfig struct {
@@ -107,6 +112,9 @@ type PluginCredential struct {
 	LastFailureAt         *time.Time     `json:"last_failure_at,omitempty"`
 	LastErrorCode         string         `json:"last_error_code,omitempty"`
 	ConsecutiveFailures   int            `json:"consecutive_failures"`
+	LastHealthCheckAt     *time.Time     `json:"last_health_check_at,omitempty"`
+	LastHealthStatus      string         `json:"last_health_status"`
+	LastHealthErrorCode   string         `json:"last_health_error_code,omitempty"`
 	CreatedAt             time.Time      `json:"created_at"`
 	UpdatedAt             time.Time      `json:"updated_at"`
 }
@@ -195,6 +203,14 @@ type CredentialFailureInput struct {
 	ErrorCode     string
 	FailedAt      time.Time
 	CooldownUntil *time.Time
+}
+
+type CredentialHealthInput struct {
+	PublicID         string
+	HealthStatus     string
+	ErrorCode        string
+	CredentialStatus string
+	CheckedAt        time.Time
 }
 
 type DataMigration struct {

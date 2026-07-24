@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"pansou/collection"
 	"pansou/model"
 	"pansou/plugin"
+	"pansou/proxypool"
 	"pansou/service"
 	"pansou/storage"
 )
@@ -197,6 +200,21 @@ func (r *CollectionRepository) CompleteLinkCheck(ctx context.Context, result col
 	return r.Store.CompleteResourceCheck(ctx, result.ResourceID, string(result.Status), result.CheckedAt)
 }
 
+func (r *CollectionRepository) CompleteLinkChecks(ctx context.Context, results []collection.LinkCheckResult) error {
+	if r == nil || r.Store == nil {
+		return errors.New("resource library is disabled")
+	}
+	completions := make([]storage.ResourceCheckCompletion, len(results))
+	for index, result := range results {
+		completions[index] = storage.ResourceCheckCompletion{
+			ResourceID: result.ResourceID,
+			Status:     string(result.Status),
+			CheckedAt:  result.CheckedAt,
+		}
+	}
+	return r.Store.CompleteResourceChecks(ctx, completions)
+}
+
 func (r *CollectionRepository) DueLinkChecks(ctx context.Context, limit int, at time.Time) ([]collection.LinkCheckCandidate, error) {
 	if r == nil || r.Store == nil {
 		return nil, errors.New("resource library is disabled")
@@ -339,54 +357,184 @@ func ConfiguredSources(channels []string, manager *plugin.PluginManager) collect
 
 type LinkChecker struct {
 	Service *service.CheckService
+	Pool    *proxypool.Service
 }
 
 func (c LinkChecker) Check(ctx context.Context, candidate collection.LinkCheckCandidate) (collection.DetectionStatus, error) {
 	if c.Service == nil {
 		return collection.DetectionUnknown, errors.New("link check service is unavailable")
 	}
-	type outcome struct {
-		response model.CheckResponse
-		err      error
+	item := model.CheckItem{DiskType: candidate.Platform, URL: candidate.URL, Password: candidate.Password}
+	mode := proxypool.ModeBaselineFirst
+	if c.Pool != nil {
+		mode = c.Pool.RouteMode("platform", candidate.Platform)
 	}
-	done := make(chan outcome, 1)
-	go func() {
-		response, err := c.Service.CheckWithProxy([]model.CheckItem{{
-			DiskType: candidate.Platform, URL: candidate.URL, Password: candidate.Password,
-		}}, "")
-		done <- outcome{response: response, err: err}
-	}()
-	select {
-	case <-ctx.Done():
-		return collection.DetectionUnknown, ctx.Err()
-	case result := <-done:
-		if result.err != nil {
-			return collection.DetectionUnknown, result.err
+	check := func(proxyURL string) (model.CheckResult, error) {
+		return c.Service.CheckItemContext(ctx, item, proxyURL)
+	}
+	if mode == proxypool.ModeProxyOnly || mode == proxypool.ModeStickyProxy {
+		result, err := c.checkWithProxyPolicy(ctx, candidate, mode, check, model.CheckResult{}, nil)
+		return mapLinkCheckResult(result, err)
+	}
+	if mode == proxypool.ModeProxyFirst {
+		result, err := c.checkWithProxyPolicy(ctx, candidate, mode, check, model.CheckResult{}, nil)
+		if err == nil && result.State != "uncertain" {
+			return mapLinkCheckResult(result, nil)
 		}
-		if len(result.response.Results) != 1 {
-			return collection.DetectionUnknown, fmt.Errorf("link checker returned %d results", len(result.response.Results))
+		baseline, baselineErr := check("")
+		return mapLinkCheckResult(baseline, baselineErr)
+	}
+	result, err := check("")
+	if mode == proxypool.ModeBaselineFirst && (err != nil || result.State == "uncertain") {
+		result, err = c.checkWithProxyPolicy(ctx, candidate, mode, check, result, err)
+	}
+	return mapLinkCheckResult(result, err)
+}
+
+func (c LinkChecker) checkWithProxyPolicy(ctx context.Context, candidate collection.LinkCheckCandidate, mode string, check func(string) (model.CheckResult, error), baseline model.CheckResult, baselineErr error) (model.CheckResult, error) {
+	if c.Pool == nil || !c.Pool.Enabled() {
+		return baseline, baselineErr
+	}
+	request := proxypool.ProxyRequest{TargetType: "platform", TargetKey: candidate.Platform}
+	if mode == proxypool.ModeStickyProxy {
+		request.StickyKey = candidate.URL
+	}
+	tried := make(map[int64]struct{})
+	var lastResult model.CheckResult
+	var lastErr error
+	attempted := false
+	for attempt := 0; attempt < c.Pool.MaxAttempts(); attempt++ {
+		request.ExcludeIDs = tried
+		lease, acquireErr := c.Pool.Acquire(ctx, request)
+		if acquireErr != nil {
+			if !attempted {
+				lastErr = acquireErr
+			}
+			break
 		}
-		switch result.response.Results[0].State {
-		case "ok":
-			return collection.DetectionValid, nil
-		case "bad", "invalid":
-			return collection.DetectionInvalid, nil
-		case "expired":
-			return collection.DetectionExpired, nil
-		case "cancelled":
-			return collection.DetectionCancelled, nil
-		case "violation":
-			return collection.DetectionViolation, nil
-		case "locked":
-			return collection.DetectionLocked, nil
-		case "unsupported":
-			return collection.DetectionUnsupported, nil
-		case "uncertain":
-			return collection.DetectionUnknown, nil
-		default:
-			return collection.DetectionUnknown, fmt.Errorf("unknown link-check state %q", result.response.Results[0].State)
+		attempted = true
+		tried[lease.ID()] = struct{}{}
+		started := time.Now()
+		result, err := check(lease.URL())
+		decision := classifyProxyAttempt(ctx, result, err)
+		decision.outcome.Latency = time.Since(started)
+		lease.Release(decision.outcome)
+		lastResult, lastErr = result, err
+		if decision.outcome.Success {
+			return result, nil
+		}
+		if !decision.retryable {
+			break
 		}
 	}
+	if mode == proxypool.ModeProxyOnly || mode == proxypool.ModeStickyProxy {
+		if attempted {
+			return lastResult, lastErr
+		}
+		return baseline, lastErr
+	}
+	return baseline, baselineErr
+}
+
+type proxyAttemptDecision struct {
+	outcome   proxypool.ProxyOutcome
+	retryable bool
+}
+
+var retryAfterPattern = regexp.MustCompile(`(?i)retry[- ]after[^0-9]{0,8}([0-9]+)`)
+
+func classifyProxyAttempt(ctx context.Context, result model.CheckResult, err error) proxyAttemptDecision {
+	if ctx != nil && ctx.Err() != nil {
+		return proxyAttemptDecision{outcome: proxypool.ProxyOutcome{FailureScope: proxypool.FailureScopeNone}}
+	}
+	if err == nil && result.State != "uncertain" {
+		return proxyAttemptDecision{outcome: proxypool.ProxyOutcome{Success: true}}
+	}
+	if err == nil && result.State == "uncertain" && !linkCheckSummaryIsCircuitFailure(result.Summary) {
+		return proxyAttemptDecision{outcome: proxypool.ProxyOutcome{FailureScope: proxypool.FailureScopeNone}}
+	}
+	message := strings.ToLower(strings.TrimSpace(result.Summary))
+	if err != nil {
+		message = strings.TrimSpace(message + " " + strings.ToLower(err.Error()))
+	}
+	retryAfter := parseRetryAfter(message)
+	for _, marker := range []string{
+		"too many requests", "rate limit", "http状态码: 429", "http status 429", "captcha",
+		"http状态码: 5", "http status 5", "响应解析失败", "接口响应格式异常",
+	} {
+		if strings.Contains(message, marker) {
+			return proxyAttemptDecision{outcome: proxypool.ProxyOutcome{FailureScope: proxypool.FailureScopeTarget, RetryAfter: retryAfter}, retryable: true}
+		}
+	}
+	for _, marker := range []string{
+		"proxyconnect", "proxy connection", "socks", "dial tcp", "connection refused", "connection reset",
+		"no such host", "tls handshake timeout", "i/o timeout", "timeout awaiting response", "unexpected eof", "eof",
+	} {
+		if strings.Contains(message, marker) {
+			return proxyAttemptDecision{outcome: proxypool.ProxyOutcome{FailureScope: proxypool.FailureScopeNode, RetryAfter: retryAfter}, retryable: true}
+		}
+	}
+	if err != nil {
+		return proxyAttemptDecision{outcome: proxypool.ProxyOutcome{FailureScope: proxypool.FailureScopeNode, RetryAfter: retryAfter}, retryable: true}
+	}
+	return proxyAttemptDecision{outcome: proxypool.ProxyOutcome{FailureScope: proxypool.FailureScopeTarget, RetryAfter: retryAfter}, retryable: true}
+}
+
+func parseRetryAfter(message string) time.Duration {
+	matches := retryAfterPattern.FindStringSubmatch(message)
+	if len(matches) != 2 {
+		return 0
+	}
+	seconds, err := strconv.Atoi(matches[1])
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func mapLinkCheckResult(result model.CheckResult, err error) (collection.DetectionStatus, error) {
+	if err != nil {
+		return collection.DetectionUnknown, err
+	}
+	switch result.State {
+	case "ok":
+		return collection.DetectionValid, nil
+	case "bad", "invalid":
+		return collection.DetectionInvalid, nil
+	case "expired":
+		return collection.DetectionExpired, nil
+	case "cancelled":
+		return collection.DetectionCancelled, nil
+	case "violation":
+		return collection.DetectionViolation, nil
+	case "locked":
+		return collection.DetectionLocked, nil
+	case "unsupported":
+		return collection.DetectionUnsupported, nil
+	case "uncertain":
+		if !result.CacheHit && linkCheckSummaryIsCircuitFailure(result.Summary) {
+			return collection.DetectionUnknown, fmt.Errorf("upstream link check failed: %s", result.Summary)
+		}
+		return collection.DetectionUnknown, nil
+	default:
+		return collection.DetectionUnknown, fmt.Errorf("unknown link-check state %q", result.State)
+	}
+}
+
+func linkCheckSummaryIsCircuitFailure(summary string) bool {
+	summary = strings.ToLower(strings.TrimSpace(summary))
+	if summary == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"请求失败", "详情请求失败", "响应解析失败", "接口响应格式异常", "无法确认链接状态",
+		"captcha", "too many requests", "rate limit", "http状态码: 429", "http状态码: 5",
+	} {
+		if strings.Contains(summary, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func cloneMap(input map[string]interface{}) map[string]interface{} {

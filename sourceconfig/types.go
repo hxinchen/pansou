@@ -16,16 +16,24 @@ var (
 )
 
 type Channel struct {
-	Key         string `json:"key"`
-	DisplayName string `json:"display_name,omitempty"`
-	Enabled     bool   `json:"enabled"`
-	Order       int    `json:"order"`
+	Key            string `json:"key"`
+	DisplayName    string `json:"display_name,omitempty"`
+	Enabled        bool   `json:"enabled"`
+	Order          int    `json:"order"`
+	Tier           string `json:"tier,omitempty"` // realtime or collection
+	MaxConcurrency int    `json:"max_concurrency,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 }
 
 type PluginConfig struct {
-	Enabled bool           `json:"enabled"`
-	Order   int            `json:"order"`
-	Config  map[string]any `json:"config,omitempty"`
+	Enabled                bool           `json:"enabled"`
+	Order                  int            `json:"order"`
+	Tier                   string         `json:"tier,omitempty"` // primary, secondary or deep
+	MaxConcurrency         int            `json:"max_concurrency,omitempty"`
+	TimeoutSeconds         int            `json:"timeout_seconds,omitempty"`
+	CircuitFailures        int            `json:"circuit_failures,omitempty"`
+	CircuitCooldownSeconds int            `json:"circuit_cooldown_seconds,omitempty"`
+	Config                 map[string]any `json:"config,omitempty"`
 }
 
 type Config struct {
@@ -86,6 +94,9 @@ func DefaultCatalog(pluginNames []string) (*Catalog, error) {
 			descriptor.DisplayName, descriptor.Description = "盘链", "账号密码登录，可配置需要屏蔽的网盘类型"
 			descriptor.RequiresAccount, descriptor.LoginType = true, "password"
 			descriptor.AllowedConfigKeys = []string{"blocked_pan_types"}
+		case "aisoupan":
+			descriptor.DisplayName, descriptor.Description = "心悦搜索（Aisoupan）", "管理员配置 Bearer TOKEN 后，通过 Aisoupan 搜索接口获取资源"
+			descriptor.RequiresAccount, descriptor.LoginType = true, "token"
 		}
 		descriptors = append(descriptors, descriptor)
 	}
@@ -122,6 +133,13 @@ func (c *Catalog) Validate(config Config) (Config, error) {
 			return Config{}, fmt.Errorf("%w: channel %d: %v", ErrInvalidConfig, index+1, err)
 		}
 		channel.Key = normalized
+		channel.Tier = strings.ToLower(strings.TrimSpace(channel.Tier))
+		if channel.Tier != "" && channel.Tier != "realtime" && channel.Tier != "collection" {
+			return Config{}, fmt.Errorf("%w: channel %s tier must be realtime or collection", ErrInvalidConfig, channel.Key)
+		}
+		if channel.MaxConcurrency < 0 || channel.TimeoutSeconds < 0 {
+			return Config{}, fmt.Errorf("%w: channel %s limits must not be negative", ErrInvalidConfig, channel.Key)
+		}
 		if _, exists := seenChannels[channel.Key]; exists {
 			return Config{}, fmt.Errorf("%w: duplicate channel %q", ErrInvalidConfig, channel.Key)
 		}
@@ -133,6 +151,13 @@ func (c *Catalog) Validate(config Config) (Config, error) {
 		descriptor, exists := c.plugins[key]
 		if !exists {
 			return Config{}, fmt.Errorf("%w: unknown plugin %q", ErrInvalidConfig, rawKey)
+		}
+		settings.Tier = strings.ToLower(strings.TrimSpace(settings.Tier))
+		if settings.Tier != "" && settings.Tier != "primary" && settings.Tier != "secondary" && settings.Tier != "deep" {
+			return Config{}, fmt.Errorf("%w: plugin %s tier must be primary, secondary or deep", ErrInvalidConfig, key)
+		}
+		if settings.MaxConcurrency < 0 || settings.TimeoutSeconds < 0 || settings.CircuitFailures < 0 || settings.CircuitCooldownSeconds < 0 {
+			return Config{}, fmt.Errorf("%w: plugin %s limits must not be negative", ErrInvalidConfig, key)
 		}
 		allowed := make(map[string]struct{}, len(descriptor.AllowedConfigKeys))
 		for _, field := range descriptor.AllowedConfigKeys {

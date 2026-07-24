@@ -44,6 +44,17 @@ func TestCatalogRejectsInvalidPublicChannel(t *testing.T) {
 	}
 }
 
+func TestDefaultCatalogDescribesAisoupanAsTokenCredential(t *testing.T) {
+	catalog, err := DefaultCatalog([]string{"aisoupan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptors := catalog.Plugins()
+	if len(descriptors) != 1 || !descriptors[0].RequiresAccount || descriptors[0].LoginType != "token" || len(descriptors[0].AllowedConfigKeys) != 0 {
+		t.Fatalf("descriptors = %#v", descriptors)
+	}
+}
+
 func TestManagerDefersRetiredSnapshotClose(t *testing.T) {
 	first := NewSnapshot(1, Config{}, plugin.NewPluginManager())
 	manager := NewManager(first, nil)

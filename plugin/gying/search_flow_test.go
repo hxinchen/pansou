@@ -44,6 +44,25 @@ func TestFetchDetailContextCancelsUpstreamRequest(t *testing.T) {
 	}
 }
 
+func TestFetchSearchSuggestionsRequestsIdentityEncoding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept-Encoding"); got != "identity" {
+			t.Errorf("Accept-Encoding = %q, want identity", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer server.Close()
+	scraper, err := cloudscraper.New(cloudscraper.WithSessionConfig(false, time.Hour, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := (&GyingPlugin{baseURL: server.URL}).fetchSearchSuggestionsContext(context.Background(), "电影", scraper)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("items=%d err=%v", len(items), err)
+	}
+}
+
 func TestSearchWithScraperUsesAdaptiveFirstBatch(t *testing.T) {
 	var detailRequests atomic.Int32
 	items := make([]SearchSuggestItem, 15)

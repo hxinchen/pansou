@@ -1766,7 +1766,7 @@ func (p *QQPDPlugin) checkQRLoginStatus(qrsig string) (*LoginResult, error) {
 	ptqrtoken := getptqrtoken(qrsig)
 
 	// 登录检测URL
-	loginCheckURL := fmt.Sprintf("https://xui.ptlogin2.qq.com/ssl/ptqrlogin?u1=https%%3A%%2F%%2Fpd.qq.com%%2Fexplore&ptqrtoken=%s&ptredirect=1&h=1&t=1&g=1&from_ui=1&ptlang=2052&action=0-0-1761211119400&js_ver=25100115&js_type=1&login_sig=&pt_uistyle=40&aid=1600001587&daid=823&&o1vId=11f3315cde61b7b5da200e4a09fe308c&pt_js_version=28d22679", ptqrtoken)
+	loginCheckURL := buildQQLoginCheckURL(ptqrtoken, time.Now())
 
 	client := &http.Client{
 		Timeout: 10 * time.Second,
@@ -2102,11 +2102,18 @@ func (p *QQPDPlugin) generateQRCodeWithSig() ([]byte, string, error) {
 	// 提取qrsig（用于后续登录检测）
 	setCookie := resp.Header.Get("Set-Cookie")
 	qrsig := extractQrsig(setCookie)
+	if qrsig == "" {
+		return nil, "", fmt.Errorf("二维码响应缺少qrsig")
+	}
 	if qrsig != "" && DebugLog {
 		fmt.Printf("[QQPD] 二维码生成成功，qrsig: %s\n", qrsig[:20]+"...")
 	}
 
 	return qrcodeBytes, qrsig, nil
+}
+
+func buildQQLoginCheckURL(ptqrtoken string, now time.Time) string {
+	return fmt.Sprintf("https://xui.ptlogin2.qq.com/ssl/ptqrlogin?u1=https%%3A%%2F%%2Fpd.qq.com%%2Fexplore&ptqrtoken=%s&ptredirect=1&h=1&t=1&g=1&from_ui=1&ptlang=2052&action=0-0-%d&js_ver=25100115&js_type=1&login_sig=&pt_uistyle=40&aid=1600001587&daid=823&&o1vId=11f3315cde61b7b5da200e4a09fe308c&pt_js_version=28d22679", ptqrtoken, now.UnixMilli())
 }
 
 // extractQrsig 从Set-Cookie中提取qrsig

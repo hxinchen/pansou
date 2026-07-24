@@ -12,6 +12,7 @@ import (
 	"pansou/config"
 	"pansou/model"
 	"pansou/service"
+	searchscheduler "pansou/service/scheduler"
 	"pansou/tgchannel"
 	"pansou/util"
 	jsonutil "pansou/util/json"
@@ -249,6 +250,14 @@ func SearchHandler(c *gin.Context) {
 	finalizeSearchCacheStatus(c)
 
 	if err != nil {
+		if errors.Is(err, searchscheduler.ErrOverloaded) {
+			c.Set(usageErrorCodeContextKey, "SEARCH_OVERLOADED")
+			c.Header("Retry-After", "2")
+			response := model.NewErrorResponse(http.StatusTooManyRequests, "实时搜索繁忙，请稍后重试")
+			jsonData, _ := jsonutil.Marshal(response)
+			c.Data(http.StatusTooManyRequests, "application/json", jsonData)
+			return
+		}
 		if errors.Is(err, tgchannel.ErrInvalidChannel) {
 			c.Set(usageErrorCodeContextKey, "SEARCH_INVALID_CHANNEL")
 			response := model.NewErrorResponse(http.StatusBadRequest, "TG 频道格式无效: "+err.Error())

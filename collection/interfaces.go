@@ -92,6 +92,12 @@ type LinkCheckRepository interface {
 	DueLinkChecks(context.Context, int, time.Time) ([]LinkCheckCandidate, error)
 }
 
+// LinkCheckBatchRepository atomically persists a small group of completed
+// checks. The queue falls back to CompleteLinkCheck when it is unavailable.
+type LinkCheckBatchRepository interface {
+	CompleteLinkChecks(context.Context, []LinkCheckResult) error
+}
+
 // LinkCheckBacklogCounter is optional. Repositories that implement it let the
 // queue sample the exact due backlog even when no administrator is watching.
 type LinkCheckBacklogObservation struct {

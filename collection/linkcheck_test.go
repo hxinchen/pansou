@@ -38,16 +38,46 @@ type linkCheckTestClock struct {
 
 type fakeLinkCheckBacklogRepository struct {
 	*fakeLinkCheckRepository
-	count int64
-	done  chan struct{}
+	mu         sync.Mutex
+	count      int64
+	countCalls int
+	done       chan struct{}
 }
 
 func (f *fakeLinkCheckBacklogRepository) CountDueLinkChecks(_ context.Context, _ time.Time) (LinkCheckBacklogObservation, error) {
+	f.mu.Lock()
+	f.countCalls++
+	f.mu.Unlock()
 	select {
 	case f.done <- struct{}{}:
 	default:
 	}
 	return LinkCheckBacklogObservation{DueCount: f.count, PolicyRevision: "policy-v1"}, nil
+}
+
+type fakeBatchLinkCheckRepository struct {
+	*fakeLinkCheckRepository
+	batchMu    sync.Mutex
+	batchCalls int
+	batches    [][]LinkCheckResult
+}
+
+func (f *fakeBatchLinkCheckRepository) CompleteLinkChecks(_ context.Context, results []LinkCheckResult) error {
+	copyResults := append([]LinkCheckResult(nil), results...)
+	f.batchMu.Lock()
+	f.batchCalls++
+	f.batches = append(f.batches, copyResults)
+	f.batchMu.Unlock()
+	f.fakeLinkCheckRepository.mu.Lock()
+	f.fakeLinkCheckRepository.results = append(f.fakeLinkCheckRepository.results, copyResults...)
+	f.fakeLinkCheckRepository.mu.Unlock()
+	for range results {
+		select {
+		case f.done <- struct{}{}:
+		default:
+		}
+	}
+	return f.completeErr
 }
 
 func (c *linkCheckTestClock) Now() time.Time {
@@ -476,6 +506,42 @@ func TestLinkCheckQueueRejectsRestartWhileTimedOutStopIsFinishing(t *testing.T) 
 	}
 }
 
+func TestLinkCheckQueueDoesNotPersistShutdownCancellation(t *testing.T) {
+	repository := &fakeLinkCheckRepository{done: make(chan struct{}, 1)}
+	entered := make(chan struct{})
+	checker := LinkCheckerFunc(func(ctx context.Context, _ LinkCheckCandidate) (DetectionStatus, error) {
+		close(entered)
+		<-ctx.Done()
+		return DetectionUnknown, ctx.Err()
+	})
+	config := DefaultLinkCheckQueueConfig()
+	config.Workers = 1
+	config.PollInterval = time.Hour
+	queue := NewLinkCheckQueue(repository, checker, config)
+	ctx := context.Background()
+	if err := queue.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Enqueue(ctx, LinkCheckCandidate{ResourceID: 61, URL: "https://example.test", Platform: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("checker did not start")
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := queue.Stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	if len(repository.results) != 0 {
+		t.Fatalf("shutdown cancellation persisted results=%+v", repository.results)
+	}
+}
+
 func TestLinkCheckQueueBacklogETAStates(t *testing.T) {
 	clock := &linkCheckTestClock{now: time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC)}
 	repository := &fakeLinkCheckRepository{done: make(chan struct{}, 1)}
@@ -518,6 +584,203 @@ func TestLinkCheckQueueBacklogETAStates(t *testing.T) {
 	}
 	if err := queue.Stop(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLinkCheckQueueLimitsConcurrencyPerPlatformWithoutBlockingOtherPlatforms(t *testing.T) {
+	repository := &fakeLinkCheckRepository{done: make(chan struct{}, 8)}
+	release := make(chan struct{})
+	started := make(chan string, 8)
+	var mu sync.Mutex
+	inUse := make(map[string]int)
+	maxInUse := make(map[string]int)
+	checker := LinkCheckerFunc(func(ctx context.Context, candidate LinkCheckCandidate) (DetectionStatus, error) {
+		mu.Lock()
+		inUse[candidate.Platform]++
+		if inUse[candidate.Platform] > maxInUse[candidate.Platform] {
+			maxInUse[candidate.Platform] = inUse[candidate.Platform]
+		}
+		mu.Unlock()
+		started <- candidate.Platform
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return DetectionUnknown, ctx.Err()
+		}
+		mu.Lock()
+		inUse[candidate.Platform]--
+		mu.Unlock()
+		return DetectionValid, nil
+	})
+	config := DefaultLinkCheckQueueConfig()
+	config.Workers = 4
+	config.PlatformLimit = 2
+	config.PollInterval = time.Hour
+	queue := NewLinkCheckQueue(repository, checker, config)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := queue.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 4; index++ {
+		if err := queue.Enqueue(ctx, LinkCheckCandidate{ResourceID: int64(100 + index), URL: "https://xunlei.test", Platform: "xunlei"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := 0; index < 2; index++ {
+		if err := queue.Enqueue(ctx, LinkCheckCandidate{ResourceID: int64(200 + index), URL: "https://baidu.test", Platform: "baidu"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := make(map[string]int)
+	for range 4 {
+		select {
+		case platform := <-started:
+			seen[platform]++
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	if seen["xunlei"] != 2 || seen["baidu"] != 2 {
+		t.Fatalf("first active platforms=%v, want two per platform", seen)
+	}
+	close(release)
+	for range 6 {
+		select {
+		case <-repository.done:
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	if err := queue.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if maxInUse["xunlei"] > 2 || maxInUse["baidu"] > 2 {
+		t.Fatalf("max platform concurrency=%v", maxInUse)
+	}
+}
+
+func TestLinkCheckQueueCircuitBreakerCoolsDownAndHalfOpens(t *testing.T) {
+	repository := &fakeLinkCheckRepository{done: make(chan struct{}, 3)}
+	var mu sync.Mutex
+	var calls []time.Time
+	checker := LinkCheckerFunc(func(context.Context, LinkCheckCandidate) (DetectionStatus, error) {
+		mu.Lock()
+		calls = append(calls, time.Now())
+		call := len(calls)
+		mu.Unlock()
+		if call <= 2 {
+			return DetectionUnknown, errors.New("upstream timeout")
+		}
+		return DetectionValid, nil
+	})
+	config := DefaultLinkCheckQueueConfig()
+	config.Workers = 2
+	config.PlatformLimit = 1
+	config.CircuitFailures = 2
+	config.CircuitCooldown = 120 * time.Millisecond
+	config.PollInterval = time.Hour
+	queue := NewLinkCheckQueue(repository, checker, config)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := queue.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 3; index++ {
+		if err := queue.Enqueue(ctx, LinkCheckCandidate{ResourceID: int64(300 + index), URL: "https://xunlei.test", Platform: "xunlei"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 3 {
+		select {
+		case <-repository.done:
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	if err := queue.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 3 {
+		t.Fatalf("checker calls=%d", len(calls))
+	}
+	if cooldown := calls[2].Sub(calls[1]); cooldown < 100*time.Millisecond {
+		t.Fatalf("half-open probe started after %s, want cooldown", cooldown)
+	}
+}
+
+func TestLinkCheckQueueBatchesPersistenceWhenRepositorySupportsIt(t *testing.T) {
+	repository := &fakeBatchLinkCheckRepository{fakeLinkCheckRepository: &fakeLinkCheckRepository{done: make(chan struct{}, 3)}}
+	config := DefaultLinkCheckQueueConfig()
+	config.Workers = 3
+	config.PlatformLimit = 3
+	config.WriteBatchSize = 3
+	config.WriteFlushInterval = time.Second
+	config.PollInterval = time.Hour
+	queue := NewLinkCheckQueue(repository, LinkCheckerFunc(func(context.Context, LinkCheckCandidate) (DetectionStatus, error) {
+		return DetectionValid, nil
+	}), config)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := queue.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 3; index++ {
+		if err := queue.Enqueue(ctx, LinkCheckCandidate{ResourceID: int64(400 + index), URL: "https://example.test", Platform: "same"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 3 {
+		select {
+		case <-repository.done:
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	if err := queue.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	repository.batchMu.Lock()
+	defer repository.batchMu.Unlock()
+	if repository.batchCalls != 1 || len(repository.batches) != 1 || len(repository.batches[0]) != 3 {
+		t.Fatalf("batch calls=%d batches=%v", repository.batchCalls, repository.batches)
+	}
+}
+
+func TestLinkCheckQueueSamplesBacklogLessOftenThanDispatch(t *testing.T) {
+	repository := &fakeLinkCheckBacklogRepository{
+		fakeLinkCheckRepository: &fakeLinkCheckRepository{done: make(chan struct{}, 1)},
+		count:                   10,
+		done:                    make(chan struct{}, 4),
+	}
+	config := DefaultLinkCheckQueueConfig()
+	config.Workers = 1
+	config.PollInterval = 10 * time.Millisecond
+	config.BacklogInterval = 200 * time.Millisecond
+	queue := NewLinkCheckQueue(repository, LinkCheckerFunc(func(context.Context, LinkCheckCandidate) (DetectionStatus, error) {
+		return DetectionValid, nil
+	}), config)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := queue.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(70 * time.Millisecond)
+	if err := queue.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	repository.fakeLinkCheckRepository.mu.Lock()
+	dueCalls := repository.fakeLinkCheckRepository.dueCalls
+	repository.fakeLinkCheckRepository.mu.Unlock()
+	repository.mu.Lock()
+	countCalls := repository.countCalls
+	repository.mu.Unlock()
+	if dueCalls < 3 || countCalls != 1 {
+		t.Fatalf("due calls=%d count calls=%d", dueCalls, countCalls)
 	}
 }
 

@@ -38,6 +38,38 @@ func (s *Snapshot) Channels() []string {
 	return channels
 }
 
+// RealtimeChannels returns the channels used for an interactive search. Old
+// configurations without tiers are cold-started with the first 30 channels;
+// collection still sees every enabled channel through Channels().
+func (s *Snapshot) RealtimeChannels() []string {
+	if s == nil {
+		return nil
+	}
+	hasTiers := false
+	for _, channel := range s.Config.Channels {
+		if channel.Enabled && channel.Tier != "" {
+			hasTiers = true
+			break
+		}
+	}
+	result := make([]string, 0, len(s.Config.Channels))
+	for _, channel := range s.Config.Channels {
+		if !channel.Enabled {
+			continue
+		}
+		if hasTiers {
+			if channel.Tier == "realtime" {
+				result = append(result, channel.Key)
+			}
+			continue
+		}
+		if len(result) < 30 {
+			result = append(result, channel.Key)
+		}
+	}
+	return result
+}
+
 func (s *Snapshot) PluginNames() []string {
 	if s == nil || !s.Config.AsyncPluginsEnabled {
 		return nil
@@ -45,14 +77,25 @@ func (s *Snapshot) PluginNames() []string {
 	type ordered struct {
 		name  string
 		order int
+		tier  int
 	}
 	items := make([]ordered, 0, len(s.Config.Plugins))
 	for name, settings := range s.Config.Plugins {
 		if settings.Enabled {
-			items = append(items, ordered{name, settings.Order})
+			tier := 0
+			switch settings.Tier {
+			case "secondary":
+				tier = 1
+			case "deep":
+				tier = 2
+			}
+			items = append(items, ordered{name: name, order: settings.Order, tier: tier})
 		}
 	}
 	sort.Slice(items, func(i, j int) bool {
+		if items[i].tier != items[j].tier {
+			return items[i].tier < items[j].tier
+		}
 		if items[i].order == items[j].order {
 			return items[i].name < items[j].name
 		}

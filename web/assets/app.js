@@ -8,6 +8,16 @@
     resources: '/api/admin/resources',
     linkCheckStatus: '/api/admin/link-check-status',
     linkCheckPolicy: '/api/admin/link-check-policy',
+    proxyPoolSummary: '/api/admin/proxy-pool/summary',
+    proxyPoolNodes: '/api/admin/proxy-pool/nodes',
+    proxyPoolImport: '/api/admin/proxy-pool/import',
+    proxyPoolProbe: '/api/admin/proxy-pool/probe',
+    proxyPoolBatches: '/api/admin/proxy-pool/batches',
+    proxyPoolPolicies: '/api/admin/proxy-pool/policies',
+    mihomoOverview: '/api/admin/mihomo/overview',
+    mihomoSelection: '/api/admin/mihomo/selection',
+    mihomoLatencyTest: '/api/admin/mihomo/latency-test',
+    mihomoSubscriptions: '/api/admin/mihomo/subscriptions',
     keywords: '/api/admin/keywords',
     keywordAPISources: '/api/admin/keyword-api-sources',
     keywordAPISourceTest: '/api/admin/keyword-api-sources/test',
@@ -21,6 +31,9 @@
     sourceCatalog: '/api/admin/search-sources/catalog',
     sourceConfig: '/api/admin/search-sources/config',
     sourceValidate: '/api/admin/search-sources/validate',
+	searchScheduler: '/api/admin/search-scheduler',
+	searchSchedulerSuggestions: '/api/admin/search-scheduler/suggestions',
+	searchSchedulerSuggestionsApply: '/api/admin/search-scheduler/suggestions/apply',
     credentials: '/api/admin/plugin-credentials',
     userCredentials: '/api/admin/user-plugin-credentials',
     credentialLoginFlows: '/api/admin/plugin-credentials/login-flows'
@@ -45,7 +58,9 @@
     'run-detail': '任务详情',
     users: '用户管理',
     usage: 'API 监控',
-    sources: '搜索来源'
+    sources: '搜索来源',
+    routing: '线路路由',
+    'proxy-pool': '代理池'
   };
 
   var state = {
@@ -67,18 +82,20 @@
     },
     overviewRefresh: { timer: null, controller: null, serial: 0, fastRetryCount: 0 },
     resources: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, sortBy: '', sortDir: '' },
+    mihomo: { overview: null, subscriptions: [], query: '', region: '', switching: '', benchmarking: false, subscriptionSaving: false, subscriptionUpdating: '', subscriptionDeleting: '' },
+    proxyPool: { summary: null, nodes: [], nodePage: 1, nodePages: 1, nodeTotal: 0, batches: [], batchPage: 1, batchPages: 1, batchTotal: 0, policies: [], query: '', status: '', probing: false, probeIDs: new Set() },
     keywords: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, selected: new Set(), query: {}, tab: 'list', sortBy: '', sortDir: '' },
     keywordSources: { items: [], loaded: false, editing: null, createDraft: null, suppressDraftCapture: false, testResult: null, testResponse: null, selectedPath: '', testedSignature: '', originalSignature: '', requestSerial: 0, pollTimer: null, sortBy: '', sortDir: '', editorModes: { query: 'kv', header: 'kv', form: 'kv' } },
     keywordSyncRuns: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, loaded: false, requestSerial: 0, sortBy: '', sortDir: '', detailID: null, detailPollTimer: null, detailController: null, iterationController: null, iterations: [], iterationPage: 1, iterationPages: 1, iterationSortBy: '', iterationSortDir: '' },
     runs: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, sortBy: '', sortDir: '' },
     users: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, sortBy: '', sortDir: '' },
     usage: { overview: null, trends: [], logs: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, range: '7d', query: {}, sortBy: '', sortDir: '' },
-    sources: { catalog: [], config: null, activeConfig: null, credentials: [], adminCredentials: [], tab: 'admin', configTab: 'tg', dirty: false, saving: false, sharedTotal: 0, pluginSearch: '', credentialEditing: null, credentialEditMode: 'login', loginFlow: null, loginFlowTimer: null, credentialQuery: {}, search: { controller: null, results: null, elapsedMS: 0, cacheStatus: '', submitted: false, actualSources: [] } },
+    sources: { catalog: [], config: null, activeConfig: null, credentials: [], adminCredentials: [], tab: 'admin', configTab: 'tg', dirty: false, saving: false, sharedTotal: 0, pluginSearch: '', credentialEditing: null, credentialEditMode: 'login', loginFlow: null, loginFlowTimer: null, credentialQuery: {}, credentialTest: { credential: null, controller: null, results: null, elapsedMS: 0, submitted: false }, search: { controller: null, results: null, elapsedMS: 0, cacheStatus: '', submitted: false, actualSources: [] } },
     runPicker: { items: [], selected: new Set(), search: '', page: 1, pages: 1, total: 0, loading: false, controller: null, searchTimer: null },
     runDetail: { id: null, summary: null, items: [], page: 1, pages: 1, loadedPages: 0, total: 0, loading: false, query: {}, controller: null, itemsController: null, pollController: null, sourceControllers: {}, observer: null },
     pollTimer: null,
     detailPollTimer: null,
-    requestSerial: { resources: 0, keywords: 0, runs: 0, users: 0, usage: 0, usageLogs: 0, sources: 0 },
+    requestSerial: { resources: 0, mihomo: 0, proxyPool: 0, keywords: 0, runs: 0, users: 0, usage: 0, usageLogs: 0, sources: 0 },
     requestControllers: {},
     confirmCallback: null
   };
@@ -794,6 +811,8 @@
       loadLinkCheckStatus({ force: Boolean(force), silent: Boolean(state.linkCheckStatus.data) });
       return loadResources(force);
     }
+    if (view === 'routing') return loadMihomo(force, false);
+    if (view === 'proxy-pool') return loadProxyPool(force);
     if (view === 'keywords') {
       if (state.keywords.tab === 'api') return loadKeywordSources(force);
       if (state.keywords.tab === 'history') return loadKeywordSyncRuns({ force: force });
@@ -4628,7 +4647,9 @@
     try {
       var results = await Promise.all([
         apiRequest(API.sourceCatalog),
-        apiRequest(API.sourceConfig)
+		apiRequest(API.sourceConfig),
+		apiRequest(API.searchScheduler),
+		apiRequest(API.searchSchedulerSuggestions)
       ]);
       state.sources.catalog = arrayFrom(results[0], ['items', 'plugins', 'catalog']);
       var activeConfig = pick(results[1], ['config'], results[1] || {});
@@ -4637,6 +4658,8 @@
       state.sources.version = numberValue(pick(results[1], ['version'], 0));
       state.sources.updatedAt = pick(results[1], ['updated_at'], null);
       state.sources.snapshot = pick(results[1], ['snapshot', 'runtime'], {});
+	  state.sources.scheduler = results[2] || {};
+	  state.sources.schedulerSuggestions = arrayFrom(results[3], ['items']);
       state.sources.dirty = false;
       renderSources();
       await loadSourceCredentials();
@@ -4749,6 +4772,10 @@
     var config = settings.config || {};
     var allowed = Array.isArray(descriptor.allowed_config_keys) ? descriptor.allowed_config_keys : [];
     var fields = [];
+	var tier = settings.tier || 'primary';
+	fields.push('<label class="plugin-config-field"><span>搜索层级</span><select class="source-input" data-source-plugin-policy="' + escapeHTML(key) + '" data-policy-key="tier"><option value="primary"' + (tier === 'primary' ? ' selected' : '') + '>第一批</option><option value="secondary"' + (tier === 'secondary' ? ' selected' : '') + '>第二批</option><option value="deep"' + (tier === 'deep' ? ' selected' : '') + '>深度搜索</option></select><small>普通搜索按层级逐批执行。</small></label>');
+	fields.push('<label class="plugin-config-field"><span>单来源并发</span><input class="source-input" type="number" min="0" data-source-plugin-policy="' + escapeHTML(key) + '" data-policy-key="max_concurrency" value="' + escapeHTML(settings.max_concurrency || '') + '" placeholder="默认 2"><small>0 表示使用全局默认值。</small></label>');
+	fields.push('<label class="plugin-config-field"><span>来源超时（秒）</span><input class="source-input" type="number" min="0" data-source-plugin-policy="' + escapeHTML(key) + '" data-policy-key="timeout_seconds" value="' + escapeHTML(settings.timeout_seconds || '') + '" placeholder="使用搜索总预算"></label>');
     if (allowed.indexOf('base_url') >= 0) {
       fields.push('<label class="plugin-config-field"><span>服务地址</span><input class="source-input" type="url" inputmode="url" data-source-plugin-config="' + escapeHTML(key) + '" data-config-key="base_url" value="' + escapeHTML(config.base_url || '') + '" placeholder="https://example.com"><small>仅支持 HTTPS，变更后相关账号需要重新认证。</small></label>');
     }
@@ -4837,7 +4864,8 @@
     var channels = arrayFrom(config, ['channels']);
     if (byId('source-channel-count')) byId('source-channel-count').textContent = String(channels.length);
     byId('source-channels').innerHTML = channels.length ? channels.map(function (channel, index) {
-      return '<article class="source-card"><label class="switch-row"><input type="checkbox" data-source-channel-enabled="' + index + '" ' + (boolValue(channel.enabled, true) ? 'checked' : '') + '><span>启用</span></label><input class="source-input" data-source-channel-key="' + index + '" value="' + escapeHTML(channel.key || '') + '" aria-label="频道标识"><input class="source-input" data-source-channel-name="' + index + '" value="' + escapeHTML(channel.display_name || '') + '" placeholder="显示名称" aria-label="频道显示名称"><button class="row-action danger" type="button" data-action="remove-channel" data-index="' + index + '" aria-label="删除频道">' + icon('trash-2') + '</button></article>';
+	  var tier = channel.tier || (index < 30 ? 'realtime' : 'collection');
+	  return '<article class="source-card"><label class="switch-row"><input type="checkbox" data-source-channel-enabled="' + index + '" ' + (boolValue(channel.enabled, true) ? 'checked' : '') + '><span>启用</span></label><input class="source-input" data-source-channel-key="' + index + '" value="' + escapeHTML(channel.key || '') + '" aria-label="频道标识"><input class="source-input" data-source-channel-name="' + index + '" value="' + escapeHTML(channel.display_name || '') + '" placeholder="显示名称" aria-label="频道显示名称"><select class="source-input" data-source-channel-tier="' + index + '" aria-label="频道层级"><option value="realtime"' + (tier === 'realtime' ? ' selected' : '') + '>实时层</option><option value="collection"' + (tier === 'collection' ? ' selected' : '') + '>采集层</option></select><input class="source-input" type="number" min="0" data-source-channel-limit="' + index + '" value="' + escapeHTML(channel.max_concurrency || '') + '" placeholder="并发(默认2)" aria-label="频道并发"><button class="row-action danger" type="button" data-action="remove-channel" data-index="' + index + '" aria-label="删除频道">' + icon('trash-2') + '</button></article>';
     }).join('') : '<div class="empty-state compact-empty"><p>暂无 TG 频道，点击“新增”开始配置。</p></div>';
     renderSourcePlugins(config);
     switchSourceConfigTab(state.sources.configTab);
@@ -4854,6 +4882,29 @@
     renderSourceCredentials();
     renderSourceSearchOptions();
     renderSourceSearchResults();
+	var scheduler = state.sources.scheduler || {};
+	var schedulerTarget = byId('source-scheduler-status');
+	if (schedulerTarget) {
+	  var active = numberValue(scheduler.active, 0);
+	  var activeLimit = numberValue(scheduler.active_limit, 0);
+	  var waiting = numberValue(scheduler.waiting, 0);
+	  var queueLimit = numberValue(scheduler.queue_limit, 0);
+	  var rejected = numberValue(scheduler.rejected_searches, 0);
+	  schedulerTarget.innerHTML = '<div class="source-scheduler-metric' + (activeLimit > 0 && active >= activeLimit ? ' is-warning' : '') + '"><strong>' + active + ' / ' + activeLimit + '</strong><span>活跃搜索</span></div><div class="source-scheduler-metric' + (waiting > 0 ? ' is-warning' : '') + '"><strong>' + waiting + ' / ' + queueLimit + '</strong><span>排队请求</span></div><div class="source-scheduler-metric' + (rejected > 0 ? ' is-warning' : '') + '"><strong>' + formatNumber(rejected) + '</strong><span>累计拒绝</span></div>';
+	}
+	var suggestionTarget = byId('source-tier-suggestions');
+	if (suggestionTarget) {
+	  var suggestions = state.sources.schedulerSuggestions || [];
+	  var eligibleSuggestions = suggestions.filter(function (item) { return boolValue(item.eligible, false) && item.suggested_tier; });
+	  var pendingChanges = eligibleSuggestions.filter(function (item) { return String(item.current_tier || '') !== String(item.suggested_tier || ''); }).length;
+	  var learningSuggestions = Math.max(0, suggestions.length - eligibleSuggestions.length);
+	  var visibleSuggestions = suggestions.slice(0, 20);
+	  suggestionTarget.innerHTML = suggestions.length ? '<section class="source-tier-card"><div class="source-tier-header"><div class="source-tier-title">' + icon('wand-sparkles') + '<div><h3>分层建议</h3><p>根据历史稳定性与响应速度生成</p></div></div><button class="button secondary" type="button" data-action="apply-tier-suggestions" ' + (pendingChanges ? '' : 'disabled') + '><span>应用达标建议</span></button></div><div class="source-tier-overview"><div><strong>' + eligibleSuggestions.length + '</strong><span>已达标</span></div><div><strong>' + pendingChanges + '</strong><span>待调整</span></div><div><strong>' + learningSuggestions + '</strong><span>积累中</span></div></div><details class="source-tier-details"' + (pendingChanges ? ' open' : '') + '><summary><span>' + (pendingChanges ? '查看建议与样本进度' : '查看样本积累进度') + '</span><em>' + visibleSuggestions.length + ' / ' + suggestions.length + '</em>' + icon('chevron-down') + '</summary><div class="source-tier-list">' + visibleSuggestions.map(function (item) {
+		var eligible = boolValue(item.eligible, false) && item.suggested_tier;
+		var tierText = eligible ? escapeHTML(item.current_tier || '未分层') + ' → ' + escapeHTML(item.suggested_tier) : '样本积累中';
+		return '<article class="source-tier-item ' + (eligible ? 'is-eligible' : 'is-learning') + '"><div class="source-tier-item-heading"><strong title="' + escapeHTML(item.source) + '">' + escapeHTML(item.source) + '</strong><span class="type-badge">' + tierText + '</span></div><div class="source-tier-metrics"><span>运行 ' + formatNumber(item.runs || 0) + ' 次</span><span>观察 ' + formatNumber(item.observed_days || 0) + ' 天</span><span>评分 ' + Number(item.score || 0).toFixed(1) + '</span><span>P95 ' + formatNumber(item.p95_ms || 0) + 'ms</span></div><p>' + escapeHTML(item.eligibility || '') + '</p></article>';
+	  }).join('') + '</div></details></section>' : '<section class="source-tier-card"><div class="source-tier-empty">' + icon('chart-no-axes-combined') + '<div><strong>暂无分层建议</strong><p>积累来源运行指标后，这里会给出实时层与采集层建议。</p></div></div></section>';
+	}
     refreshIcons(byId('view-sources'));
   }
 
@@ -4872,20 +4923,43 @@
       var suspended = Boolean(item.admin_suspended_at || item.admin_suspended || item.status === 'admin_suspended');
       var enabled = pick(item, ['owner_enabled', 'enabled'], true) !== false;
       var status = suspended ? 'admin_suspended' : (!enabled ? 'disabled' : (item.status || 'unknown'));
-      var owner = state.sources.tab === 'users' ? (item.owner_username || '用户 #' + (item.owner_user_id || '—')) : (item.scope === 'public_shared' ? '公开共享' : '管理员私有');
+      var userOwned = item.scope === 'user_private';
+      var owner = userOwned
+        ? (state.sources.tab === 'users' ? (item.owner_username || '用户 #' + (item.owner_user_id || '—')) : '用户私有')
+        : (item.scope === 'public_shared' ? '公开共享' : '管理员私有');
       var id = credentialPublicID(item);
       var searchScope = credentialSearchScopeSummary(item);
-      var actions = state.sources.tab === 'admin'
-        ? '<button class="credential-action" type="button" data-action="relogin-plugin-credential" data-id="' + escapeHTML(id) + '">' + icon('refresh-cw') + '<span>重新登录</span></button>' +
+	  var health = credentialHealthDisplay(item);
+	  var accountBadge = status === 'invalid' && (item.plugin_key === 'gying' || item.plugin_key === 'aisoupan')
+		? '<span class="status-badge status-invalid credential-alert-badge">' + (item.plugin_key === 'aisoupan' ? '需要更新 TOKEN' : '需要重新登录') + '</span>'
+		: statusBadge(status);
+      var actions = state.sources.tab === 'admin' && !userOwned
+		? '<button class="credential-action" type="button" data-action="test-plugin-credential" data-id="' + escapeHTML(id) + '">' + icon('search-check') + '<span>搜索测试</span></button>' +
+		  '<button class="credential-action" type="button" data-action="relogin-plugin-credential" data-id="' + escapeHTML(id) + '">' + icon('refresh-cw') + '<span>' + (item.plugin_key === 'aisoupan' ? '更新 TOKEN' : '重新登录') + '</span></button>' +
           ((item.plugin_key === 'qqpd' || item.plugin_key === 'weibo') ? '<button class="credential-action" type="button" data-action="edit-plugin-credential-search-scope" data-id="' + escapeHTML(id) + '">' + icon('list-filter') + '<span>搜索范围</span></button>' : '') +
           '<button class="credential-action" type="button" data-action="change-plugin-credential-scope" data-id="' + escapeHTML(id) + '">' + icon('users') + '<span>' + (item.scope === 'public_shared' ? '转为私有' : '设为共享') + '</span></button>' +
           '<button class="credential-action" type="button" data-action="toggle-plugin-credential" data-id="' + escapeHTML(id) + '">' + icon(enabled ? 'pause' : 'play') + '<span>' + (enabled ? '停用' : '启用') + '</span></button>' +
           '<button class="credential-action danger" type="button" data-action="delete-plugin-credential" data-id="' + escapeHTML(id) + '">' + icon('trash-2') + '<span>删除</span></button>'
         : '<button class="credential-action" type="button" data-action="suspend-user-credential" data-id="' + escapeHTML(id) + '">' + icon(suspended ? 'play' : 'pause') + '<span>' + (suspended ? '恢复' : '暂停') + '</span></button>' +
           '<button class="credential-action danger" type="button" data-action="delete-user-credential" data-id="' + escapeHTML(id) + '">' + icon('trash-2') + '<span>删除</span></button>';
-      return '<article class="credential-card"><div class="credential-identity"><strong>' + escapeHTML(item.display_name || metadata.account_hint || item.plugin_key) + '</strong><small>' + escapeHTML(owner + ' · ' + item.plugin_key) + '</small></div>' + statusBadge(status) + '<div class="credential-meta"><span>可见范围 ' + escapeHTML(item.scope === 'public_shared' ? '公开共享' : (item.scope === 'admin_private' ? '管理员私有' : '用户私有')) + '</span>' + (searchScope ? '<span>搜索范围 ' + escapeHTML(searchScope) + '</span>' : '') + '<span>到期 ' + escapeHTML(formatDate(item.expires_at, true)) + '</span><span>最近成功 ' + escapeHTML(formatDate(item.last_success_at, true)) + '</span><span>' + escapeHTML(item.last_error_code || '运行正常') + '</span></div><div class="credential-card-actions">' + actions + '</div></article>';
+		  return '<article class="credential-card' + (status === 'invalid' ? ' is-invalid' : '') + '"><div class="credential-identity"><strong>' + escapeHTML(item.display_name || metadata.account_hint || item.plugin_key) + '</strong><small>' + escapeHTML(owner + ' · ' + item.plugin_key) + '</small></div>' + accountBadge + '<div class="credential-meta"><span>可见范围 ' + escapeHTML(item.scope === 'public_shared' ? '公开共享' : (item.scope === 'admin_private' ? '管理员私有' : '用户私有')) + '</span>' + (searchScope ? '<span>搜索范围 ' + escapeHTML(searchScope) + '</span>' : '') + '<span>到期 ' + escapeHTML(formatDate(item.expires_at, true)) + '</span><span>最近成功 ' + escapeHTML(formatDate(item.last_success_at, true)) + '</span>' + ((item.plugin_key === 'gying' || item.plugin_key === 'aisoupan' || item.last_health_check_at) ? '<span class="credential-health credential-health-' + escapeHTML(health.key) + '" title="' + escapeHTML(health.title) + '">' + escapeHTML(health.label) + ' · ' + escapeHTML(formatDate(item.last_health_check_at, true)) + '</span>' : '') + '<span>' + escapeHTML(item.last_health_error_code || item.last_error_code || '运行正常') + '</span></div><div class="credential-card-actions">' + actions + '</div></article>';
     }).join('') : '<div class="empty-state compact-empty"><p>当前视图暂无插件账号。</p></div>';
     refreshIcons(target);
+  }
+
+  function credentialHealthDisplay(item) {
+	var status = String(item.last_health_status || 'unknown').toLowerCase();
+	var code = String(item.last_health_error_code || '').trim();
+	  var codeLabels = {
+	  auth_failed: '账号密码或登录态已失效',
+	  rate_limited: '上游接口触发限流',
+	  credential_decrypt_failed: '凭证解密失败',
+	  credential_payload_invalid: '凭证内容损坏',
+	  health_check_upstream_error: '上游或代理暂时异常',
+	  health_check_failed: '测活请求失败'
+	};
+	var labels = { healthy: '测活正常', error: '测活异常', invalid: '需要重新登录', unknown: '待首次测活' };
+	return { key: status, label: labels[status] || labels.unknown, title: codeLabels[code] || code || labels[status] || labels.unknown };
   }
 
   function credentialPublicID(item) {
@@ -4894,6 +4968,621 @@
 
   function findSourceCredential(id) {
     return (state.sources.credentials || []).find(function (item) { return credentialPublicID(item) === String(id); });
+  }
+
+  function openCredentialSearchTest(credential) {
+    if (!credential || credential.scope === 'user_private') return;
+    if (state.sources.credentialTest.controller) state.sources.credentialTest.controller.abort();
+    state.sources.credentialTest = { credential: credential, controller: null, results: null, elapsedMS: 0, submitted: false };
+    var metadata = credential.public_metadata || {};
+    byId('credential-search-test-title').textContent = '测试 ' + (credential.display_name || metadata.account_hint || credential.plugin_key);
+    byId('credential-search-test-context').textContent = (credential.plugin_key || '插件') + ' · ' + (credential.scope === 'public_shared' ? '公开共享' : '管理员私有') + ' · 仅使用当前账号';
+    byId('credential-search-test-keyword').value = '';
+    showAlert('credential-search-test-alert', '');
+    renderCredentialSearchTestResults();
+    byId('credential-search-test-dialog').showModal();
+    window.setTimeout(function () { byId('credential-search-test-keyword').focus(); }, 30);
+  }
+
+  function renderCredentialSearchTestResults() {
+    var target = byId('credential-search-test-results');
+    if (!target) return;
+    var test = state.sources.credentialTest;
+    if (!test.submitted) {
+      target.innerHTML = '<div class="empty-state compact-empty">' + icon('search-check') + '<h3>等待测试</h3><p>输入关键词后，只会调用当前账号，不会切换其他凭证。</p></div>';
+      refreshIcons(target);
+      return;
+    }
+    var data = test.results || {};
+    var merged = pick(data, ['merged_by_type'], {}) || {};
+    var types = Object.keys(merged).filter(function (type) { return arrayFrom(merged[type], ['items', 'links']).length > 0; }).sort(function (left, right) {
+      var countDifference = arrayFrom(merged[right], ['items', 'links']).length - arrayFrom(merged[left], ['items', 'links']).length;
+      return countDifference || String(diskLabels[left] || left).localeCompare(String(diskLabels[right] || right), 'zh-CN');
+    });
+    var total = numberValue(pick(data, ['total'], 0), 0);
+    var duration = numberValue(pick(data, ['duration_ms'], test.elapsedMS), test.elapsedMS);
+    var summary = '<div class="source-search-summary"><strong>' + formatNumber(total) + '</strong><span>条结果</span><span class="type-badge">' + formatNumber(duration) + ' ms</span><span class="type-badge">指定账号</span></div>';
+    if (!types.length) {
+      target.innerHTML = summary + '<div class="empty-state compact-empty">' + icon('package-open') + '<h3>测试成功，但没有结果</h3><p>该 TOKEN 已正常完成请求，可换一个关键词继续测试。</p></div>';
+      refreshIcons(target);
+      return;
+    }
+    target.innerHTML = summary + types.map(function (type) {
+      var items = arrayFrom(merged[type], ['items', 'links']);
+      var cards = items.map(function (item) {
+        var resultURL = String(pick(item, ['url', 'link'], '') || '');
+        var title = String(pick(item, ['note', 'title', 'name'], '') || sourceSearchLinkHost(resultURL));
+        var source = String(pick(item, ['source'], '') || 'plugin:' + String(pick(data, ['plugin_key'], '')));
+        var subSource = String(pick(item, ['sub_source'], '') || '');
+        var password = String(pick(item, ['password', 'pwd', 'code'], '') || '');
+        var externalURL = safeExternalURL(resultURL);
+        return '<article class="source-search-card"><div class="source-search-card-title"><strong title="' + escapeHTML(title) + '">' + escapeHTML(title) + '</strong><span class="type-badge">' + escapeHTML(diskLabels[type] || type) + '</span></div><div class="source-search-card-meta"><span>' + escapeHTML(source) + '</span>' + (subSource ? '<span>内部：' + escapeHTML(subSource) + '</span>' : '') + '</div><div class="source-search-card-link" title="' + escapeHTML(resultURL) + '">' + escapeHTML(sourceSearchLinkHost(resultURL)) + ' · ' + escapeHTML(resultURL) + '</div>' + (password ? '<div class="source-search-password">提取码 <strong>' + escapeHTML(password) + '</strong></div>' : '') + '<div class="source-search-card-actions"><button type="button" data-action="copy-source-search-result" data-url="' + escapeHTML(resultURL) + '" data-password="' + escapeHTML(password) + '">' + icon('copy') + '<span>复制</span></button>' + (externalURL ? '<a href="' + escapeHTML(externalURL) + '" target="_blank" rel="noopener noreferrer">' + icon('external-link') + '<span>打开</span></a>' : '') + '</div></article>';
+      }).join('');
+      return '<section class="source-search-disk-group"><div class="source-search-disk-heading"><h3>' + escapeHTML(diskLabels[type] || type) + '</h3><span>' + formatNumber(items.length) + ' 条</span></div><div class="source-search-card-list">' + cards + '</div></section>';
+    }).join('');
+    refreshIcons(target);
+  }
+
+  function mihomoTypeLabel(type) {
+    return { Selector: '手动选择', URLTest: '自动测速', Fallback: '故障转移', LoadBalance: '负载均衡', Trojan: 'Trojan', Shadowsocks: 'Shadowsocks', Vmess: 'VMess', Hysteria2: 'Hysteria 2' }[type] || type || '代理节点';
+  }
+
+  function mihomoLocation(exit) {
+    var values = [pick(exit, ['country'], ''), pick(exit, ['region'], ''), pick(exit, ['city'], '')].filter(function (value, index, items) {
+      return value && items.indexOf(value) === index;
+    });
+    return values.join(' · ') || '地区待识别';
+  }
+
+  function renderMihomo() {
+    var overview = state.mihomo.overview || {};
+    var group = overview.group || {};
+    var exit = overview.exit || {};
+    var effectiveNode = pick(group, ['effective_node'], '未识别');
+    var current = pick(group, ['current'], '未选择');
+    var summary = byId('mihomo-summary');
+    if (!summary) return;
+
+    var benchmarkActive = state.mihomo.benchmarking || boolValue(overview.latency_testing, false);
+    var benchmarkStatus = byId('mihomo-benchmark-status');
+    if (benchmarkStatus) {
+      benchmarkStatus.hidden = !benchmarkActive;
+      benchmarkStatus.innerHTML = benchmarkActive ? '<span class="operation-status-icon">' + icon('loader-circle', 'spin') + '</span><span><strong>线路测速进行中</strong><small>正在并发检测全部候选线路，完成后会自动按延迟从低到高排列，通常需要 5–10 秒。</small></span>' : '';
+      refreshIcons(benchmarkStatus);
+    }
+    var latencyButton = byId('mihomo-latency-test-button');
+    setButtonLoading(latencyButton, benchmarkActive, '测速中');
+    if (!benchmarkActive && latencyButton) latencyButton.disabled = Boolean(state.mihomo.switching);
+
+    summary.innerHTML = '<div class="routing-hero-main"><div class="routing-hero-label"><span class="routing-pulse"></span><span>LIVE EGRESS</span></div><p>Telegram 当前实际出口</p><h2>' + escapeHTML(effectiveNode) + '</h2><div class="routing-exit-meta"><span>' + icon('map-pin') + escapeHTML(mihomoLocation(exit)) + '</span><span>' + icon('globe-2') + escapeHTML(pick(exit, ['ip'], '出口 IP 待识别')) + '</span></div></div><div class="routing-hero-metrics"><div><span>代理组选择</span><strong>' + escapeHTML(current) + '</strong><small>' + escapeHTML(pick(group, ['name'], '良心云')) + '</small></div><div><span>运行模式</span><strong>' + escapeHTML(String(pick(overview, ['mode'], '—')).toUpperCase()) + '</strong><small>Telegram 规则优先</small></div><div><span>出口状态</span><strong class="routing-online-text">在线</strong><small>' + escapeHTML(formatDate(pick(overview, ['checked_at'], ''), true)) + '</small></div></div>';
+
+    var routeTarget = byId('mihomo-route');
+    var route = Array.isArray(overview.route) ? overview.route : [];
+    routeTarget.innerHTML = route.length ? route.map(function (step, index) {
+      var content = '<div class="routing-hop routing-hop-' + escapeHTML(pick(step, ['kind'], 'group')) + '"><span class="routing-hop-icon">' + icon(step.kind === 'application' ? 'box' : (step.kind === 'proxy' ? 'waypoints' : (step.kind === 'rule' ? 'git-branch' : (step.kind === 'node' ? 'radio-tower' : 'layers-3')))) + '</span><span><strong>' + escapeHTML(pick(step, ['label'], '')) + '</strong><small>' + escapeHTML(pick(step, ['detail'], '')) + '</small></span></div>';
+      return content + (index < route.length - 1 ? '<span class="routing-arrow">' + icon('arrow-right') + '</span>' : '');
+    }).join('') : '<div class="table-empty">暂无路由信息</div>';
+    var routeStatus = byId('mihomo-route-status');
+    routeStatus.textContent = String(pick(overview, ['mode'], '')).toLowerCase() === 'rule' ? 'RULE 模式运行中' : '当前模式：' + pick(overview, ['mode'], '未知');
+    routeStatus.classList.toggle('warning', String(pick(overview, ['mode'], '')).toLowerCase() !== 'rule');
+
+    var candidates = Array.isArray(group.candidates) ? group.candidates.slice() : [];
+    candidates.sort(function (left, right) {
+      var leftDelay = numberValue(left.delay_ms, 0);
+      var rightDelay = numberValue(right.delay_ms, 0);
+      if (leftDelay > 0 && rightDelay <= 0) return -1;
+      if (leftDelay <= 0 && rightDelay > 0) return 1;
+      if (leftDelay !== rightDelay) return leftDelay - rightDelay;
+      if (boolValue(left.selected, false) !== boolValue(right.selected, false)) return boolValue(left.selected, false) ? -1 : 1;
+      return String(left.name || '').localeCompare(String(right.name || ''), 'zh-CN');
+    });
+    var regions = [];
+    candidates.forEach(function (candidate) {
+      var region = pick(candidate, ['region'], '') || '其他';
+      if (regions.indexOf(region) === -1) regions.push(region);
+    });
+    regions.sort(function (a, b) { if (a === '策略组') return -1; if (b === '策略组') return 1; return a.localeCompare(b, 'zh-CN'); });
+    var regionSelect = byId('mihomo-region');
+    regionSelect.innerHTML = '<option value="">全部地区</option>' + regions.map(function (region) { return '<option value="' + escapeHTML(region) + '"' + (state.mihomo.region === region ? ' selected' : '') + '>' + escapeHTML(region) + '</option>'; }).join('');
+
+    var query = state.mihomo.query.toLowerCase();
+    var filtered = candidates.filter(function (candidate) {
+      var region = pick(candidate, ['region'], '') || '其他';
+      if (state.mihomo.region && region !== state.mihomo.region) return false;
+      if (!query) return true;
+      return [candidate.name, candidate.type, region, candidate.effective_node].join(' ').toLowerCase().indexOf(query) !== -1;
+    });
+    byId('mihomo-node-count').textContent = formatNumber(filtered.length) + ' / ' + formatNumber(candidates.length) + ' 条线路';
+    var list = byId('mihomo-candidates');
+    list.innerHTML = filtered.length ? filtered.map(function (candidate) {
+      var selected = boolValue(candidate.selected, false);
+      var effective = boolValue(candidate.effective, false);
+      var automatic = boolValue(candidate.automatic, false);
+      var delay = numberValue(candidate.delay_ms, 0);
+      var delayTone = delay > 0 && delay < 150 ? 'good' : (delay > 0 && delay < 300 ? 'medium' : (delay > 0 ? 'slow' : 'unknown'));
+      var switching = state.mihomo.switching === candidate.name;
+      var delayMarkup = benchmarkActive ? '<span class="routing-delay is-testing">' + icon('loader-circle', 'spin') + '<span>检测中</span></span>' : '<span class="routing-delay ' + delayTone + '">' + (delay ? formatNumber(delay) + ' ms' : '超时 / 待测速') + '</span>';
+      return '<button class="routing-node-card' + (selected ? ' is-selected' : '') + (effective ? ' is-effective' : '') + (boolValue(candidate.alive, true) ? '' : ' is-offline') + '" type="button" data-action="select-mihomo-node" data-name="' + escapeHTML(candidate.name) + '"' + (state.mihomo.switching || benchmarkActive ? ' disabled' : '') + '><span class="routing-node-symbol">' + icon(automatic ? 'shuffle' : 'server') + '</span><span class="routing-node-copy"><strong>' + escapeHTML(candidate.name) + '</strong><small><span>' + escapeHTML(pick(candidate, ['region'], '') || '其他') + '</span><span>' + escapeHTML(mihomoTypeLabel(candidate.type)) + '</span>' + (automatic && candidate.effective_node ? '<span>当前：' + escapeHTML(candidate.effective_node) + '</span>' : '') + '</small></span><span class="routing-node-signals">' + delayMarkup + (selected ? '<span class="routing-selected-chip">已选择</span>' : (effective ? '<span class="routing-effective-chip">实际出口</span>' : '<span class="routing-select-copy">切换</span>')) + (switching ? '<span class="routing-switching">切换中…</span>' : '') + '</span></button>';
+    }).join('') : '<div class="routing-empty"><i data-lucide="search-x" aria-hidden="true"></i><strong>没有匹配的线路</strong><span>调整地区或搜索条件。</span></div>';
+
+    var details = byId('mihomo-details');
+    var latencyTest = overview.latency_test || {};
+    var latencyDetail = pick(latencyTest, ['completed_at'], '') ? formatDate(latencyTest.completed_at, true) : '尚未手动测速';
+    var latencySummary = pick(latencyTest, ['completed_at'], '') ? String(numberValue(latencyTest.succeeded, 0)) + ' 条成功 / ' + String(numberValue(latencyTest.failed, 0)) + ' 条超时' : '';
+    var detailRows = [
+      ['控制器', '已连接', '在线'],
+      ['Mihomo 端口', pick(overview, ['mixed_port'], 0) ? ':' + pick(overview, ['mixed_port'], 0) : '—', ''],
+      ['受管代理组', pick(group, ['name'], '—'), pick(group, ['type'], '')],
+      ['GLOBAL 当前值', pick(overview, ['global_current'], '—'), '不控制已命中规则的 TG 流量'],
+      ['出口运营商', pick(exit, ['org'], '—'), pick(exit, ['source'], '') === 'ipinfo' ? '在线定位' : '按节点名称识别'],
+      ['最近测速', latencyDetail, latencySummary]
+    ];
+    details.innerHTML = detailRows.map(function (row) { return '<div class="routing-detail-row"><span>' + escapeHTML(row[0]) + '</span><strong>' + escapeHTML(String(row[1])) + '</strong>' + (row[2] ? '<small>' + escapeHTML(row[2]) + '</small>' : '') + '</div>'; }).join('');
+    refreshIcons(summary); refreshIcons(routeTarget); refreshIcons(list); refreshIcons(details);
+    renderMihomoSubscriptions();
+  }
+
+  function mihomoSubscriptionStatus(status) {
+    return {
+      healthy: { label: '可用', tone: 'healthy' },
+      duplicate_only: { label: '已全部去重', tone: 'healthy' },
+      pending: { label: '等待首次更新', tone: 'pending' },
+      error: { label: '更新失败', tone: 'error' },
+      controller_unavailable: { label: '控制器离线', tone: 'error' }
+    }[status] || { label: status || '未知', tone: 'pending' };
+  }
+
+  function formatSubscriptionInterval(seconds) {
+    var value = numberValue(seconds, 3600);
+    if (value % 86400 === 0) return '每 ' + formatNumber(value / 86400) + ' 天';
+    if (value % 3600 === 0) return '每 ' + formatNumber(value / 3600) + ' 小时';
+    return '每 ' + formatNumber(Math.max(1, Math.round(value / 60))) + ' 分钟';
+  }
+
+  function validSubscriptionTime(value) {
+    return value && String(value).indexOf('0001-') !== 0;
+  }
+
+  function mihomoSubscriptionFetchLabel(value) {
+    return {
+      rule: '跟随规则', direct: '服务器直连', baseline: '当前良心云', auto: '自动选择', fallback: '故障转移', builtin: '原有配置'
+    }[value] || '跟随规则';
+  }
+
+  function renderMihomoSubscriptions() {
+    var target = byId('mihomo-subscriptions');
+    if (!target) return;
+    var items = Array.isArray(state.mihomo.subscriptions) ? state.mihomo.subscriptions : [];
+    var count = byId('mihomo-subscription-count');
+    var uniqueTotal = items.reduce(function (total, item) { return total + numberValue(item.unique_node_count, numberValue(item.node_count, 0)); }, 0);
+    if (count) count.textContent = formatNumber(items.length) + ' 个订阅来源 · ' + formatNumber(uniqueTotal) + ' 个唯一节点';
+    var operation = byId('mihomo-subscription-status');
+    var activeItem = items.find(function (item) { return state.mihomo.subscriptionUpdating === item.id || boolValue(item.updating, false); });
+    if (operation) {
+      operation.hidden = !activeItem;
+      operation.innerHTML = activeItem ? '<span class="operation-status-icon">' + icon('loader-circle', 'spin') + '</span><span><strong>正在更新订阅</strong><small>正在从“' + escapeHTML(pick(activeItem, ['name'], '订阅')) + '”拉取节点并刷新线路列表。</small></span>' : '';
+      refreshIcons(operation);
+    }
+    if (!items.length) {
+      target.innerHTML = '<div class="mihomo-subscription-empty"><span class="mihomo-subscription-empty-icon">' + icon('rss') + '</span><div><strong>还没有配置订阅</strong><p>添加订阅后，Mihomo 会按设置周期自动更新节点，同时保留现有静态线路。</p></div><button class="button primary" type="button" data-action="new-mihomo-subscription">添加第一个订阅</button></div>';
+      refreshIcons(target);
+      return;
+    }
+    target.innerHTML = items.map(function (item) {
+      var status = mihomoSubscriptionStatus(pick(item, ['status'], 'pending'));
+      var updating = state.mihomo.subscriptionUpdating === item.id || boolValue(item.updating, false);
+      var deleting = state.mihomo.subscriptionDeleting === item.id;
+      var busy = updating || deleting || state.mihomo.subscriptionSaving;
+      var builtin = boolValue(item.builtin, false);
+      var editable = !builtin && boolValue(item.editable, true);
+      var groups = Array.isArray(item.groups) ? item.groups : [];
+      var sourceNodes = numberValue(item.node_count, 0);
+      var uniqueNodes = numberValue(item.unique_node_count, sourceNodes);
+      var duplicateNodes = numberValue(item.duplicate_node_count, 0);
+      var updateText = builtin ? '由原 Mihomo 配置加载' : (validSubscriptionTime(item.updated_at) ? formatDate(item.updated_at, true) : '尚未完成首次更新');
+      var intervalText = builtin ? '原有配置保留' : formatSubscriptionInterval(item.interval_seconds);
+      var actions = editable ? '<div class="mihomo-subscription-actions"><button class="button secondary" type="button" data-action="update-mihomo-subscription" data-id="' + escapeHTML(item.id) + '"' + (busy ? ' disabled' : '') + '>' + icon(updating ? 'loader-circle' : 'refresh-cw', updating ? 'spin' : '') + '<span>' + (updating ? '更新中' : '立即更新') + '</span></button><button class="icon-button" type="button" data-action="edit-mihomo-subscription" data-id="' + escapeHTML(item.id) + '" aria-label="编辑订阅"' + (busy ? ' disabled' : '') + '>' + icon('square-pen') + '</button><button class="icon-button danger" type="button" data-action="delete-mihomo-subscription" data-id="' + escapeHTML(item.id) + '" aria-label="删除订阅"' + (busy ? ' disabled' : '') + '>' + icon(deleting ? 'loader-circle' : 'trash-2', deleting ? 'spin' : '') + '</button></div>' : '<div class="mihomo-subscription-actions"><span class="mihomo-subscription-readonly">' + icon('lock-keyhole') + '原有只读来源</span></div>';
+      return '<article class="mihomo-subscription-card ' + status.tone + (updating ? ' is-updating' : '') + (builtin ? ' is-builtin' : '') + '"><div class="mihomo-subscription-card-main"><span class="mihomo-subscription-mark">' + icon(builtin ? 'server-cog' : 'rss') + '</span><div class="mihomo-subscription-copy"><div class="mihomo-subscription-title"><strong>' + escapeHTML(pick(item, ['name'], '未命名订阅')) + '</strong><span class="mihomo-subscription-state ' + status.tone + '">' + (updating ? icon('loader-circle', 'spin') + '更新中' : escapeHTML(status.label)) + '</span></div><code>' + escapeHTML(pick(item, ['url_masked'], '已配置订阅')) + '</code><div class="mihomo-subscription-meta"><span>' + icon('boxes') + '来源 ' + formatNumber(sourceNodes) + '</span><span class="mihomo-subscription-unique">' + icon('badge-check') + '新增 ' + formatNumber(uniqueNodes) + '</span>' + (duplicateNodes ? '<span class="mihomo-subscription-duplicate">' + icon('copy-x') + '去重 ' + formatNumber(duplicateNodes) + '</span>' : '') + '<span>' + icon('refresh-cw') + escapeHTML(intervalText) + '</span><span>' + icon('route') + escapeHTML(mihomoSubscriptionFetchLabel(pick(item, ['fetch_via'], 'rule'))) + '</span><span>' + icon('clock-3') + escapeHTML(updateText) + '</span></div>' + (groups.length ? '<div class="mihomo-subscription-groups">' + groups.map(function (group) { return '<span>' + escapeHTML(group) + '</span>'; }).join('') + '</div>' : '') + (item.error ? '<p class="mihomo-subscription-error">' + icon('circle-alert') + escapeHTML(item.error) + '</p>' : '') + '</div></div>' + actions + '</article>';
+    }).join('');
+    refreshIcons(target);
+  }
+
+  function findMihomoSubscription(id) {
+    return state.mihomo.subscriptions.find(function (item) { return String(item.id) === String(id); });
+  }
+
+  function replaceMihomoSubscription(item) {
+    if (!item || !item.id) return;
+    var index = state.mihomo.subscriptions.findIndex(function (current) { return String(current.id) === String(item.id); });
+    if (index === -1) state.mihomo.subscriptions.unshift(item);
+    else state.mihomo.subscriptions.splice(index, 1, item);
+  }
+
+  function openMihomoSubscriptionDialog(item) {
+    if (item && boolValue(item.builtin, false)) return;
+    var form = byId('mihomo-subscription-form');
+    var dialog = byId('mihomo-subscription-dialog');
+    form.reset();
+    form.elements.id.value = item ? item.id : '';
+    form.elements.name.value = item ? pick(item, ['name'], '') : '';
+    form.elements.interval_seconds.value = String(item ? numberValue(item.interval_seconds, 3600) : 3600);
+    form.elements.fetch_via.value = item ? pick(item, ['fetch_via'], 'rule') : 'rule';
+    form.elements.url.value = '';
+    form.elements.url.required = !item;
+    byId('mihomo-subscription-dialog-title').textContent = item ? '编辑订阅' : '添加订阅';
+    byId('mihomo-subscription-url-help').textContent = item ? '留空将保留现有订阅链接；输入新地址才会替换。' : '支持 HTTP / HTTPS 订阅地址。';
+    document.querySelector('[data-mihomo-url-required]').hidden = Boolean(item);
+    byId('mihomo-subscription-form-error').hidden = true;
+    byId('mihomo-subscription-form-error').textContent = '';
+    dialog.showModal();
+    refreshIcons(dialog);
+    window.setTimeout(function () { form.elements.name.focus(); }, 0);
+  }
+
+  async function saveMihomoSubscription(event) {
+    event.preventDefault();
+    if (state.mihomo.subscriptionSaving) return;
+    var form = event.currentTarget;
+    var id = form.elements.id.value.trim();
+    var rawURL = form.elements.url.value.trim();
+    var payload = { name: form.elements.name.value.trim(), interval_seconds: numberValue(form.elements.interval_seconds.value, 3600), fetch_via: form.elements.fetch_via.value };
+    if (rawURL) payload.url = rawURL;
+    if (!id && !rawURL) {
+      byId('mihomo-subscription-form-error').textContent = '请填写订阅链接';
+      byId('mihomo-subscription-form-error').hidden = false;
+      return;
+    }
+    state.mihomo.subscriptionSaving = true;
+    setButtonLoading(byId('mihomo-subscription-save'), true, '保存中');
+    try {
+      var item = await apiRequest(id ? API.mihomoSubscriptions + '/' + encodeURIComponent(id) : API.mihomoSubscriptions, { method: id ? 'PATCH' : 'POST', body: payload });
+      replaceMihomoSubscription(item);
+      byId('mihomo-subscription-dialog').close();
+      showAlert('mihomo-subscription-alert', '');
+      toast(id ? '订阅设置已更新' : '订阅已添加，Mihomo 将开始拉取节点', 'success');
+    } catch (error) {
+      byId('mihomo-subscription-form-error').textContent = error.message || '订阅保存失败';
+      byId('mihomo-subscription-form-error').hidden = false;
+    } finally {
+      state.mihomo.subscriptionSaving = false;
+      setButtonLoading(byId('mihomo-subscription-save'), false);
+      renderMihomoSubscriptions();
+    }
+  }
+
+  async function updateMihomoSubscription(id) {
+    var item = findMihomoSubscription(id);
+    if (!item || boolValue(item.builtin, false) || state.mihomo.subscriptionUpdating) return;
+    state.mihomo.subscriptionUpdating = String(id);
+    showAlert('mihomo-subscription-alert', '');
+    renderMihomoSubscriptions();
+    try {
+      var updated = await apiRequest(API.mihomoSubscriptions + '/' + encodeURIComponent(id) + '/update', { method: 'POST' });
+      replaceMihomoSubscription(updated);
+      toast('订阅更新完成，线路节点已刷新', 'success');
+      await loadMihomo(true, false);
+    } catch (error) {
+      showAlert('mihomo-subscription-alert', '本次立即更新暂未完成，Mihomo 会继续在后台重试；页面将自动复查结果。');
+      window.setTimeout(function () { if (state.view === 'routing') loadMihomo(true, false); }, 5000);
+      window.setTimeout(function () { if (state.view === 'routing') loadMihomo(true, false); }, 45000);
+    } finally {
+      state.mihomo.subscriptionUpdating = '';
+      renderMihomoSubscriptions();
+    }
+  }
+
+  async function deleteMihomoSubscription(id) {
+    var item = findMihomoSubscription(id);
+    if (!item || boolValue(item.builtin, false) || state.mihomo.subscriptionDeleting) return;
+    var confirmed = await confirmAction('删除订阅', '将移除“' + pick(item, ['name'], '该订阅') + '”及其订阅节点，现有静态线路不会受影响。', '删除订阅');
+    if (!confirmed) return;
+    state.mihomo.subscriptionDeleting = String(id);
+    renderMihomoSubscriptions();
+    try {
+      await apiRequest(API.mihomoSubscriptions + '/' + encodeURIComponent(id), { method: 'DELETE' });
+      state.mihomo.subscriptions = state.mihomo.subscriptions.filter(function (current) { return String(current.id) !== String(id); });
+      showAlert('mihomo-subscription-alert', '');
+      toast('订阅已删除', 'success');
+    } catch (error) {
+      showAlert('mihomo-subscription-alert', error.message || '订阅删除失败');
+    } finally {
+      state.mihomo.subscriptionDeleting = '';
+      renderMihomoSubscriptions();
+    }
+  }
+
+  async function loadMihomo(force, refreshExit) {
+    if (state.loaded.routing && !force) return;
+    state.loaded.routing = true;
+    var serial = ++state.requestSerial.mihomo;
+    try {
+      var query = refreshExit ? { refresh_exit: 'true' } : {};
+      var results = await Promise.all([
+        apiRequest(API.mihomoOverview, { query: query }),
+        apiRequest(API.mihomoSubscriptions).then(function (data) { return { data: data }; }).catch(function (error) { return { error: error }; })
+      ]);
+      if (serial !== state.requestSerial.mihomo) return;
+      state.mihomo.overview = results[0] || {};
+      if (results[1].error) showAlert('mihomo-subscription-alert', results[1].error.message || '订阅信息加载失败');
+      else {
+        state.mihomo.subscriptions = Array.isArray(results[1].data) ? results[1].data : [];
+        showAlert('mihomo-subscription-alert', '');
+      }
+      showAlert('mihomo-alert', '');
+      renderMihomo(); updateTimestamp();
+      if (boolValue(state.mihomo.overview.latency_testing, false) && !state.mihomo.benchmarking) {
+        window.setTimeout(function () { if (state.view === 'routing') loadMihomo(true, false); }, 1800);
+      }
+    } catch (error) {
+      state.loaded.routing = false;
+      showAlert('mihomo-alert', error.message || 'Mihomo 路由信息加载失败');
+    }
+  }
+
+  async function selectMihomoNode(name) {
+    var overview = state.mihomo.overview || {};
+    var group = overview.group || {};
+    if (!name || !group.name || state.mihomo.switching || state.mihomo.benchmarking) return;
+    if (name === group.current) { toast('当前已经使用该线路', 'info'); return; }
+    state.mihomo.switching = name;
+    renderMihomo();
+    try {
+      var data = await apiRequest(API.mihomoSelection, { method: 'PUT', body: { group: group.name, name: name } });
+      state.mihomo.overview = data || {};
+      state.loaded.routing = true;
+      showAlert('mihomo-alert', '');
+      toast('出口已切换为 ' + name, 'success');
+    } catch (error) {
+      showAlert('mihomo-alert', error.message || '线路切换失败');
+    } finally {
+      state.mihomo.switching = '';
+      renderMihomo(); updateTimestamp();
+    }
+  }
+
+  async function benchmarkMihomo() {
+    var overview = state.mihomo.overview || {};
+    var group = overview.group || {};
+    if (state.mihomo.benchmarking || state.mihomo.switching || !group.name) return;
+    state.mihomo.benchmarking = true;
+    showAlert('mihomo-alert', '');
+    renderMihomo();
+    try {
+      var data = await apiRequest(API.mihomoLatencyTest, { method: 'POST', body: { group: group.name } });
+      state.mihomo.overview = pick(data, ['overview'], {}) || {};
+      state.loaded.routing = true;
+      var result = pick(data, ['summary'], {}) || {};
+      toast('测速完成：' + formatNumber(numberValue(result.succeeded, 0)) + ' 条成功，' + formatNumber(numberValue(result.failed, 0)) + ' 条超时', 'success');
+    } catch (error) {
+      showAlert('mihomo-alert', error.message || '线路测速失败');
+    } finally {
+      state.mihomo.benchmarking = false;
+      renderMihomo(); updateTimestamp();
+    }
+  }
+
+  function proxyStatusLabel(status) {
+    return { pending: '待检测', healthy: '健康', cooling: '冷却', disabled: '已停用', expired: '已过期', invalid: '无效' }[status] || status || '未知';
+  }
+
+  function proxyModeLabel(mode) {
+    return { baseline_only: '仅基线', baseline_first: '基线优先', proxy_first: '代理优先', proxy_only: '仅代理', sticky_proxy: '固定代理' }[mode] || mode;
+  }
+
+  function syncProxyProbeState() {
+    var summary = state.proxyPool.summary || {};
+    var active = state.proxyPool.probing || boolValue(summary.probing, false);
+    var status = byId('proxy-pool-probe-status');
+    if (status) {
+      status.hidden = !active;
+      status.innerHTML = active ? '<span class="operation-status-icon">' + icon('loader-circle', 'spin') + '</span><span><strong>代理节点检测中</strong><small>' + (state.proxyPool.probeIDs.size ? '正在重测所选节点，请保持页面打开。' : '正在并发探测待检节点并更新延迟、成功率和冷却状态。') + '</small></span>' : '';
+      refreshIcons(status);
+    }
+    setButtonLoading(document.querySelector('[data-action="probe-proxy-pool"]'), active, '检测中');
+  }
+
+  function renderProxyPoolStats() {
+    var target = byId('proxy-pool-stats');
+    if (!target) return;
+    var summary = state.proxyPool.summary || {};
+    var cards = [
+      ['全部节点', numberValue(summary.total, 0), 'network', '总库存'],
+      ['健康可用', numberValue(summary.healthy, 0), 'shield-check', '可参与调度'],
+      ['等待检测', numberValue(summary.pending, 0), 'scan-line', '等待健康探测'],
+      ['冷却节点', numberValue(summary.cooling, 0), 'timer-reset', '失败后暂时隔离'],
+      ['停用 / 过期', numberValue(summary.disabled, 0) + numberValue(summary.expired, 0), 'archive-x', '不参与路由'],
+      ['当前占用', numberValue(summary.in_use, 0), 'activity', '正在承载请求']
+    ];
+    target.innerHTML = cards.map(function (card) {
+      return '<article class="proxy-metric"><span class="proxy-metric-icon">' + icon(card[2]) + '</span><span class="proxy-metric-copy"><small>' + escapeHTML(card[0]) + '</small><strong>' + escapeHTML(String(card[1])) + '</strong><em>' + escapeHTML(card[3]) + '</em></span></article>';
+    }).join('');
+    var runtime = byId('proxy-pool-runtime-status');
+    if (runtime) {
+      var enabled = boolValue(summary.routing_enabled, false);
+      runtime.classList.toggle('is-enabled', enabled);
+      runtime.innerHTML = '<span class="proxy-runtime-signal"></span><strong>' + (enabled ? '代理池路由已启用' : '代理池路由当前关闭') + '</strong><span>' + (enabled ? '健康节点会按来源策略参与链接检测。' : '节点仍会维护和探测，业务流量继续使用 Mihomo 基线路由。') + '</span>';
+    }
+    refreshIcons(target);
+    syncProxyProbeState();
+  }
+
+  function renderProxyPolicies() {
+    var target = byId('proxy-pool-policies');
+    if (!target) return;
+    var policies = state.proxyPool.policies || [];
+    var modeFor = function (type, key) {
+      var item = policies.find(function (policy) { return policy.target_type === type && policy.target_key === key; });
+      if (item) return item.mode;
+      var global = policies.find(function (policy) { return policy.target_type === 'global' && policy.target_key === '*'; });
+      return pick(global, ['mode'], 'baseline_first');
+    };
+    var modes = ['baseline_only', 'baseline_first', 'proxy_first', 'proxy_only', 'sticky_proxy'];
+    var rows = ['global'].concat(Object.keys(diskLabels || {}).slice(0, 12)).map(function (key) {
+      var type = key === 'global' ? 'global' : 'platform';
+      var targetKey = key === 'global' ? '*' : key;
+      var label = key === 'global' ? '全局默认' : (diskLabels[key] || key);
+      return '<label class="proxy-policy-row' + (key === 'global' ? ' is-global' : '') + '"><span><strong>' + escapeHTML(label) + '</strong><small>' + escapeHTML(type + ':' + targetKey) + '</small></span><select data-proxy-policy-type="' + escapeHTML(type) + '" data-proxy-policy-key="' + escapeHTML(targetKey) + '">' + modes.map(function (mode) { return '<option value="' + mode + '"' + (modeFor(type, targetKey) === mode ? ' selected' : '') + '>' + escapeHTML(proxyModeLabel(mode)) + '</option>'; }).join('') + '</select></label>';
+    });
+    target.innerHTML = rows.join('');
+  }
+
+  function renderProxyPoolBatches() {
+    var body = byId('proxy-pool-batches-body');
+    if (!body) return;
+    var items = state.proxyPool.batches || [];
+    body.innerHTML = items.length ? items.map(function (batch) {
+      var enabled = boolValue(batch.enabled, false);
+      return '<tr><td><strong>' + escapeHTML(pick(batch, ['name'], '未命名批次')) + '</strong><small>' + escapeHTML(pick(batch, ['source_filename'], '')) + '</small></td><td>' + formatNumber(numberValue(batch.node_count, 0)) + '</td><td>' + formatNumber(numberValue(batch.healthy_count, 0)) + '</td><td>' + escapeHTML(formatDate(batch.expires_at, true)) + '</td><td><span class="status-badge status-' + escapeHTML(pick(batch, ['status'], 'unknown')) + '">' + escapeHTML(proxyStatusLabel(pick(batch, ['status'], ''))) + '</span></td><td><button class="table-action" type="button" data-action="toggle-proxy-batch" data-id="' + escapeHTML(String(batch.id)) + '" data-enabled="' + (enabled ? 'false' : 'true') + '">' + icon(enabled ? 'pause' : 'play') + '<span>' + (enabled ? '停用' : '启用') + '</span></button></td></tr>';
+    }).join('') : '<tr><td colspan="6"><div class="table-empty">暂无导入批次</div></td></tr>';
+    refreshIcons(body);
+    renderPagination('proxy-pool-batches-pagination', state.proxyPool.batchPage, state.proxyPool.batchPages, 'proxyPoolBatches');
+  }
+
+  function renderProxyPoolNodes() {
+    var body = byId('proxy-pool-nodes-body');
+    var empty = byId('proxy-pool-nodes-empty');
+    if (!body || !empty) return;
+    var items = state.proxyPool.nodes || [];
+    empty.hidden = items.length > 0;
+    body.innerHTML = items.map(function (node) {
+      var total = numberValue(node.success_count, 0) + numberValue(node.failure_count, 0);
+      var rateValue = total ? Math.round(numberValue(node.success_count, 0) * 100 / total) : 0;
+      var rate = total ? rateValue + '%' : '暂无样本';
+      var enabled = boolValue(node.enabled, false);
+      var displayURL = pick(node, ['display_url', 'host'], '');
+      var scheme = pick(node, ['scheme'], 'proxy').toUpperCase();
+      var nodeID = String(node.id);
+      var nodeProbing = state.proxyPool.probing && state.proxyPool.probeIDs.has(nodeID);
+      var anyProbing = state.proxyPool.probing || boolValue((state.proxyPool.summary || {}).probing, false);
+      var probeButton = '<button class="table-action' + (nodeProbing ? ' is-loading' : '') + '" type="button" data-action="probe-proxy-node" data-id="' + escapeHTML(nodeID) + '"' + (anyProbing ? ' disabled' : '') + '>' + icon(nodeProbing ? 'loader-circle' : 'scan-line', nodeProbing ? 'spin' : '') + '<span>' + (nodeProbing ? '检测中' : '检测') + '</span></button>';
+      return '<tr' + (nodeProbing ? ' class="is-probing"' : '') + '><td><div class="proxy-node-identity"><span class="proxy-node-scheme">' + escapeHTML(scheme) + '</span><span><strong>' + escapeHTML(displayURL) + '</strong><small>' + escapeHTML(pick(node, ['batch_name'], '未分配批次')) + (boolValue(node.has_auth, false) ? ' · 已加密认证' : '') + '</small></span></div></td><td><span class="status-badge status-' + escapeHTML(pick(node, ['status'], 'unknown')) + '">' + escapeHTML(proxyStatusLabel(pick(node, ['status'], ''))) + '</span></td><td><strong class="proxy-latency">' + (nodeProbing ? '<span class="inline-testing">' + icon('loader-circle', 'spin') + '检测中</span>' : (numberValue(node.latency_ms, 0) ? formatNumber(node.latency_ms) + ' ms' : '—')) + '</strong></td><td><div class="proxy-reliability"><span><strong>' + escapeHTML(rate) + '</strong><small>' + escapeHTML(String(numberValue(node.success_count, 0)) + ' 成功 / ' + String(numberValue(node.failure_count, 0)) + ' 失败') + '</small></span><i><b style="width:' + Math.max(0, Math.min(100, rateValue)) + '%"></b></i></div></td><td>' + escapeHTML(formatDate(node.last_checked_at, true)) + '</td><td>' + escapeHTML(formatDate(node.expires_at, true)) + '</td><td class="table-actions">' + probeButton + '<button class="table-action" type="button" data-action="toggle-proxy-node" data-id="' + escapeHTML(nodeID) + '" data-enabled="' + (enabled ? 'false' : 'true') + '">' + icon(enabled ? 'pause' : 'play') + '<span>' + (enabled ? '停用' : '启用') + '</span></button><button class="table-action danger" type="button" data-action="delete-proxy-node" data-id="' + escapeHTML(nodeID) + '">' + icon('trash-2') + '<span>删除</span></button></td></tr>';
+    }).join('');
+    refreshIcons(body);
+    syncProxyProbeState();
+    renderPagination('proxy-pool-nodes-pagination', state.proxyPool.nodePage, state.proxyPool.nodePages, 'proxyPoolNodes');
+  }
+
+  async function loadProxyPool(force) {
+    if (state.loaded['proxy-pool'] && !force) return;
+    state.loaded['proxy-pool'] = true;
+    var serial = ++state.requestSerial.proxyPool;
+    try {
+      var query = { page: state.proxyPool.nodePage, page_size: PAGE_SIZE };
+      if (state.proxyPool.query) query.q = state.proxyPool.query;
+      if (state.proxyPool.status) query.status = state.proxyPool.status;
+      var batchQuery = { page: state.proxyPool.batchPage, page_size: 20 };
+      var values = await Promise.all([
+        apiRequest(API.proxyPoolSummary), apiRequest(API.proxyPoolNodes, { query: query }),
+        apiRequest(API.proxyPoolBatches, { query: batchQuery }), apiRequest(API.proxyPoolPolicies)
+      ]);
+      if (serial !== state.requestSerial.proxyPool) return;
+      state.proxyPool.summary = values[0] || {};
+      var nodePage = values[1] || {};
+      state.proxyPool.nodes = arrayFrom(nodePage, ['items', 'nodes']);
+      state.proxyPool.nodeTotal = numberValue(nodePage.total, state.proxyPool.nodes.length);
+      state.proxyPool.nodePages = Math.max(1, Math.ceil(state.proxyPool.nodeTotal / PAGE_SIZE));
+      var batchPage = values[2] || {};
+      state.proxyPool.batches = arrayFrom(batchPage, ['items', 'batches']);
+      state.proxyPool.batchTotal = numberValue(batchPage.total, state.proxyPool.batches.length);
+      state.proxyPool.batchPages = Math.max(1, Math.ceil(state.proxyPool.batchTotal / 20));
+      state.proxyPool.policies = arrayFrom(values[3], ['items', 'policies']);
+      renderProxyPoolStats(); renderProxyPolicies(); renderProxyPoolBatches(); renderProxyPoolNodes(); updateTimestamp();
+    } catch (error) {
+      state.loaded['proxy-pool'] = false;
+      showAlert('proxy-pool-alert', error.message || '代理池加载失败');
+    }
+  }
+
+  function searchProxyPool() {
+    state.proxyPool.query = byId('proxy-pool-query').value.trim();
+    state.proxyPool.status = byId('proxy-pool-status').value;
+    state.proxyPool.nodePage = 1; state.loaded['proxy-pool'] = false; loadProxyPool(true);
+  }
+
+  async function submitProxyPoolImport(event) {
+    event.preventDefault();
+    var input = byId('proxy-pool-file');
+    if (!input.files || !input.files[0]) { showAlert('proxy-pool-alert', '请选择代理 TXT 文件'); return; }
+    var form = new FormData(); form.append('file', input.files[0]); form.append('batch_name', byId('proxy-pool-batch-name').value.trim());
+    var expiry = byId('proxy-pool-expires-at').value; if (expiry) form.append('expires_at', expiry);
+    var button = document.querySelector('#proxy-pool-import-form button[type="submit"]'); setButtonLoading(button, true, '导入中');
+    try { var data = await apiRequest(API.proxyPoolImport, { method: 'POST', body: form }); var result = data || {}; toast('已导入 ' + formatNumber(numberValue(result.accepted, 0)) + ' 个代理，重复 ' + formatNumber(numberValue(result.duplicates, 0)) + ' 个', 'success'); input.value = ''; byId('proxy-pool-file-name').textContent = '选择 TXT 文件'; state.loaded['proxy-pool'] = false; await loadProxyPool(true); }
+    catch (error) { showAlert('proxy-pool-alert', error.message || '代理导入失败'); }
+    finally { setButtonLoading(button, false); }
+  }
+
+  async function probeProxyPool(ids) {
+    if (state.proxyPool.probing) { toast('代理检测正在进行中', 'info'); return; }
+    var targetIDs = Array.isArray(ids) ? ids.filter(Boolean).map(String) : [];
+    state.proxyPool.probing = true;
+    state.proxyPool.probeIDs = new Set(targetIDs);
+    showAlert('proxy-pool-alert', '');
+    renderProxyPoolStats(); renderProxyPoolNodes();
+    try {
+      var numericIDs = targetIDs.map(function (id) { return numberValue(id, 0); }).filter(Boolean);
+      var result = await apiRequest(API.proxyPoolProbe, { method: 'POST', body: { ids: numericIDs, limit: numericIDs.length ? numericIDs.length : 100 } });
+      toast('已完成 ' + formatNumber(numberValue(result.probed, 0)) + ' 个节点探测', 'success');
+      state.loaded['proxy-pool'] = false;
+      await loadProxyPool(true);
+    } catch (error) {
+      showAlert('proxy-pool-alert', error.message || '代理探测失败');
+    } finally {
+      state.proxyPool.probing = false;
+      state.proxyPool.probeIDs.clear();
+      renderProxyPoolStats(); renderProxyPoolNodes();
+    }
+  }
+
+  async function toggleProxyNode(id, enabled) { try { await apiRequest(API.proxyPoolNodes + '/' + encodeURIComponent(id), { method: 'PATCH', body: { enabled: enabled } }); state.loaded['proxy-pool'] = false; await loadProxyPool(true); } catch (error) { showAlert('proxy-pool-alert', error.message || '节点状态更新失败'); } }
+  async function deleteProxyNode(id) { var confirmed = await confirmAction('删除代理节点', '删除后不会再参与检测和代理路由。', '删除'); if (!confirmed) return; try { await apiRequest(API.proxyPoolNodes + '/' + encodeURIComponent(id), { method: 'DELETE' }); state.loaded['proxy-pool'] = false; await loadProxyPool(true); } catch (error) { showAlert('proxy-pool-alert', error.message || '代理删除失败'); } }
+  async function toggleProxyBatch(id, enabled) { try { await apiRequest(API.proxyPoolBatches + '/' + encodeURIComponent(id), { method: 'PATCH', body: { enabled: enabled } }); state.loaded['proxy-pool'] = false; await loadProxyPool(true); } catch (error) { showAlert('proxy-pool-alert', error.message || '批次状态更新失败'); } }
+
+  async function saveProxyPolicies() {
+    var policies = []; document.querySelectorAll('[data-proxy-policy-type]').forEach(function (select) { policies.push({ target_type: select.dataset.proxyPolicyType, target_key: select.dataset.proxyPolicyKey, mode: select.value }); });
+    try { await apiRequest(API.proxyPoolPolicies, { method: 'PUT', body: { policies: policies } }); toast('代理路由策略已保存', 'success'); state.loaded['proxy-pool'] = false; await loadProxyPool(true); } catch (error) { showAlert('proxy-pool-alert', error.message || '代理路由策略保存失败'); }
+  }
+
+  async function submitCredentialSearchTest(event) {
+    event.preventDefault();
+    var test = state.sources.credentialTest;
+    var credential = test.credential;
+    var keyword = byId('credential-search-test-keyword').value.trim();
+    if (!credential || !keyword) {
+      showAlert('credential-search-test-alert', '请输入搜索关键词');
+      return;
+    }
+    if (test.controller) test.controller.abort();
+    var controller = new AbortController();
+    test.controller = controller;
+    var button = byId('credential-search-test-submit');
+    setButtonLoading(button, true, '测试中');
+    showAlert('credential-search-test-alert', '');
+    byId('credential-search-test-results').innerHTML = '<div class="source-search-loading"><span class="search-result-skeleton"></span><span class="search-result-skeleton"></span></div>';
+    var startedAt = performance.now();
+    try {
+      var data = await apiRequest(API.credentials + '/' + encodeURIComponent(credentialPublicID(credential)) + '/search-test', {
+        method: 'POST', body: { keyword: keyword }, signal: controller.signal
+      });
+      if (test.controller !== controller) return;
+      test.results = data || {};
+      test.elapsedMS = Math.max(0, Math.round(performance.now() - startedAt));
+      test.submitted = true;
+      renderCredentialSearchTestResults();
+      await loadSourceCredentials();
+    } catch (error) {
+      if (error.name === 'AbortError' || test.controller !== controller) return;
+      showAlert('credential-search-test-alert', error.message || '单账号搜索测试失败');
+      test.results = {};
+      test.elapsedMS = Math.max(0, Math.round(performance.now() - startedAt));
+      test.submitted = true;
+      renderCredentialSearchTestResults();
+      await loadSourceCredentials().catch(function () {});
+    } finally {
+      if (test.controller === controller) {
+        test.controller = null;
+        setButtonLoading(button, false);
+      }
+    }
   }
 
   function credentialMetadataValues(pluginKey, metadata) {
@@ -4915,7 +5604,9 @@
     var channels = [];
     document.querySelectorAll('[data-source-channel-key]').forEach(function (input) {
       var index = input.dataset.sourceChannelKey;
-      channels.push({ key: input.value.trim(), display_name: document.querySelector('[data-source-channel-name="' + index + '"]').value.trim(), enabled: document.querySelector('[data-source-channel-enabled="' + index + '"]').checked, order: channels.length });
+	  var tierInput = document.querySelector('[data-source-channel-tier="' + index + '"]');
+	  var limitInput = document.querySelector('[data-source-channel-limit="' + index + '"]');
+	  channels.push({ key: input.value.trim(), display_name: document.querySelector('[data-source-channel-name="' + index + '"]').value.trim(), enabled: document.querySelector('[data-source-channel-enabled="' + index + '"]').checked, order: channels.length, tier: tierInput ? tierInput.value : '', max_concurrency: limitInput ? numberValue(limitInput.value, 0) : 0 });
     });
     var plugins = Object.assign({}, current.plugins || {});
     document.querySelectorAll('[data-source-plugin]').forEach(function (input, index) {
@@ -4936,11 +5627,33 @@
       }
       plugins[pluginKey] = Object.assign({}, existing, { config: runtimeConfig });
     });
+	document.querySelectorAll('[data-source-plugin-policy]').forEach(function (input) {
+	  var pluginKey = input.dataset.sourcePluginPolicy;
+	  var policyKey = input.dataset.policyKey;
+	  var existing = plugins[pluginKey] || {};
+	  var value = policyKey === 'tier' ? input.value : numberValue(input.value, 0);
+	  plugins[pluginKey] = Object.assign({}, existing, (function () { var patch = {}; patch[policyKey] = value; return patch; })());
+	});
     return { schema_version: 1, async_plugins_enabled: byId('source-plugin-master').checked, channels: channels, plugins: plugins };
   }
 
   function selectedSourceSearchValues(name) {
     return Array.from(document.querySelectorAll('#source-search-form input[name="' + name + '"]:checked')).map(function (input) { return input.value; });
+  }
+
+  function updateSourceSearchSelectionSummaries() {
+    [
+      ['source-search-plugin-summary', 'search_plugins', '全部已启用'],
+      ['source-search-channel-summary', 'search_channels', '全部已启用'],
+      ['source-search-cloud-summary', 'search_cloud_types', '全部类型']
+    ].forEach(function (definition) {
+      var target = byId(definition[0]);
+      if (!target) return;
+      var selectedCount = selectedSourceSearchValues(definition[1]).length;
+      target.textContent = selectedCount ? selectedCount + ' 个已选' : definition[2];
+      var picker = target.closest('.source-search-picker');
+      if (picker) picker.classList.toggle('has-selection', selectedCount > 0);
+    });
   }
 
   function sourceSearchOptionMarkup(name, value, label, checked) {
@@ -4976,6 +5689,7 @@
       return sourceSearchOptionMarkup('search_cloud_types', key, diskLabels[key], selectedClouds.has(String(key)));
     }).join('');
     byId('source-search-version').textContent = state.sources.version ? '配置 v' + state.sources.version : '配置 —';
+    updateSourceSearchSelectionSummaries();
     syncSourceSearchScope();
   }
 
@@ -5031,7 +5745,10 @@
     }
     var data = searchState.results || {};
     var merged = pick(data, ['merged_by_type'], {}) || {};
-    var types = Object.keys(merged).filter(function (type) { return arrayFrom(merged[type], ['items', 'links']).length > 0; });
+    var types = Object.keys(merged).filter(function (type) { return arrayFrom(merged[type], ['items', 'links']).length > 0; }).sort(function (left, right) {
+      var countDifference = arrayFrom(merged[right], ['items', 'links']).length - arrayFrom(merged[left], ['items', 'links']).length;
+      return countDifference || String(diskLabels[left] || left).localeCompare(String(diskLabels[right] || right), 'zh-CN');
+    });
     var computedTotal = types.reduce(function (total, type) { return total + arrayFrom(merged[type], ['items', 'links']).length; }, 0);
     var total = numberValue(pick(data, ['total'], computedTotal), computedTotal);
     var sourcePreview = searchState.actualSources.slice(0, 4).join('、');
@@ -5150,6 +5867,30 @@
     } finally {
       setSourceEditorBusy(false);
     }
+  }
+
+  async function applyTierSuggestions() {
+	var suggestions = state.sources.schedulerSuggestions || [];
+	var changes = suggestions.filter(function (item) {
+	  return boolValue(item.eligible, false) && item.suggested_tier && String(item.current_tier || '') !== String(item.suggested_tier || '');
+	}).length;
+	if (!changes) {
+	  toast('当前没有达到样本门槛的待应用建议', 'info');
+	  return;
+	}
+	var confirmed = await confirmAction('应用来源分层建议', '将热更新 ' + changes + ' 个来源的搜索层级；未达到样本门槛的来源保持不变。', '应用建议');
+	if (!confirmed) return;
+	setSourceEditorBusy(true);
+	try {
+	  var result = await apiRequest(API.searchSchedulerSuggestionsApply, { method: 'POST', body: { expected_version: state.sources.version, days: 14 } });
+	  toast('已应用 ' + formatNumber(pick(result, ['applied'], changes)) + ' 个来源分层建议', 'success');
+	  state.loaded.sources = false;
+	  await loadSources(true);
+	} catch (error) {
+	  showAlert('sources-alert', error.status === 409 ? '配置已被其他管理员更新，请刷新后重试。' : (error.message || '分层建议应用失败'));
+	} finally {
+	  setSourceEditorBusy(false);
+	}
   }
 
   async function setAllSourcePlugins(enabled) {
@@ -5279,7 +6020,7 @@
     var form = byId('plugin-credential-form');
     var pluginKey = form.elements.plugin_key.value;
     var descriptor = findPluginDescriptor(pluginKey);
-    var loginType = descriptor && descriptor.login_type === 'qr' ? 'qr' : 'password';
+    var loginType = descriptor && descriptor.login_type === 'qr' ? 'qr' : (descriptor && descriptor.login_type === 'token' ? 'token' : 'password');
     var target = byId('plugin-credential-login-fields');
     var metadata = state.sources.credentialEditing ? state.sources.credentialEditing.public_metadata || {} : {};
     var metadataField = pluginCredentialMetadataFieldHTML(pluginKey, metadata);
@@ -5288,6 +6029,9 @@
       target.innerHTML = accountHelp + (metadataField || '<div class="inline-alert info">该插件没有独立搜索范围设置。</div>');
     } else if (loginType === 'qr') {
       target.innerHTML = accountHelp + '<div class="qr-login-hint">' + icon('qr-code') + '<div><strong>扫码登录</strong><span>提交后将生成一次性二维码，登录状态会自动更新。</span></div></div>' + metadataField;
+    } else if (loginType === 'token') {
+      target.innerHTML = accountHelp + '<label class="field full"><span>授权 TOKEN</span><input name="token" type="password" autocomplete="off" spellcheck="false" required placeholder="粘贴 Bearer TOKEN，不要包含 Bearer 前缀"></label>' +
+        '<div class="inline-alert info full">TOKEN 会先由上游接口验证，再由后端加密保存；保存后管理台不会再次展示完整值。</div>' + metadataField;
     } else {
       target.innerHTML = accountHelp + '<label class="field"><span>登录账号</span><input name="username" type="text" autocomplete="username" required></label>' +
         '<label class="field"><span>登录密码</span><input name="password" type="password" autocomplete="current-password" required></label>' + metadataField;
@@ -5301,7 +6045,10 @@
     var selectedName = descriptor ? (descriptor.display_name || pluginKey) : pluginKey;
     var context = byId('plugin-credential-context');
     if (!context) return;
-    context.innerHTML = '<span class="plugin-credential-context-icon">' + icon(descriptor && descriptor.login_type === 'qr' ? 'scan-line' : 'shield-check') + '</span><div><strong>' + escapeHTML(selectedName) + '</strong><span>' + escapeHTML(descriptor && descriptor.login_type === 'qr' ? '使用客户端扫码授权；提交登录时会自动启用插件运行环境。' : '登录信息由后端加密保存；提交登录时会自动启用插件运行环境。') + '</span></div>';
+    var loginType = descriptor && descriptor.login_type;
+    var contextIcon = loginType === 'qr' ? 'scan-line' : (loginType === 'token' ? 'key-round' : 'shield-check');
+    var contextText = loginType === 'qr' ? '使用客户端扫码授权；提交登录时会自动启用插件运行环境。' : (loginType === 'token' ? 'TOKEN 由后端验证并加密保存；普通用户只能使用公开共享凭证。' : '登录信息由后端加密保存；提交登录时会自动启用插件运行环境。');
+    context.innerHTML = '<span class="plugin-credential-context-icon">' + icon(contextIcon) + '</span><div><strong>' + escapeHTML(selectedName) + '</strong><span>' + escapeHTML(contextText) + '</span></div>';
     refreshIcons(context);
   }
 
@@ -5336,7 +6083,8 @@
     var selectedDescriptor = findPluginDescriptor(selectedPluginKey);
     var selectedName = selectedDescriptor ? (selectedDescriptor.display_name || selectedPluginKey) : selectedPluginKey;
     byId('plugin-credential-dialog-title').textContent = state.sources.credentialEditMode === 'metadata' ? '编辑账号搜索范围' : (credential ? '重新登录插件账号' : (pluginKey ? '配置 ' + selectedName : '新增插件账号'));
-    byId('plugin-credential-submit').querySelector('span').textContent = state.sources.credentialEditMode === 'metadata' ? '保存搜索范围' : (credential ? '重新登录' : '登录并保存');
+    var tokenLogin = selectedDescriptor && selectedDescriptor.login_type === 'token';
+    byId('plugin-credential-submit').querySelector('span').textContent = state.sources.credentialEditMode === 'metadata' ? '保存搜索范围' : (tokenLogin ? (credential ? '验证并更新 TOKEN' : '验证并保存 TOKEN') : (credential ? '重新登录' : '登录并保存'));
     byId('plugin-credential-form-error').hidden = true;
     renderPluginCredentialLoginFields();
     byId('plugin-credential-dialog').showModal();
@@ -5378,6 +6126,17 @@
       } else if (descriptor && descriptor.login_type === 'qr') {
         await startPluginQRFlow(payload, editing);
         byId('plugin-credential-dialog').close();
+      } else if (descriptor && descriptor.login_type === 'token') {
+        payload.token = form.elements.token.value.trim();
+        if (!payload.token) throw new APIError('请输入授权 TOKEN', 400, null);
+        await apiRequest(editing ? API.credentials + '/' + encodeURIComponent(credentialPublicID(editing)) + '/relogin' : API.credentials, {
+          method: 'POST',
+          body: payload
+        });
+        form.elements.token.value = '';
+        byId('plugin-credential-dialog').close();
+        toast(editing ? 'TOKEN 已更新' : 'TOKEN 已验证并保存', 'success');
+        await loadSourceCredentials();
       } else {
         payload.username = form.elements.username.value.trim();
         payload.password = form.elements.password.value;
@@ -5445,7 +6204,8 @@
     var flowID = String(pick(current.data, ['public_id', 'flow_id', 'id'], ''));
     if (!flowID) return;
     try {
-      current.data = normalizePluginLoginFlow(await apiRequest(API.credentialLoginFlows + '/' + encodeURIComponent(flowID)));
+      var pollResult = normalizePluginLoginFlow(await apiRequest(API.credentialLoginFlows + '/' + encodeURIComponent(flowID)));
+      current.data = Object.assign({}, current.data || {}, pollResult || {});
       renderPluginQRFlow();
       if (current.data.status === 'success') {
         toast(current.editing ? '账号重新登录成功' : '插件账号已添加', 'success');
@@ -5619,6 +6379,23 @@
     else if (action === 'close-menu') closeMenu();
     else if (action === 'logout') logout();
     else if (action === 'refresh-view') refreshCurrentView();
+    else if (action === 'refresh-mihomo') loadMihomo(true, true);
+    else if (action === 'benchmark-mihomo') benchmarkMihomo();
+    else if (action === 'select-mihomo-node') selectMihomoNode(actionElement.dataset.name);
+    else if (action === 'new-mihomo-subscription') openMihomoSubscriptionDialog(null);
+    else if (action === 'edit-mihomo-subscription') {
+      var mihomoSubscription = findMihomoSubscription(actionElement.dataset.id);
+      if (mihomoSubscription) openMihomoSubscriptionDialog(mihomoSubscription);
+    }
+    else if (action === 'update-mihomo-subscription') updateMihomoSubscription(actionElement.dataset.id);
+    else if (action === 'delete-mihomo-subscription') deleteMihomoSubscription(actionElement.dataset.id);
+    else if (action === 'probe-proxy-pool') probeProxyPool([]);
+    else if (action === 'search-proxy-pool') searchProxyPool();
+    else if (action === 'save-proxy-policies') saveProxyPolicies();
+    else if (action === 'probe-proxy-node') probeProxyPool([numberValue(actionElement.dataset.id, 0)]);
+    else if (action === 'toggle-proxy-node') toggleProxyNode(actionElement.dataset.id, actionElement.dataset.enabled === 'true');
+    else if (action === 'delete-proxy-node') deleteProxyNode(actionElement.dataset.id);
+    else if (action === 'toggle-proxy-batch') toggleProxyBatch(actionElement.dataset.id, actionElement.dataset.enabled === 'true');
     else if (action === 'close-dialog') actionElement.closest('dialog').close();
     else if (action === 'refresh-link-check-status') loadLinkCheckStatus({ force: true });
     else if (action === 'open-link-check-policy') openLinkCheckPolicy();
@@ -5678,7 +6455,8 @@
     else if (action === 'close-credentials') attemptCloseCredentials();
     else if (action === 'cancel-confirm') settleConfirm(false);
     else if (action === 'validate-sources') validateSources();
-    else if (action === 'save-sources') saveSources();
+	else if (action === 'save-sources') saveSources();
+	else if (action === 'apply-tier-suggestions') applyTierSuggestions();
     else if (action === 'add-channel') addSourceChannel();
     else if (action === 'import-source-channels' || action === 'bulk-import-channels' || action === 'bulk-add-channels' || action === 'import-channels') importSourceChannels();
     else if (action === 'remove-channel') removeSourceChannel(numberValue(actionElement.dataset.index, -1));
@@ -5686,6 +6464,10 @@
     else if (action === 'disable-all-plugins') setAllSourcePlugins(false);
     else if (action === 'configure-source-plugin') configureSourcePlugin(actionElement.dataset.pluginKey);
     else if (action === 'new-plugin-credential') openPluginCredentialDialog(null);
+    else if (action === 'test-plugin-credential') {
+      var testCredential = findSourceCredential(actionElement.dataset.id);
+      if (testCredential) openCredentialSearchTest(testCredential);
+    }
     else if (action === 'relogin-plugin-credential') {
       var sourceCredential = findSourceCredential(actionElement.dataset.id);
       if (sourceCredential) openPluginCredentialDialog(sourceCredential);
@@ -5722,6 +6504,7 @@
     else if (target.id === 'user-role-filter' || target.id === 'user-status-filter') updateUserFilters();
     else if (target.id === 'usage-range') changeUsageRange();
     else if (target.id === 'source-search-scope') syncSourceSearchScope();
+    else if (target.matches('#source-search-form input[type="checkbox"]')) updateSourceSearchSelectionSummaries();
     else if (target.id === 'credential-plugin-filter' || target.id === 'credential-status-filter') updateCredentialFilters();
     else if (target.matches('#plugin-credential-form [name="plugin_key"]')) renderPluginCredentialLoginFields();
     else if (target.id === 'usage-user-filter' || target.id === 'usage-auth-filter' || target.id === 'usage-status-filter' || target.id === 'usage-cache-filter') updateUsageFilters();
@@ -5749,12 +6532,14 @@
     if (!button || button.disabled) return;
     var page = numberValue(button.dataset.page, 1);
     var scope = button.dataset.pageScope;
-    var pageState = scope === 'usageLogs' ? state.usage : (scope === 'sourceContributionDetails' ? state.sourceContributions.detail : state[scope]);
+    var pageState = scope === 'usageLogs' ? state.usage : (scope === 'sourceContributionDetails' ? state.sourceContributions.detail : (scope === 'proxyPoolNodes' ? { page: state.proxyPool.nodePage, pages: state.proxyPool.nodePages } : (scope === 'proxyPoolBatches' ? { page: state.proxyPool.batchPage, pages: state.proxyPool.batchPages } : state[scope])));
     if (!pageState || page < 1 || page > pageState.pages) return;
     pageState.page = page;
     if (scope !== 'usageLogs' && scope !== 'sourceContributions' && scope !== 'sourceContributionDetails') state.loaded[scope] = false;
     if (scope === 'runs') loadRuns({ force: true });
     else if (scope === 'resources') loadResources(true);
+    else if (scope === 'proxyPoolNodes') { state.proxyPool.nodePage = page; state.loaded['proxy-pool'] = false; loadProxyPool(true); }
+    else if (scope === 'proxyPoolBatches') { state.proxyPool.batchPage = page; state.loaded['proxy-pool'] = false; loadProxyPool(true); }
     else if (scope === 'keywords') loadKeywords(true);
     else if (scope === 'keywordSyncRuns') {
       state.keywordSyncRuns.loaded = false;
@@ -5777,6 +6562,15 @@
     byId('run-form').addEventListener('submit', submitRun);
     byId('user-form').addEventListener('submit', saveUser);
     byId('plugin-credential-form').addEventListener('submit', submitPluginCredential);
+    byId('credential-search-test-form').addEventListener('submit', submitCredentialSearchTest);
+    byId('proxy-pool-import-form').addEventListener('submit', submitProxyPoolImport);
+    byId('mihomo-subscription-form').addEventListener('submit', saveMihomoSubscription);
+    byId('mihomo-query').addEventListener('input', debounce(function (event) { state.mihomo.query = event.target.value.trim(); renderMihomo(); }, 180));
+    byId('mihomo-region').addEventListener('change', function (event) { state.mihomo.region = event.target.value; renderMihomo(); });
+    byId('proxy-pool-file').addEventListener('change', function (event) {
+      var file = event.target.files && event.target.files[0];
+      byId('proxy-pool-file-name').textContent = file ? file.name : '选择 TXT 文件';
+    });
     byId('source-search-form').addEventListener('submit', submitSourceSearch);
     byId('confirm-submit').addEventListener('click', function () { settleConfirm(true); });
     document.addEventListener('click', handleActionClick);
@@ -5883,6 +6677,8 @@
       day: 'numeric',
       weekday: 'short'
     }).format(new Date());
+    var proxyExpiry = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
+    byId('proxy-pool-expires-at').value = proxyExpiry.getFullYear() + '-' + String(proxyExpiry.getMonth() + 1).padStart(2, '0') + '-' + String(proxyExpiry.getDate()).padStart(2, '0');
     setupEvents();
     setupDialogBehavior();
     updateAllSortHeaders();

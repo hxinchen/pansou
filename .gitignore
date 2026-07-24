@@ -1,5 +1,8 @@
 .DS_Store
 cache
+!util/cache/
+util/cache/*
+!util/cache/*_test.go
 
 # Local deployment build artifacts
 /pansou-linux-amd64
@@ -20,3 +23,4 @@ cache
 /tools/browser-gateway/*.log
 /tools/browser-gateway/tmp-*.json
 /tmp/browser-gateway-node_modules.tgz
+/tmp/

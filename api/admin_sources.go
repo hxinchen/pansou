@@ -96,7 +96,7 @@ func enablesAccountPlugin(config sourceconfig.Config) bool {
 	if !config.AsyncPluginsEnabled {
 		return false
 	}
-	for _, key := range []string{"qqpd", "gying", "panlian", "weibo"} {
+	for _, key := range []string{"aisoupan", "qqpd", "gying", "panlian", "weibo"} {
 		if config.Plugins[key].Enabled {
 			return true
 		}
@@ -120,7 +120,7 @@ func (h *AdminHandler) adminPluginCredentials(c *gin.Context) {
 	if !h.available(c) {
 		return
 	}
-	filter := storage.PluginCredentialFilter{PluginKeys: queryList(c, "plugin_key"), Scopes: queryList(c, "scope"), Statuses: queryList(c, "status"), Page: queryInt(c, "page", 1), PageSize: queryInt(c, "page_size", 50)}
+	filter := storage.PluginCredentialFilter{PluginKeys: queryList(c, "plugin_key"), Scopes: []string{storage.CredentialScopeAdminPrivate, storage.CredentialScopePublicShared}, Statuses: queryList(c, "status"), Page: queryInt(c, "page", 1), PageSize: queryInt(c, "page_size", 50)}
 	page, err := h.store.ListAdminPluginCredentials(c.Request.Context(), filter)
 	if err != nil {
 		respondSourceError(c, err)

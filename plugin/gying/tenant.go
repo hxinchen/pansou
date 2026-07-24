@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"pansou/config"
@@ -22,6 +24,11 @@ type tenantSecret struct {
 	Password string `json:"password"`
 	Cookie   string `json:"cookie"`
 }
+
+var (
+	errGyingAuthenticationRequired = errors.New("gying authentication required")
+	errGyingCredentialsRejected    = errors.New("gying credentials rejected")
+)
 
 func (p *GyingPlugin) ParseLegacyCredential(data []byte) (credential.LoginMaterial, error) {
 	var user User
@@ -110,7 +117,13 @@ type managedSearchCacheEntry struct {
 	outcome    gyingSearchOutcome
 	freshUntil time.Time
 	staleUntil time.Time
+	lastUsed   int64
 }
+
+const (
+	managedSearchCacheMaxEntries = 512
+	managedStateCleanupInterval  = time.Minute
+)
 
 type managedSearchFlightValue struct {
 	outcome gyingSearchOutcome
@@ -199,8 +212,10 @@ func (p *GyingPlugin) SearchCredentialLayer(ctx context.Context, keyword string,
 		}
 		lastErr = searchErr
 		status, code := storage.CredentialStatusActive, "upstream_error"
-		if searchErr != nil && (strings.Contains(searchErr.Error(), "403") || strings.Contains(strings.ToLower(searchErr.Error()), "登录")) {
+		if isGyingCredentialRejected(searchErr) {
 			status, code = storage.CredentialStatusInvalid, "auth_failed"
+		} else if isGyingAuthError(searchErr) {
+			code = "session_invalid"
 		}
 		gyingFailure(ctx, access, candidate.PublicID, status, code)
 	}
@@ -221,20 +236,24 @@ func (p *GyingPlugin) searchManagedCredential(ctx context.Context, keyword strin
 	}
 	key := p.managedSearchKey(cacheScope, candidate.PublicID, keyword)
 	now := time.Now()
-	p.cleanupManagedState(now)
+	p.scheduleManagedStateCleanup(now)
 	var stale *managedSearchCacheEntry
 	if !forceRefresh {
 		if value, ok := p.managedSearchCache.Load(key); ok {
 			entry := value.(*managedSearchCacheEntry)
 			switch {
 			case now.Before(entry.freshUntil):
+				atomic.StoreInt64(&entry.lastUsed, now.UnixNano())
 				return cloneGyingOutcome(entry.outcome), nil
 			case now.Before(entry.staleUntil):
 				stale = entry
+				atomic.StoreInt64(&entry.lastUsed, now.UnixNano())
 				go p.refreshManagedSearch(key, keyword, candidate, secret, access)
 				return cloneGyingOutcome(entry.outcome), nil
 			default:
-				p.managedSearchCache.CompareAndDelete(key, entry)
+				if p.managedSearchCache.CompareAndDelete(key, entry) {
+					p.decrementManagedCacheCount()
+				}
 			}
 		}
 	}
@@ -372,16 +391,39 @@ func (p *GyingPlugin) managedSearchKey(scope, publicID, keyword string) string {
 
 func (p *GyingPlugin) storeManagedSearchCache(key string, outcome gyingSearchOutcome) {
 	now := time.Now()
-	p.managedSearchCache.Store(key, &managedSearchCacheEntry{
-		outcome: cloneGyingOutcome(outcome), freshUntil: now.Add(managedCacheFreshTTL), staleUntil: now.Add(managedCacheStaleTTL),
-	})
+	entry := &managedSearchCacheEntry{
+		outcome: cloneGyingOutcome(outcome), freshUntil: now.Add(managedCacheFreshTTL), staleUntil: now.Add(managedCacheStaleTTL), lastUsed: now.UnixNano(),
+	}
+	if _, loaded := p.managedSearchCache.LoadOrStore(key, entry); loaded {
+		p.managedSearchCache.Store(key, entry)
+	} else {
+		atomic.AddInt64(&p.managedCacheCount, 1)
+	}
+	if atomic.LoadInt64(&p.managedCacheCount) > managedSearchCacheMaxEntries {
+		p.trimManagedSearchCache(now)
+	}
+}
+
+// scheduleManagedStateCleanup keeps request-path work constant. The actual
+// sync.Map traversal happens at most once per interval in a background task.
+func (p *GyingPlugin) scheduleManagedStateCleanup(now time.Time) {
+	p.managedCacheMu.Lock()
+	if now.Sub(p.managedCleanupAt) < managedStateCleanupInterval {
+		p.managedCacheMu.Unlock()
+		return
+	}
+	p.managedCleanupAt = now
+	p.managedCacheMu.Unlock()
+	go p.cleanupManagedState(now)
 }
 
 func (p *GyingPlugin) cleanupManagedState(now time.Time) {
 	p.managedSearchCache.Range(func(key, value interface{}) bool {
 		entry, ok := value.(*managedSearchCacheEntry)
 		if !ok || !now.Before(entry.staleUntil) {
-			p.managedSearchCache.Delete(key)
+			if p.managedSearchCache.CompareAndDelete(key, value) {
+				p.decrementManagedCacheCount()
+			}
 		}
 		return true
 	})
@@ -392,6 +434,53 @@ func (p *GyingPlugin) cleanupManagedState(now time.Time) {
 		}
 		return true
 	})
+}
+
+func (p *GyingPlugin) trimManagedSearchCache(now time.Time) {
+	p.managedCacheMu.Lock()
+	defer p.managedCacheMu.Unlock()
+	type candidate struct {
+		key      any
+		value    any
+		lastUsed int64
+	}
+	candidates := make([]candidate, 0, atomic.LoadInt64(&p.managedCacheCount))
+	p.managedSearchCache.Range(func(key, value any) bool {
+		entry, ok := value.(*managedSearchCacheEntry)
+		if !ok || !now.Before(entry.staleUntil) {
+			if p.managedSearchCache.CompareAndDelete(key, value) {
+				p.decrementManagedCacheCount()
+			}
+			return true
+		}
+		candidates = append(candidates, candidate{key: key, value: value, lastUsed: atomic.LoadInt64(&entry.lastUsed)})
+		return true
+	})
+
+	target := managedSearchCacheMaxEntries * 9 / 10
+	excess := int(atomic.LoadInt64(&p.managedCacheCount)) - target
+	if excess <= 0 {
+		return
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].lastUsed < candidates[j].lastUsed })
+	for _, entry := range candidates {
+		if excess <= 0 {
+			break
+		}
+		if p.managedSearchCache.CompareAndDelete(entry.key, entry.value) {
+			p.decrementManagedCacheCount()
+			excess--
+		}
+	}
+}
+
+func (p *GyingPlugin) decrementManagedCacheCount() {
+	for {
+		current := atomic.LoadInt64(&p.managedCacheCount)
+		if current <= 0 || atomic.CompareAndSwapInt64(&p.managedCacheCount, current, current-1) {
+			return
+		}
+	}
 }
 
 func cloneGyingOutcome(outcome gyingSearchOutcome) gyingSearchOutcome {
@@ -410,8 +499,69 @@ func isGyingAuthError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, errGyingAuthenticationRequired) || errors.Is(err, errGyingCredentialsRejected) {
+		return true
+	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "403") || strings.Contains(message, "登录")
+}
+
+func isGyingCredentialRejected(err error) bool {
+	return err != nil && errors.Is(err, errGyingCredentialsRejected)
+}
+
+func (p *GyingPlugin) CheckCredentialHealth(ctx context.Context, candidate storage.PluginCredential, access credential.Access) (credential.HealthCheckResult, error) {
+	invalid := func(code string) (credential.HealthCheckResult, error) {
+		return credential.HealthCheckResult{
+			HealthStatus: storage.CredentialHealthInvalid, CredentialStatus: storage.CredentialStatusInvalid, ErrorCode: code,
+		}, nil
+	}
+	plaintext, err := access.Open(candidate)
+	if err != nil {
+		return invalid("credential_decrypt_failed")
+	}
+	var secret tenantSecret
+	err = json.Unmarshal(plaintext, &secret)
+	for index := range plaintext {
+		plaintext[index] = 0
+	}
+	if err != nil || strings.TrimSpace(secret.Username) == "" {
+		return invalid("credential_payload_invalid")
+	}
+
+	needsRelogin := candidate.ExpiresAt != nil && !candidate.ExpiresAt.After(time.Now())
+	if !needsRelogin {
+		scraper, scraperErr := p.managedScraper(candidate, secret.Cookie)
+		if scraperErr != nil {
+			return credential.HealthCheckResult{HealthStatus: storage.CredentialHealthError, ErrorCode: "health_check_upstream_error"}, scraperErr
+		}
+		_, probeErr := p.fetchSearchSuggestionsContext(ctx, "电影", scraper)
+		if probeErr == nil {
+			return credential.HealthCheckResult{HealthStatus: storage.CredentialHealthHealthy, CredentialStatus: storage.CredentialStatusActive}, nil
+		}
+		if !isGyingAuthError(probeErr) {
+			return credential.HealthCheckResult{HealthStatus: storage.CredentialHealthError, ErrorCode: "health_check_upstream_error"}, probeErr
+		}
+		needsRelogin = true
+	}
+
+	if !needsRelogin {
+		return credential.HealthCheckResult{HealthStatus: storage.CredentialHealthHealthy, CredentialStatus: storage.CredentialStatusActive}, nil
+	}
+	if strings.TrimSpace(secret.Password) == "" {
+		return invalid("auth_failed")
+	}
+	scraper, loginErr := p.reloginManagedCredential(ctx, candidate, secret, access)
+	if loginErr != nil {
+		if isGyingCredentialRejected(loginErr) {
+			return invalid("auth_failed")
+		}
+		return credential.HealthCheckResult{HealthStatus: storage.CredentialHealthError, ErrorCode: "health_check_upstream_error"}, loginErr
+	}
+	if _, probeErr := p.fetchSearchSuggestionsContext(ctx, "电影", scraper); probeErr != nil {
+		return credential.HealthCheckResult{HealthStatus: storage.CredentialHealthError, ErrorCode: "health_check_upstream_error"}, probeErr
+	}
+	return credential.HealthCheckResult{HealthStatus: storage.CredentialHealthHealthy, CredentialStatus: storage.CredentialStatusActive}, nil
 }
 
 func gyingFailure(ctx context.Context, access credential.Access, id, status, code string) {
@@ -423,5 +573,6 @@ func gyingFailure(ctx context.Context, access credential.Access, id, status, cod
 var _ plugin.ManagedCredentialPlugin = (*GyingPlugin)(nil)
 var _ plugin.RuntimeConfigurablePlugin = (*GyingPlugin)(nil)
 var _ credential.PasswordLoginAdapter = (*GyingPlugin)(nil)
+var _ credential.HealthCheckAdapter = (*GyingPlugin)(nil)
 var _ credential.LayerSearcher = (*GyingPlugin)(nil)
 var _ credential.LegacyCredentialParser = (*GyingPlugin)(nil)

@@ -263,6 +263,47 @@ func TestPostgresCompleteResourceCheckConfirmation(t *testing.T) {
 	assertResourceCheckState(t, pendingResource, CheckExpired, "", time.Time{}, pendingConfirmedAt)
 }
 
+func TestPostgresCompleteResourceChecksBatchesAndRollsBackAtomically(t *testing.T) {
+	base := time.Date(2026, time.July, 18, 18, 0, 0, 0, time.UTC)
+	store := newPostgresTestStore(t, base)
+	ctx := context.Background()
+	first, err := store.UpsertResource(ctx, ResourceInput{
+		URL: "https://batch-check.example/first", CheckStatus: CheckValid, DiscoveredAt: base,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.UpsertResource(ctx, ResourceInput{
+		URL: "https://batch-check.example/second", CheckStatus: CheckPending, DiscoveredAt: base,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checkedAt := base.Add(time.Minute)
+	if err := store.CompleteResourceChecks(ctx, []ResourceCheckCompletion{
+		{ResourceID: first.Resource.ID, Status: CheckInvalid, CheckedAt: checkedAt},
+		{ResourceID: second.Resource.ID, Status: CheckValid, CheckedAt: checkedAt},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	firstResource := mustGetResource(t, store, first.Resource.ID)
+	assertResourceCheckState(t, firstResource, CheckValid, CheckInvalid, checkedAt, checkedAt)
+	secondResource := mustGetResource(t, store, second.Resource.ID)
+	assertResourceCheckState(t, secondResource, CheckValid, "", time.Time{}, checkedAt)
+
+	rollbackAt := checkedAt.Add(time.Minute)
+	err = store.CompleteResourceChecks(ctx, []ResourceCheckCompletion{
+		{ResourceID: second.Resource.ID, Status: CheckUnknown, CheckedAt: rollbackAt},
+		{ResourceID: 0, Status: CheckValid, CheckedAt: rollbackAt},
+	})
+	if err == nil {
+		t.Fatal("batch with invalid resource id unexpectedly succeeded")
+	}
+	secondResource = mustGetResource(t, store, second.Resource.ID)
+	assertResourceCheckState(t, secondResource, CheckValid, "", time.Time{}, checkedAt)
+}
+
 func TestPostgresSearchResponseReturnsNewPendingCheckCandidates(t *testing.T) {
 	base := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
 	store := newPostgresTestStore(t, base)

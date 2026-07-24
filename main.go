@@ -24,8 +24,10 @@ import (
 	"pansou/credential"
 	"pansou/integration"
 	"pansou/keywordsync"
+	"pansou/mihomo"
 	"pansou/model"
 	"pansou/plugin"
+	"pansou/proxypool"
 	"pansou/service"
 	"pansou/sourceconfig"
 	"pansou/storage"
@@ -37,6 +39,7 @@ import (
 	// 添加新插件时，只需在此处添加对应的导入语句即可
 	_ "pansou/plugin/ahhhhfs"
 	_ "pansou/plugin/aikanzy"
+	_ "pansou/plugin/aisoupan"
 	_ "pansou/plugin/alupan"
 	_ "pansou/plugin/ash"
 	_ "pansou/plugin/bixin"
@@ -189,6 +192,22 @@ func startServer() {
 	var pluginManager *plugin.PluginManager
 	var liveSearchService *service.SearchService
 	var credentialService *credential.Service
+	var proxyPool *proxypool.Service
+	mihomoController, err := mihomo.NewService(mihomo.Config{
+		ControllerURL: config.AppConfig.MihomoControllerURL,
+		Secret:        config.AppConfig.MihomoControllerSecret,
+		ManagedGroups: config.AppConfig.MihomoManagedGroups,
+		ProxyURL:      config.AppConfig.ProxyURL,
+		ConfigPath:    config.AppConfig.MihomoConfigPath,
+		ReloadPath:    config.AppConfig.MihomoReloadPath,
+		ExitInfoURL:   config.AppConfig.MihomoExitInfoURL,
+		Timeout:       config.AppConfig.MihomoControllerTimeout,
+		DelayTestURL:  config.AppConfig.MihomoDelayTestURL,
+		DelayTimeout:  config.AppConfig.MihomoDelayTestTimeout,
+	})
+	if err != nil {
+		log.Fatalf("初始化 Mihomo 控制器失败: %v", err)
+	}
 	if store != nil {
 		sourceRuntime, err = bootstrapSourceRuntime(appCtx, store)
 		if err != nil {
@@ -199,6 +218,11 @@ func startServer() {
 		if err != nil {
 			store.Close()
 			log.Fatalf("初始化插件凭据服务失败: %v", err)
+		}
+		proxyPool, err = bootstrapProxyPool(appCtx, store)
+		if err != nil {
+			store.Close()
+			log.Fatalf("初始化代理池失败: %v", err)
 		}
 		liveSearchService = service.NewDynamicSearchService(sourceRuntime.Manager)
 		liveSearchService.SetCredentialService(credentialService)
@@ -224,6 +248,21 @@ func startServer() {
 	api.SetAuthService(nil)
 	api.SetUsageServices(nil, nil)
 	if store != nil {
+		service.NewSchedulerMetricsRecorder(store, config.AppConfig.SearchMetricsInterval).Start(appCtx)
+		credentialHealth := credential.NewHealthMonitor(store, credentialService, credentialHealthAdapterMap(pluginManager), credential.HealthMonitorConfig{
+			Enabled:      config.AppConfig.GyingHealthCheckEnabled,
+			Interval:     config.AppConfig.GyingHealthCheckInterval,
+			ScanInterval: config.AppConfig.GyingHealthCheckScanInterval,
+			InitialDelay: config.AppConfig.GyingHealthCheckInitialDelay,
+			Timeout:      config.AppConfig.GyingHealthCheckTimeout,
+			Jitter:       config.AppConfig.GyingHealthCheckJitter,
+			BatchSize:    config.AppConfig.GyingHealthCheckBatchSize,
+			OnError:      func(err error) { log.Printf("插件账号测活: %v", err) },
+		})
+		if err := credentialHealth.Start(appCtx); err != nil {
+			store.Close()
+			log.Fatalf("启动插件账号测活失败: %v", err)
+		}
 		if config.AppConfig.AuthEnabled {
 			if strings.TrimSpace(os.Getenv("AUTH_JWT_SECRET")) == "" {
 				store.Close()
@@ -265,14 +304,20 @@ func startServer() {
 		collectionRepository = &integration.CollectionRepository{Store: store}
 		linkChecks = collection.NewLinkCheckQueue(
 			collectionRepository,
-			integration.LinkChecker{Service: api.SharedCheckService()},
+			integration.LinkChecker{Service: api.SharedCheckService(), Pool: proxyPool},
 			collection.LinkCheckQueueConfig{
-				Workers:      config.AppConfig.LinkCheckWorkers,
-				Buffer:       1024,
-				Timeout:      30 * time.Second,
-				PollInterval: time.Minute,
-				BatchSize:    500,
-				OnError:      func(err error) { log.Printf("链接检测任务: %v", err) },
+				Workers:            config.AppConfig.LinkCheckWorkers,
+				Buffer:             1024,
+				Timeout:            config.AppConfig.LinkCheckTimeout,
+				PollInterval:       time.Minute,
+				BacklogInterval:    config.AppConfig.LinkCheckBacklogInterval,
+				BatchSize:          500,
+				PlatformLimit:      config.AppConfig.LinkCheckPerPlatform,
+				CircuitFailures:    config.AppConfig.LinkCheckCircuitFailures,
+				CircuitCooldown:    config.AppConfig.LinkCheckCircuitCooldown,
+				WriteBatchSize:     config.AppConfig.LinkCheckWriteBatchSize,
+				WriteFlushInterval: config.AppConfig.LinkCheckWriteFlushInterval,
+				OnError:            func(err error) { log.Printf("链接检测任务: %v", err) },
 			},
 		)
 		var sourceProvider collection.SourceProvider = integration.ConfiguredSources(config.AppConfig.DefaultChannels, pluginManager)
@@ -316,7 +361,8 @@ func startServer() {
 	router := api.SetupRouter(searchService, api.RouterDependencies{
 		Store: store, Runner: runner, LinkChecks: linkChecks, SourceRuntime: sourceRuntime,
 		Credentials: credentialService, CredentialAdapters: credentialAdapterMap(pluginManager),
-		KeywordSources: keywordSourceSync,
+		CredentialDiagnostics: liveSearchService, KeywordSources: keywordSourceSync, ProxyPool: proxyPool, Mihomo: mihomoController,
+		SearchCache: service.GetEnhancedTwoLevelCache(),
 	})
 
 	// 获取端口配置

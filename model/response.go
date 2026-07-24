@@ -60,6 +60,17 @@ type SourceStatus struct {
 	Message    string           `json:"message,omitempty" sonic:"message,omitempty"`
 }
 
+// SearchExecution explains how the source budget was consumed. A tiered
+// search can be complete by policy while intentionally deferring low-value
+// sources; clients can use this metadata to offer a deep-search action.
+type SearchExecution struct {
+	Requested int    `json:"requested" sonic:"requested"`
+	Executed  int    `json:"executed" sonic:"executed"`
+	Cached    int    `json:"cached" sonic:"cached"`
+	Deferred  int    `json:"deferred" sonic:"deferred"`
+	Strategy  string `json:"strategy,omitempty" sonic:"strategy,omitempty"`
+}
+
 // SearchResponse 搜索响应
 type SearchResponse struct {
 	Total          int                     `json:"total" sonic:"total"`
@@ -68,6 +79,7 @@ type SearchResponse struct {
 	Completion     SearchCompletion        `json:"completion,omitempty" sonic:"completion,omitempty"`
 	PartialSources []string                `json:"partial_sources,omitempty" sonic:"partial_sources,omitempty"`
 	SourceStatuses map[string]SourceStatus `json:"source_statuses,omitempty" sonic:"source_statuses,omitempty"`
+	Execution      *SearchExecution        `json:"execution,omitempty" sonic:"execution,omitempty"`
 }
 
 func (r SearchResponse) IsPartial() bool {

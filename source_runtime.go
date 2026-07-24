@@ -51,12 +51,23 @@ func bootstrapSourceRuntime(ctx context.Context, store *storage.Store) (*sourcec
 		manager := plugin.NewPluginManager()
 		for _, name := range enabledPluginNames(candidate) {
 			instance, createErr := plugin.CreateRegisteredPlugin(name)
-			if createErr != nil { _ = manager.Close(); return nil, createErr }
-			if managed, ok := instance.(plugin.ManagedCredentialPlugin); ok { managed.SetManagedCredentialMode(true) }
-			if configurable, ok := instance.(plugin.RuntimeConfigurablePlugin); ok {
-				if applyErr := configurable.ApplyRuntimeConfig(candidate.Plugins[name].Config); applyErr != nil { _ = manager.Close(); return nil, fmt.Errorf("configure plugin %s: %w", name, applyErr) }
+			if createErr != nil {
+				_ = manager.Close()
+				return nil, createErr
 			}
-			if registerErr := manager.RegisterPluginChecked(instance); registerErr != nil { _ = manager.Close(); return nil, registerErr }
+			if managed, ok := instance.(plugin.ManagedCredentialPlugin); ok {
+				managed.SetManagedCredentialMode(true)
+			}
+			if configurable, ok := instance.(plugin.RuntimeConfigurablePlugin); ok {
+				if applyErr := configurable.ApplyRuntimeConfig(candidate.Plugins[name].Config); applyErr != nil {
+					_ = manager.Close()
+					return nil, fmt.Errorf("configure plugin %s: %w", name, applyErr)
+				}
+			}
+			if registerErr := manager.RegisterPluginChecked(instance); registerErr != nil {
+				_ = manager.Close()
+				return nil, registerErr
+			}
 		}
 		return sourceconfig.NewSnapshot(version, candidate, manager), nil
 	}
@@ -76,11 +87,21 @@ func sourceSeedConfig(names []string) sourceconfig.Config {
 	plugins := make(map[string]sourceconfig.PluginConfig, len(names))
 	for index, name := range names {
 		_, isEnabled := enabled[strings.ToLower(name)]
-		plugins[name] = sourceconfig.PluginConfig{Enabled: config.AppConfig.AsyncPluginEnabled && isEnabled, Order: index}
+		tier := "deep"
+		if index < 15 {
+			tier = "primary"
+		} else if index < 45 {
+			tier = "secondary"
+		}
+		plugins[name] = sourceconfig.PluginConfig{Enabled: config.AppConfig.AsyncPluginEnabled && isEnabled, Order: index, Tier: tier}
 	}
 	channels := make([]sourceconfig.Channel, 0, len(config.AppConfig.DefaultChannels))
 	for index, channel := range config.AppConfig.DefaultChannels {
-		channels = append(channels, sourceconfig.Channel{Key: channel, DisplayName: channel, Enabled: true, Order: index})
+		tier := "collection"
+		if index < 30 {
+			tier = "realtime"
+		}
+		channels = append(channels, sourceconfig.Channel{Key: channel, DisplayName: channel, Enabled: true, Order: index, Tier: tier})
 	}
 	return sourceconfig.Config{SchemaVersion: 1, AsyncPluginsEnabled: config.AppConfig.AsyncPluginEnabled, Channels: channels, Plugins: plugins}
 }
@@ -92,14 +113,25 @@ func enabledPluginNames(config sourceconfig.Config) []string {
 	type entry struct {
 		key   string
 		order int
+		tier  int
 	}
 	items := make([]entry, 0, len(config.Plugins))
 	for key, settings := range config.Plugins {
 		if settings.Enabled {
-			items = append(items, entry{key: key, order: settings.Order})
+			tier := 0
+			switch settings.Tier {
+			case "secondary":
+				tier = 1
+			case "deep":
+				tier = 2
+			}
+			items = append(items, entry{key: key, order: settings.Order, tier: tier})
 		}
 	}
 	sort.Slice(items, func(i, j int) bool {
+		if items[i].tier != items[j].tier {
+			return items[i].tier < items[j].tier
+		}
 		if items[i].order == items[j].order {
 			return items[i].key < items[j].key
 		}

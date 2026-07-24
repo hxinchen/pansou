@@ -1,6 +1,7 @@
 package gying
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -505,8 +506,12 @@ type GyingPlugin struct {
 	*plugin.BaseAsyncPlugin
 	users              sync.Map // 内存缓存：hash -> *User
 	scrapers           sync.Map // cloudscraper实例缓存：hash -> *cloudscraper.Scraper
+	stealthLocks       sync.Map // *cloudscraper.Scraper -> *sync.Mutex，保护第三方 StealthMode 的可变状态
 	managedSessions    sync.Map // 托管凭据会话：凭据ID+站点 -> *managedSession
 	managedSearchCache sync.Map // 身份+凭据+站点+关键词 -> *managedSearchCacheEntry
+	managedCacheMu     sync.Mutex
+	managedCacheCount  int64
+	managedCleanupAt   time.Time
 	managedSearchGroup singleflight.Group
 	managedLoginGroup  singleflight.Group
 	mu                 sync.RWMutex
@@ -753,6 +758,7 @@ func (p *GyingPlugin) resetSessionsForBaseURLChange() {
 		p.managedSearchCache.Delete(key)
 		return true
 	})
+	atomic.StoreInt64(&p.managedCacheCount, 0)
 
 	p.users.Range(func(key, value interface{}) bool {
 		user := value.(*User)
@@ -1685,9 +1691,16 @@ func (p *GyingPlugin) applyProxyToScraper(scraper *cloudscraper.Scraper) error {
 }
 
 func (p *GyingPlugin) solveBotChallenge(scraper *cloudscraper.Scraper, requestURL string, body []byte) error {
+	return p.solveBotChallengeContext(context.Background(), scraper, requestURL, body)
+}
+
+func (p *GyingPlugin) solveBotChallengeContext(ctx context.Context, scraper *cloudscraper.Scraper, requestURL string, body []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	matches := challengeJSONPattern.FindSubmatch(body)
 	if len(matches) < 2 {
-		return p.solveRemotePowChallenge(scraper, requestURL)
+		return p.solveRemotePowChallengeContext(ctx, scraper, requestURL)
 	}
 
 	var challenge ChallengePageData
@@ -1696,13 +1709,17 @@ func (p *GyingPlugin) solveBotChallenge(scraper *cloudscraper.Scraper, requestUR
 	}
 
 	if challenge.ID != "" && challenge.N != "" && challenge.X != "" && challenge.T > 0 {
-		return p.solvePowChallenge(scraper, requestURL, &challenge)
+		return p.solvePowChallengeContext(ctx, scraper, requestURL, &challenge)
 	}
 
-	return p.solveLegacyHashChallenge(scraper, requestURL, &challenge)
+	return p.solveLegacyHashChallengeContext(ctx, scraper, requestURL, &challenge)
 }
 
 func (p *GyingPlugin) solveRemotePowChallenge(scraper *cloudscraper.Scraper, requestURL string) error {
+	return p.solveRemotePowChallengeContext(context.Background(), scraper, requestURL)
+}
+
+func (p *GyingPlugin) solveRemotePowChallengeContext(ctx context.Context, scraper *cloudscraper.Scraper, requestURL string) error {
 	powURL, err := p.buildPowURL(requestURL)
 	if err != nil {
 		return err
@@ -1712,7 +1729,7 @@ func (p *GyingPlugin) solveRemotePowChallenge(scraper *cloudscraper.Scraper, req
 		fmt.Printf("[Gying] Remote PoW Challenge命中: url=%s powURL=%s\n", requestURL, powURL)
 	}
 
-	body, statusCode, _, err := p.requestWithChallengeRetry(scraper, http.MethodGet, powURL, "", "")
+	body, statusCode, _, err := p.requestWithChallengeRetryContext(ctx, scraper, http.MethodGet, powURL, "", "")
 	if err != nil {
 		return fmt.Errorf("获取PoW验证数据失败: %w", err)
 	}
@@ -1728,7 +1745,7 @@ func (p *GyingPlugin) solveRemotePowChallenge(scraper *cloudscraper.Scraper, req
 		return fmt.Errorf("PoW验证数据无效")
 	}
 
-	y, err := p.computePowResult(&challenge)
+	y, err := p.computePowResultContext(ctx, &challenge)
 	if err != nil {
 		return err
 	}
@@ -1736,7 +1753,7 @@ func (p *GyingPlugin) solveRemotePowChallenge(scraper *cloudscraper.Scraper, req
 	form := url.Values{}
 	form.Set("y", y)
 
-	return p.submitChallengeVerification(scraper, powURL, form)
+	return p.submitChallengeVerificationContext(ctx, scraper, powURL, form)
 }
 
 func (p *GyingPlugin) buildPowURL(requestURL string) (string, error) {
@@ -1751,7 +1768,11 @@ func (p *GyingPlugin) buildPowURL(requestURL string) (string, error) {
 }
 
 func (p *GyingPlugin) solvePowChallenge(scraper *cloudscraper.Scraper, requestURL string, challenge *ChallengePageData) error {
-	y, err := p.computePowResult(challenge)
+	return p.solvePowChallengeContext(context.Background(), scraper, requestURL, challenge)
+}
+
+func (p *GyingPlugin) solvePowChallengeContext(ctx context.Context, scraper *cloudscraper.Scraper, requestURL string, challenge *ChallengePageData) error {
+	y, err := p.computePowResultContext(ctx, challenge)
 	if err != nil {
 		return err
 	}
@@ -1761,10 +1782,14 @@ func (p *GyingPlugin) solvePowChallenge(scraper *cloudscraper.Scraper, requestUR
 	form.Set("id", challenge.ID)
 	form.Set("y", y)
 
-	return p.submitChallengeVerification(scraper, requestURL, form)
+	return p.submitChallengeVerificationContext(ctx, scraper, requestURL, form)
 }
 
 func (p *GyingPlugin) computePowResult(challenge *ChallengePageData) (string, error) {
+	return p.computePowResultContext(context.Background(), challenge)
+}
+
+func (p *GyingPlugin) computePowResultContext(ctx context.Context, challenge *ChallengePageData) (string, error) {
 	modulus, ok := new(big.Int).SetString(challenge.N, 16)
 	if !ok || modulus.Sign() <= 0 {
 		return "", fmt.Errorf("PoW验证数据无效: N")
@@ -1785,6 +1810,11 @@ func (p *GyingPlugin) computePowResult(challenge *ChallengePageData) (string, er
 
 	start := time.Now()
 	for i := 0; i < challenge.T; i++ {
+		if i%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+		}
 		y.Mul(y, y)
 		y.Mod(y, modulus)
 	}
@@ -1796,13 +1826,23 @@ func (p *GyingPlugin) computePowResult(challenge *ChallengePageData) (string, er
 	}
 
 	if minSolveTime := 3 * time.Second; elapsed < minSolveTime {
-		time.Sleep(minSolveTime - elapsed)
+		timer := time.NewTimer(minSolveTime - elapsed)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-timer.C:
+		}
 	}
 
 	return y.Text(16), nil
 }
 
 func (p *GyingPlugin) solveLegacyHashChallenge(scraper *cloudscraper.Scraper, requestURL string, challenge *ChallengePageData) error {
+	return p.solveLegacyHashChallengeContext(context.Background(), scraper, requestURL, challenge)
+}
+
+func (p *GyingPlugin) solveLegacyHashChallengeContext(ctx context.Context, scraper *cloudscraper.Scraper, requestURL string, challenge *ChallengePageData) error {
 	if challenge.ID == "" || challenge.Salt == "" || challenge.Diff <= 0 || len(challenge.Challenge) == 0 {
 		return fmt.Errorf("验证数据无效")
 	}
@@ -1842,6 +1882,11 @@ func (p *GyingPlugin) solveLegacyHashChallenge(scraper *cloudscraper.Scraper, re
 
 			hashInput := make([]byte, 0, len(saltBytes)+20)
 			for nonce := start; nonce <= challenge.Diff; nonce += workerCount {
+				if nonce%1024 == start%1024 {
+					if ctx.Err() != nil {
+						return
+					}
+				}
 				if solved.Load() >= targetsLen {
 					return
 				}
@@ -1874,6 +1919,9 @@ func (p *GyingPlugin) solveLegacyHashChallenge(scraper *cloudscraper.Scraper, re
 	}
 
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if solved.Load() != targetsLen {
 		mu.Lock()
@@ -1891,11 +1939,15 @@ func (p *GyingPlugin) solveLegacyHashChallenge(scraper *cloudscraper.Scraper, re
 		form.Add("nonce[]", strconv.Itoa(nonce))
 	}
 
-	return p.submitChallengeVerification(scraper, requestURL, form)
+	return p.submitChallengeVerificationContext(ctx, scraper, requestURL, form)
 }
 
 func (p *GyingPlugin) submitChallengeVerification(scraper *cloudscraper.Scraper, requestURL string, form url.Values) error {
-	resp, err := scraper.Post(requestURL, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	return p.submitChallengeVerificationContext(context.Background(), scraper, requestURL, form)
+}
+
+func (p *GyingPlugin) submitChallengeVerificationContext(ctx context.Context, scraper *cloudscraper.Scraper, requestURL string, form url.Values) error {
+	resp, err := p.doScraperRequest(ctx, scraper, http.MethodPost, requestURL, "application/x-www-form-urlencoded", form.Encode())
 	if err != nil {
 		return fmt.Errorf("提交验证失败: %w", err)
 	}
@@ -1965,7 +2017,7 @@ func (p *GyingPlugin) requestWithChallengeRetryContext(ctx context.Context, scra
 			if DebugLog {
 				fmt.Printf("[Gying] requestWithChallengeRetry: 准备求解challenge并重试 url=%s\n", requestURL)
 			}
-			if err := p.solveBotChallenge(scraper, requestURL, body); err != nil {
+			if err := p.solveBotChallengeContext(ctx, scraper, requestURL, body); err != nil {
 				return nil, statusCode, headers, err
 			}
 			if err := ctx.Err(); err != nil {
@@ -2009,7 +2061,16 @@ func (p *GyingPlugin) doScraperRequest(ctx context.Context, scraper *cloudscrape
 			req.Header[key] = append([]string(nil), values...)
 		}
 	}
+	// cloudscraper advertises Brotli like a browser. Because this cancellable
+	// request path uses the underlying net/http client directly, Brotli is not
+	// decoded by cloudscraper's higher-level helpers. Ask for an identity body so
+	// JSON/login/challenge detection always receives the actual response bytes.
+	req.Header.Set("Accept-Encoding", "identity")
+	lockValue, _ := p.stealthLocks.LoadOrStore(scraper, &sync.Mutex{})
+	stealthLock := lockValue.(*sync.Mutex)
+	stealthLock.Lock()
 	scraper.StealthMode.Apply(req, scraper.UserAgent.Browser)
+	stealthLock.Unlock()
 	client, err := getScraperClient(scraper)
 	if err != nil {
 		return nil, err
@@ -2032,7 +2093,7 @@ func parseLoginFailure(body []byte) error {
 	codeRaw, hasCode := loginResp["code"]
 	if !hasCode {
 		if msg != "" && msg != "<nil>" {
-			return fmt.Errorf("登录失败: %s", msg)
+			return fmt.Errorf("%w: %s", errGyingCredentialsRejected, msg)
 		}
 		return nil
 	}
@@ -2050,7 +2111,7 @@ func parseLoginFailure(body []byte) error {
 		if msg == "" || msg == "<nil>" {
 			msg = fmt.Sprintf("code=%d", codeValue)
 		}
-		return fmt.Errorf("登录失败: %s", msg)
+		return fmt.Errorf("%w: %s", errGyingCredentialsRejected, msg)
 	}
 
 	return nil
@@ -2293,7 +2354,7 @@ func (p *GyingPlugin) doLoginContext(ctx context.Context, username, password str
 		return nil, "", fmt.Errorf("登录态验证失败: %w", err)
 	}
 	if warmupStatus == http.StatusForbidden || isLoginShell(warmupBody) {
-		return nil, "", fmt.Errorf("登录失败: 未获得有效会话")
+		return nil, "", fmt.Errorf("%w: 未获得有效会话", errGyingCredentialsRejected)
 	}
 
 	// 构建cookie字符串
@@ -2567,15 +2628,18 @@ func (p *GyingPlugin) fetchSearchSuggestionsContext(ctx context.Context, keyword
 		return nil, err
 	}
 	if statusCode == http.StatusForbidden || isLoginShell(body) {
-		return nil, fmt.Errorf("HTTP 403 Forbidden - 需要重新登录")
+		return nil, fmt.Errorf("%w: HTTP 403 Forbidden", errGyingAuthenticationRequired)
 	}
 	if statusCode != http.StatusOK {
 		return nil, fmt.Errorf("搜索建议接口返回 HTTP %d", statusCode)
 	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, fmt.Errorf("%w: 搜索建议接口返回空响应", errGyingAuthenticationRequired)
+	}
 
 	var items []SearchSuggestItem
 	if err := json.Unmarshal(body, &items); err != nil {
-		return nil, fmt.Errorf("解析搜索建议失败: %w", err)
+		return nil, fmt.Errorf("%w: 解析搜索建议失败: %v", errGyingAuthenticationRequired, err)
 	}
 
 	filtered := make([]SearchSuggestItem, 0, len(items))

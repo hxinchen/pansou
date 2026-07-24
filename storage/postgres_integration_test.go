@@ -39,7 +39,7 @@ func newPostgresTestStore(t *testing.T, now time.Time) *Store {
 	}
 	store, err := Open(ctx, databaseURL,
 		WithPoolConfig(func(config *pgxpool.Config) {
-			config.ConnConfig.RuntimeParams["search_path"] = schema
+			config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
 			config.MaxConns = 8
 		}),
 		func(options *storeOptions) { options.now = func() time.Time { return now } },

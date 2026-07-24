@@ -45,11 +45,32 @@ type Config struct {
 	AsyncCacheTTLHours        int           // 异步缓存有效期（小时）
 	AsyncLogEnabled           bool          // 是否启用异步插件详细日志
 	// HTTP服务器配置
-	HTTPReadTimeout       time.Duration // 读取超时
-	HTTPWriteTimeout      time.Duration // 写入超时
-	HTTPIdleTimeout       time.Duration // 空闲超时
-	HTTPMaxConns          int           // 最大连接数
-	SearchResponseTimeout time.Duration // 搜索接口前台软响应预算
+	HTTPReadTimeout              time.Duration // 读取超时
+	HTTPWriteTimeout             time.Duration // 写入超时
+	HTTPIdleTimeout              time.Duration // 空闲超时
+	HTTPMaxConns                 int           // 最大连接数
+	SearchResponseTimeout        time.Duration // 搜索接口前台软响应预算
+	TGSearchWorkers              int           // 单次 TG 搜索最大并发
+	SearchSchedulerEnabled       bool          // 是否启用全局搜索调度器
+	SearchActiveLimit            int           // 活跃实时搜索上限
+	SearchQueueSize              int           // 等待进入实时搜索的队列上限
+	SearchTGWorkers              int           // 全局 TG 任务预算
+	SearchPluginWorkers          int           // 全局普通插件任务预算
+	SearchCredentialWorkers      int           // 全局凭据插件任务预算
+	SearchPerRequestTG           int           // 单请求 TG 并发预算
+	SearchPerRequestPlugin       int           // 单请求插件并发预算
+	SearchPerSourceLimit         int           // 单来源默认并发预算
+	SearchCircuitFailures        int           // 熔断连续失败阈值
+	SearchCircuitCooldown        time.Duration // 熔断冷却时间
+	SearchMetricsInterval        time.Duration // 调度指标落库周期
+	SearchTieredRollout          bool          // 是否启用交互搜索来源分层；默认关闭以保持旧版全来源覆盖
+	GyingHealthCheckEnabled      bool
+	GyingHealthCheckInterval     time.Duration
+	GyingHealthCheckScanInterval time.Duration
+	GyingHealthCheckInitialDelay time.Duration
+	GyingHealthCheckTimeout      time.Duration
+	GyingHealthCheckJitter       time.Duration
+	GyingHealthCheckBatchSize    int
 	// 认证相关配置
 	AuthEnabled     bool              // 是否启用认证
 	AuthUsers       map[string]string // 用户名:密码映射
@@ -61,12 +82,46 @@ type Config struct {
 	DefaultUserRPM  int               // 新用户默认每分钟请求数
 	UsageRetention  time.Duration     // API调用明细保留期
 	// PostgreSQL 资源库与采集配置。DATABASE_URL 为空时保持纯实时搜索模式。
-	DatabaseURL        string
-	CollectionInterval time.Duration
-	DefaultCooldown    time.Duration
-	LinkCheckWorkers   int
-	HybridRefreshAfter time.Duration
-	TrustedProxies     []string
+	DatabaseURL                 string
+	CollectionInterval          time.Duration
+	DefaultCooldown             time.Duration
+	LinkCheckWorkers            int
+	LinkCheckTimeout            time.Duration
+	LinkCheckPerPlatform        int
+	LinkCheckCircuitFailures    int
+	LinkCheckCircuitCooldown    time.Duration
+	LinkCheckBacklogInterval    time.Duration
+	LinkCheckWriteBatchSize     int
+	LinkCheckWriteFlushInterval time.Duration
+	ProxyPoolEnabled            bool
+	ProxyPoolHealthEnabled      bool
+	ProxyPoolHealthWorkers      int
+	ProxyPoolProbeTimeout       time.Duration
+	ProxyPoolProbeInterval      time.Duration
+	ProxyPoolNodeRefresh        time.Duration
+	ProxyPoolFailureThreshold   int
+	ProxyPoolCooldown           time.Duration
+	ProxyPoolCooldownMax        time.Duration
+	ProxyPoolCooldownJitter     time.Duration
+	ProxyPoolMaxHotNodes        int
+	ProxyPoolMaxPerNode         int
+	ProxyPoolMaxAttempts        int
+	ProxyPoolStickyTTL          time.Duration
+	ProxyPoolStickyMaxEntries   int
+	ProxyPoolSelectionStrategy  string
+	ProxyPoolProbeURLs          []string
+	MihomoControllerURL         string
+	MihomoControllerSecret      string
+	MihomoManagedGroups         []string
+	MihomoConfigPath            string
+	MihomoReloadPath            string
+	MihomoExitInfoURL           string
+	MihomoControllerTimeout     time.Duration
+	MihomoDelayTestURL          string
+	MihomoDelayTestTimeout      time.Duration
+	HybridRefreshAfter          time.Duration
+	TrustedProxies              []string
+	PprofEnabled                bool
 }
 
 // 全局配置实例
@@ -77,6 +132,14 @@ func Init() {
 	proxyURL := getProxyURL()
 	pluginTimeoutSeconds := getPluginTimeout()
 	asyncResponseTimeoutSeconds := getAsyncResponseTimeout()
+	mihomoExitInfoURL := strings.TrimSpace(os.Getenv("MIHOMO_EXIT_INFO_URL"))
+	if mihomoExitInfoURL == "" {
+		mihomoExitInfoURL = "https://ipinfo.io/json"
+	}
+	mihomoDelayTestURL := strings.TrimSpace(os.Getenv("MIHOMO_DELAY_TEST_URL"))
+	if mihomoDelayTestURL == "" {
+		mihomoDelayTestURL = "http://www.gstatic.com/generate_204"
+	}
 
 	AppConfig = &Config{
 		DefaultChannels:    getDefaultChannels(),
@@ -110,11 +173,32 @@ func Init() {
 		AsyncCacheTTLHours:        getAsyncCacheTTLHours(),
 		AsyncLogEnabled:           getAsyncLogEnabled(),
 		// HTTP服务器配置
-		HTTPReadTimeout:       getHTTPReadTimeout(),
-		HTTPWriteTimeout:      getHTTPWriteTimeout(),
-		HTTPIdleTimeout:       getHTTPIdleTimeout(),
-		HTTPMaxConns:          getHTTPMaxConns(),
-		SearchResponseTimeout: getDurationSeconds("SEARCH_RESPONSE_TIMEOUT_SECONDS", 25*time.Second),
+		HTTPReadTimeout:              getHTTPReadTimeout(),
+		HTTPWriteTimeout:             getHTTPWriteTimeout(),
+		HTTPIdleTimeout:              getHTTPIdleTimeout(),
+		HTTPMaxConns:                 getHTTPMaxConns(),
+		SearchResponseTimeout:        getDurationSeconds("SEARCH_RESPONSE_TIMEOUT_SECONDS", 25*time.Second),
+		TGSearchWorkers:              getPositiveInt("TG_SEARCH_WORKERS", 20),
+		SearchSchedulerEnabled:       getBool("SEARCH_SCHEDULER_ENABLED", true),
+		SearchActiveLimit:            getPositiveInt("SEARCH_ACTIVE_LIMIT", 8),
+		SearchQueueSize:              getPositiveInt("SEARCH_QUEUE_SIZE", 100),
+		SearchTGWorkers:              getPositiveInt("SEARCH_TG_WORKERS", 32),
+		SearchPluginWorkers:          getPositiveInt("SEARCH_PLUGIN_WORKERS", 32),
+		SearchCredentialWorkers:      getPositiveInt("SEARCH_CREDENTIAL_WORKERS", 16),
+		SearchPerRequestTG:           getPositiveInt("SEARCH_PER_REQUEST_TG", 20),
+		SearchPerRequestPlugin:       getPositiveInt("SEARCH_PER_REQUEST_PLUGIN", 16),
+		SearchPerSourceLimit:         getPositiveInt("SEARCH_PER_SOURCE_LIMIT", 2),
+		SearchCircuitFailures:        getPositiveInt("SEARCH_CIRCUIT_FAILURES", 5),
+		SearchCircuitCooldown:        getDurationSeconds("SEARCH_CIRCUIT_COOLDOWN_SECONDS", 5*time.Minute),
+		SearchMetricsInterval:        getDurationSeconds("SEARCH_METRICS_FLUSH_SECONDS", time.Minute),
+		SearchTieredRollout:          getBool("SEARCH_TIERED_ROLLOUT_ENABLED", false),
+		GyingHealthCheckEnabled:      getBool("GYING_HEALTH_CHECK_ENABLED", true),
+		GyingHealthCheckInterval:     getDurationSeconds("GYING_HEALTH_CHECK_INTERVAL_SECONDS", 6*time.Hour),
+		GyingHealthCheckScanInterval: getDurationSeconds("GYING_HEALTH_CHECK_SCAN_SECONDS", 30*time.Minute),
+		GyingHealthCheckInitialDelay: getDurationSeconds("GYING_HEALTH_CHECK_INITIAL_DELAY_SECONDS", 2*time.Minute),
+		GyingHealthCheckTimeout:      getDurationSeconds("GYING_HEALTH_CHECK_TIMEOUT_SECONDS", 30*time.Second),
+		GyingHealthCheckJitter:       getDurationSeconds("GYING_HEALTH_CHECK_JITTER_SECONDS", 15*time.Second),
+		GyingHealthCheckBatchSize:    getPositiveInt("GYING_HEALTH_CHECK_BATCH_SIZE", 50),
 		// 认证相关配置
 		AuthEnabled:     getAuthEnabled(),
 		AuthUsers:       getAuthUsers(),
@@ -126,12 +210,46 @@ func Init() {
 		DefaultUserRPM:  getPositiveInt("DEFAULT_USER_RPM", 60),
 		UsageRetention:  getDurationDays("USAGE_LOG_RETENTION_DAYS", 30*24*time.Hour),
 		// PostgreSQL 与采集相关配置
-		DatabaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		CollectionInterval: getDurationSeconds("COLLECTION_INTERVAL_SECONDS", 60*time.Second),
-		DefaultCooldown:    getDurationHours("COLLECTION_DEFAULT_COOLDOWN_HOURS", 7*24*time.Hour),
-		LinkCheckWorkers:   getPositiveInt("LINK_CHECK_WORKERS", 4),
-		HybridRefreshAfter: getDurationMinutes("HYBRID_REFRESH_AFTER_MINUTES", time.Hour),
-		TrustedProxies:     mustTrustedProxies(os.Getenv("TRUSTED_PROXIES")),
+		DatabaseURL:                 strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		CollectionInterval:          getDurationSeconds("COLLECTION_INTERVAL_SECONDS", 60*time.Second),
+		DefaultCooldown:             getDurationHours("COLLECTION_DEFAULT_COOLDOWN_HOURS", 7*24*time.Hour),
+		LinkCheckWorkers:            getPositiveInt("LINK_CHECK_WORKERS", 8),
+		LinkCheckTimeout:            getDurationSeconds("LINK_CHECK_TIMEOUT_SECONDS", 15*time.Second),
+		LinkCheckPerPlatform:        getPositiveInt("LINK_CHECK_PER_PLATFORM", 2),
+		LinkCheckCircuitFailures:    getPositiveInt("LINK_CHECK_CIRCUIT_FAILURES", 5),
+		LinkCheckCircuitCooldown:    getDurationSeconds("LINK_CHECK_CIRCUIT_COOLDOWN_SECONDS", 5*time.Minute),
+		LinkCheckBacklogInterval:    getDurationSeconds("LINK_CHECK_BACKLOG_INTERVAL_SECONDS", 5*time.Minute),
+		LinkCheckWriteBatchSize:     getPositiveInt("LINK_CHECK_WRITE_BATCH_SIZE", 16),
+		LinkCheckWriteFlushInterval: getDurationSeconds("LINK_CHECK_WRITE_FLUSH_SECONDS", time.Second),
+		ProxyPoolEnabled:            getBool("PROXY_POOL_ENABLED", false),
+		ProxyPoolHealthEnabled:      getBool("PROXY_POOL_HEALTH_ENABLED", true),
+		ProxyPoolHealthWorkers:      getPositiveInt("PROXY_POOL_HEALTH_WORKERS", 16),
+		ProxyPoolProbeTimeout:       getDurationSeconds("PROXY_POOL_PROBE_TIMEOUT_SECONDS", 10*time.Second),
+		ProxyPoolProbeInterval:      getDurationSeconds("PROXY_POOL_PROBE_INTERVAL_SECONDS", 30*time.Second),
+		ProxyPoolNodeRefresh:        getDurationSeconds("PROXY_POOL_REFRESH_SECONDS", 30*time.Second),
+		ProxyPoolFailureThreshold:   getPositiveInt("PROXY_POOL_FAILURE_THRESHOLD", 3),
+		ProxyPoolCooldown:           getDurationSeconds("PROXY_POOL_COOLDOWN_SECONDS", 5*time.Minute),
+		ProxyPoolCooldownMax:        getDurationSeconds("PROXY_POOL_COOLDOWN_MAX_SECONDS", 30*time.Minute),
+		ProxyPoolCooldownJitter:     getDurationSeconds("PROXY_POOL_COOLDOWN_JITTER_SECONDS", 30*time.Second),
+		ProxyPoolMaxHotNodes:        getPositiveInt("PROXY_POOL_MAX_HOT_NODES", 1000),
+		ProxyPoolMaxPerNode:         getPositiveInt("PROXY_POOL_MAX_PER_NODE", 2),
+		ProxyPoolMaxAttempts:        getPositiveInt("PROXY_POOL_MAX_ATTEMPTS", 3),
+		ProxyPoolStickyTTL:          getDurationSeconds("PROXY_POOL_STICKY_TTL_SECONDS", time.Hour),
+		ProxyPoolStickyMaxEntries:   getPositiveInt("PROXY_POOL_STICKY_MAX_ENTRIES", 100000),
+		ProxyPoolSelectionStrategy:  getString("PROXY_POOL_SELECTION_STRATEGY", "least_score"),
+		ProxyPoolProbeURLs:          getCSV("PROXY_POOL_PROBE_URLS", []string{"https://www.baidu.com/robots.txt", "https://www.google.com/generate_204"}),
+		MihomoControllerURL:         strings.TrimSpace(os.Getenv("MIHOMO_CONTROLLER_URL")),
+		MihomoControllerSecret:      strings.TrimSpace(os.Getenv("MIHOMO_CONTROLLER_SECRET")),
+		MihomoManagedGroups:         getCSV("MIHOMO_MANAGED_GROUPS", []string{"良心云"}),
+		MihomoConfigPath:            strings.TrimSpace(os.Getenv("MIHOMO_CONFIG_PATH")),
+		MihomoReloadPath:            strings.TrimSpace(os.Getenv("MIHOMO_RELOAD_PATH")),
+		MihomoExitInfoURL:           mihomoExitInfoURL,
+		MihomoControllerTimeout:     getDurationSeconds("MIHOMO_CONTROLLER_TIMEOUT_SECONDS", 5*time.Second),
+		MihomoDelayTestURL:          mihomoDelayTestURL,
+		MihomoDelayTestTimeout:      getDurationSeconds("MIHOMO_DELAY_TEST_TIMEOUT_SECONDS", 6*time.Second),
+		HybridRefreshAfter:          getDurationMinutes("HYBRID_REFRESH_AFTER_MINUTES", time.Hour),
+		TrustedProxies:              mustTrustedProxies(os.Getenv("TRUSTED_PROXIES")),
+		PprofEnabled:                getBool("PPROF_ENABLED", false),
 	}
 
 	// 应用GC配置
@@ -385,11 +503,11 @@ func getMinSizeToCompress() int {
 func getGCPercent() int {
 	percentEnv := os.Getenv("GC_PERCENT")
 	if percentEnv == "" {
-		return 50 // 默认50% - 优化内存管理，更频繁的GC避免内存暴涨
+		return 75
 	}
 	percent, err := strconv.Atoi(percentEnv)
 	if err != nil || percent <= 0 {
-		return 50 // 错误时也使用优化后的默认值
+		return 75
 	}
 	return percent
 }
@@ -605,9 +723,9 @@ func getHTTPMaxConns() int {
 	cpuCount := runtime.NumCPU()
 	maxConns := cpuCount * 200
 
-	// 确保至少有1000个连接
-	if maxConns < 1000 {
-		maxConns = 1000
+	// 4 核线上建议值为 800；更小机器也保留足够的长连接容量。
+	if maxConns < 800 {
+		maxConns = 800
 	}
 
 	return maxConns
@@ -624,6 +742,43 @@ func getAsyncLogEnabled() bool {
 		return true // 解析失败时默认启用
 	}
 	return enabled
+}
+
+func getBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func getString(name, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func getCSV(name string, fallback []string) []string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return append([]string(nil), fallback...)
+	}
+	result := make([]string, 0)
+	for _, part := range strings.Split(value, ",") {
+		if item := strings.TrimSpace(part); item != "" {
+			result = append(result, item)
+		}
+	}
+	if len(result) == 0 {
+		return append([]string(nil), fallback...)
+	}
+	return result
 }
 
 // 从环境变量获取认证开关，如果未设置则默认关闭

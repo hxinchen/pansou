@@ -483,8 +483,10 @@ func (s *Store) listResources(ctx context.Context, filter ResourceFilter, summar
 	page, pageSize := normalizePage(filter.Page, filter.PageSize, 50, 200)
 	where, args := buildResourceWhere(filter)
 	var total int64
-	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM resources r WHERE "+where, args...).Scan(&total); err != nil {
-		return ResourcePage{}, fmt.Errorf("count resources: %w", err)
+	if !filter.SkipTotal {
+		if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM resources r WHERE "+where, args...).Scan(&total); err != nil {
+			return ResourcePage{}, fmt.Errorf("count resources: %w", err)
+		}
 	}
 	sortBy, sortDir := filter.SortBy, filter.SortDir
 	if strings.TrimSpace(sortBy) == "" {
@@ -879,23 +881,59 @@ func (s *Store) CompleteResourceCheck(ctx context.Context, id int64, status stri
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("storage is disabled")
 	}
-	if !validCheckStatus(status) || status == CheckPending {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin complete resource check: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err := s.completeResourceCheckTx(ctx, tx, ResourceCheckCompletion{ResourceID: id, Status: status, CheckedAt: checkedAt}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit resource check: %w", err)
+	}
+	return nil
+}
+
+// CompleteResourceChecks persists a small result batch in one transaction.
+// Each row still uses the same locking and negative-confirmation semantics as
+// CompleteResourceCheck; a failure rolls back the entire batch.
+func (s *Store) CompleteResourceChecks(ctx context.Context, completions []ResourceCheckCompletion) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("storage is disabled")
+	}
+	if len(completions) == 0 {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin complete resource checks: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	for _, completion := range completions {
+		if err := s.completeResourceCheckTx(ctx, tx, completion); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit resource checks: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) completeResourceCheckTx(ctx context.Context, tx pgx.Tx, completion ResourceCheckCompletion) error {
+	id, status, checkedAt := completion.ResourceID, completion.Status, completion.CheckedAt
+	if id == 0 || !validCheckStatus(status) || status == CheckPending {
 		return fmt.Errorf("%w: completed check status %q", ErrInvalid, status)
 	}
 	if checkedAt.IsZero() {
 		checkedAt = s.now()
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin complete resource check: %w", err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-
 	var currentStatus string
 	var candidateStatus *string
 	var candidateCheckedAt *time.Time
-	err = tx.QueryRow(ctx, `SELECT check_status, candidate_check_status, candidate_checked_at
+	err := tx.QueryRow(ctx, `SELECT check_status, candidate_check_status, candidate_checked_at
 		FROM resources WHERE id=$1 FOR UPDATE`, id).Scan(&currentStatus, &candidateStatus, &candidateCheckedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
@@ -926,9 +964,6 @@ func (s *Store) CompleteResourceCheck(ctx context.Context, id int64, status stri
 	}
 	if err != nil {
 		return fmt.Errorf("complete resource check: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit resource check: %w", err)
 	}
 	return nil
 }

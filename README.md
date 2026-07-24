@@ -35,7 +35,14 @@ PanSou是一个高性能的网盘资源搜索API服务，支持TG搜索和自定
 | **USAGE_LOG_RETENTION_DAYS** | `30` | 网页/API 搜索调用明细保留天数 |
 | **COLLECTION_INTERVAL_SECONDS** | `60` | 自动采集调度检查间隔（秒） |
 | **COLLECTION_DEFAULT_COOLDOWN_HOURS** | `168` | 关键词默认冷却期（小时） |
-| **LINK_CHECK_WORKERS** | `4` | 新资源首检与周期复检的异步并发数 |
+| **LINK_CHECK_WORKERS** | `8` | 新资源首检与周期复检的全局异步并发数 |
+| **LINK_CHECK_TIMEOUT_SECONDS** | `15` | 单条链接检测的总超时（秒），会贯穿并取消底层 HTTP 请求 |
+| **LINK_CHECK_PER_PLATFORM** | `2` | 单网盘平台同时检测的最大数量 |
+| **LINK_CHECK_CIRCUIT_FAILURES** | `5` | 单平台连续上游失败后打开熔断器的阈值 |
+| **LINK_CHECK_CIRCUIT_COOLDOWN_SECONDS** | `300` | 单平台熔断冷却时间（秒） |
+| **LINK_CHECK_BACKLOG_INTERVAL_SECONDS** | `300` | due backlog 精确计数及 ETA 采样周期（秒） |
+| **LINK_CHECK_WRITE_BATCH_SIZE** | `16` | 链接检测结果单事务批量写回上限 |
+| **LINK_CHECK_WRITE_FLUSH_SECONDS** | `1` | 未达到批量上限时的最长写回等待时间（秒） |
 | **HYBRID_REFRESH_AFTER_MINUTES** | `60` | 数据库命中后触发后台实时刷新的陈旧阈值（分钟） |
 
 管理员可在管理台“资源库 → 检测策略”中启用周期复检，统一选择参与复检的链接状态并设置 1 小时至 365 天的周期。策略默认关闭并预填“有效 + 未知、7 天”；新发现资源的首次检测始终执行。周期策略保存于 PostgreSQL，最多 1 分钟热生效，无需重启服务。
@@ -192,7 +199,7 @@ curl -X POST http://localhost:8888/api/search \
 |----------|------|--------|
 | CONCURRENCY | 并发搜索数 | 自动计算 |
 | CACHE_TTL | 缓存有效期（分钟） | `60` |
-| CACHE_MAX_SIZE | 最大缓存大小(MB) | `100` |
+| CACHE_MAX_SIZE | 内存与磁盘缓存的总预算(MB) | `100` |
 | PLUGIN_TIMEOUT | 插件超时时间(秒) | `30` |
 | ASYNC_RESPONSE_TIMEOUT | 快速响应超时(秒) | `4` |
 | ASYNC_LOG_ENABLED | 异步插件详细日志 | `true` | 
@@ -201,7 +208,7 @@ curl -X POST http://localhost:8888/api/search \
 | CACHE_WRITE_STRATEGY | 缓存写入策略(immediate/hybrid) | `hybrid` |
 | ENABLE_COMPRESSION | 是否启用压缩 | `false` |
 | MIN_SIZE_TO_COMPRESS | 最小压缩阈值(字节) | `1024` |
-| GC_PERCENT | Go GC触发百分比 | `50` |
+| GC_PERCENT | Go GC触发百分比 | `75` |
 | ASYNC_MAX_BACKGROUND_WORKERS | 最大后台工作者数量 | CPU核心数×5 |
 | ASYNC_MAX_BACKGROUND_TASKS | 最大后台任务数量 | 工作者数×5 |
 | ASYNC_CACHE_TTL_HOURS | 异步缓存有效期(小时) | `1` |
@@ -209,10 +216,14 @@ curl -X POST http://localhost:8888/api/search \
 | HTTP_READ_TIMEOUT | HTTP读取超时(秒) | 自动计算 |
 | HTTP_WRITE_TIMEOUT | HTTP写入超时(秒) | 自动计算 |
 | SEARCH_RESPONSE_TIMEOUT_SECONDS | 搜索接口前台软响应预算(秒)，超时后返回处理中并继续后台搜索 | `25` |
+| SEARCH_TIERED_ROLLOUT_ENABLED | 是否启用交互搜索来源分层；关闭时保持旧版全来源覆盖，开启后按实时/采集层和插件批次执行 | `false` |
 | HTTP_IDLE_TIMEOUT | HTTP空闲超时(秒) | `120` |
 | HTTP_MAX_CONNS | HTTP最大连接数 | 自动计算 |
+| PPROF_ENABLED | 是否在管理员鉴权下启用 `/api/admin/debug/pprof/` | `false` |
 
 </details>
+
+管理员可通过 `GET /api/admin/runtime-diagnostics` 查看 Go 堆与 GC、缓存命中率和占用、数据库连接池，以及 `pg_stat_statements` 慢 SQL 汇总。慢 SQL 扩展未启用时，接口仍会返回其余诊断数据。
 
 3. 构建
 
@@ -567,6 +578,8 @@ curl "http://localhost:8888/api/search?kw=唐朝诡事录&filter=%7B%22include%2
 ```
 
 `completion` 为 `complete` 时表示所有请求来源均已完成。若部分频道或插件在响应期限内未完成，接口返回 HTTP `200`，`completion` 为 `partial`，并通过 `partial_sources` 列出未完成来源；已返回的结果仍可正常使用。部分结果不会作为完整缓存或资源库快照持久化。
+
+启用 `SEARCH_TIERED_ROLLOUT_ENABLED` 后，策略性延后的来源不会被视为失败：响应中的 `execution.requested`、`execution.executed`、`execution.cached` 和 `execution.deferred` 说明本次来源预算。用户端可点击“深度搜索”或在请求 `ext` 中传入 `{"deep":true}` 执行全部来源。
 
 **字段说明**：
 

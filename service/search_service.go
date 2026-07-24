@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"golang.org/x/sync/singleflight"
 
@@ -19,6 +20,7 @@ import (
 	"pansou/credential"
 	"pansou/model"
 	"pansou/plugin"
+	searchscheduler "pansou/service/scheduler"
 	"pansou/sourceconfig"
 	"pansou/storage"
 	"pansou/tgchannel"
@@ -40,6 +42,7 @@ func normalizeUrl(rawUrl string) string {
 
 // 全局缓存写入管理器引用（避免循环依赖）
 var globalCacheWriteManager *cache.DelayedBatchWriteManager
+var tgChannelRefreshes sync.Map
 
 // SetGlobalCacheWriteManager 设置全局缓存写入管理器
 func SetGlobalCacheWriteManager(manager *cache.DelayedBatchWriteManager) {
@@ -60,6 +63,13 @@ func GetEnhancedTwoLevelCache() *cache.EnhancedTwoLevelCache {
 var priorityKeywords = []string{"合集", "系列", "全", "完", "最新", "附", "complete"}
 
 const maxTGSearchWorkers = 20
+
+var (
+	messageLinkRegex     = regexp.MustCompile(`https?://[^\s"']+`)
+	titleSuffixRegex     = regexp.MustCompile(`([^链地资网\s]+?(?:\([^)]+\))?(?:\s*\d+K)?(?:\s*臻彩)?(?:\s*MAX)?(?:\s*HDR)?(?:\s*更(?:新)?\d+集))$`)
+	titleEmojiRegex      = regexp.MustCompile(`[\p{So}\p{Sk}]`)
+	searchTextNoiseRegex = regexp.MustCompile(`[\p{Z}\p{P}\p{S}_]+`)
+)
 
 // extractKeywordFromCacheKey 从缓存键中提取关键词（简化版）
 func extractKeywordFromCacheKey(cacheKey string) string {
@@ -212,6 +222,7 @@ type SearchService struct {
 	snapshots     *sourceconfig.Manager
 	credentials   credentialProvider
 	flights       *singleflight.Group
+	channelSearch func(context.Context, string, string) ([]model.SearchResult, error)
 }
 
 type credentialProvider interface {
@@ -230,10 +241,32 @@ type sourceSearchBatch struct {
 	Complete       bool
 	PartialSources []string
 	SourceStatuses map[string]model.SourceStatus
+	Execution      model.SearchExecution
 }
 
 func completeSourceSearchBatch() sourceSearchBatch {
 	return sourceSearchBatch{Complete: true}
+}
+
+func mergeSearchExecution(groups ...model.SearchExecution) *model.SearchExecution {
+	merged := model.SearchExecution{}
+	for _, group := range groups {
+		merged.Requested += group.Requested
+		merged.Executed += group.Executed
+		merged.Cached += group.Cached
+		merged.Deferred += group.Deferred
+		if group.Strategy != "" {
+			if merged.Strategy == "" {
+				merged.Strategy = group.Strategy
+			} else if merged.Strategy != group.Strategy {
+				merged.Strategy = "mixed"
+			}
+		}
+	}
+	if merged.Requested == 0 && merged.Executed == 0 && merged.Cached == 0 && merged.Deferred == 0 {
+		return nil
+	}
+	return &merged
 }
 
 func mergeSourceStatuses(groups ...map[string]model.SourceStatus) map[string]model.SourceStatus {
@@ -334,7 +367,13 @@ func resolveManagedSearchRequest(request ContextSearchRequest, snapshot *sourcec
 		request.requiresLiveTG = false
 	} else {
 		if request.Channels == nil {
-			request.Channels = append([]string{}, snapshot.Channels()...)
+			deep, _ := request.Ext["deep"].(bool)
+			tieredRollout := config.AppConfig != nil && config.AppConfig.SearchTieredRollout
+			if deep || !tieredRollout {
+				request.Channels = append([]string{}, snapshot.Channels()...)
+			} else {
+				request.Channels = append([]string{}, snapshot.RealtimeChannels()...)
+			}
 			request.requiresLiveTG = false
 		} else {
 			channels, err := tgchannel.NormalizeList(request.Channels)
@@ -436,6 +475,7 @@ func (s *SearchService) SearchContext(ctx context.Context, request ContextSearch
 		if err != nil {
 			return model.SearchResponse{}, err
 		}
+		configureSearchScheduler(snapshot)
 		static := NewSearchService(snapshot.PluginManager)
 		static.credentials = s.credentials
 		static.flights = s.flights
@@ -544,12 +584,15 @@ func (s *SearchService) searchContextUncoalesced(ctx context.Context, request Co
 	// 并行获取TG搜索和插件搜索结果
 	tgBatch := completeSourceSearchBatch()
 	pluginBatch := completeSourceSearchBatch()
-
+	ctx, lazyAdmission := contextWithLazySearchAdmission(ctx, request)
+	defer lazyAdmission.Release()
+	searchTGEnabled := (sourceType == "all" || sourceType == "tg") && !(channels != nil && len(channels) == 0)
+	searchPluginsEnabled := (sourceType == "all" || sourceType == "plugin") && config.AppConfig.AsyncPluginEnabled && !(plugins != nil && len(plugins) == 0)
 	var wg sync.WaitGroup
 	var tgErr, pluginErr error
 
 	// 如果需要搜索TG
-	if (sourceType == "all" || sourceType == "tg") && !(channels != nil && len(channels) == 0) {
+	if searchTGEnabled {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -557,7 +600,7 @@ func (s *SearchService) searchContextUncoalesced(ctx context.Context, request Co
 		}()
 	}
 	// 如果需要搜索插件（且插件功能已启用）
-	if (sourceType == "all" || sourceType == "plugin") && config.AppConfig.AsyncPluginEnabled && !(plugins != nil && len(plugins) == 0) {
+	if searchPluginsEnabled {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -581,8 +624,8 @@ func (s *SearchService) searchContextUncoalesced(ctx context.Context, request Co
 	// 合并结果
 	allResults := mergeSearchResults(tgBatch.Results, pluginBatch.Results)
 
-	// 按照优化后的规则排序结果
-	sortResultsByTimeAndKeywords(allResults)
+	// 统一过滤零相关结果，并按查询相关度优先排序。
+	allResults = rankSearchResults(allResults, keyword)
 
 	// 过滤结果，只保留有时间的结果或包含优先关键词的结果或高等级插件结果到Results中
 	filteredForResults := make([]model.SearchResult, 0, len(allResults))
@@ -619,6 +662,7 @@ func (s *SearchService) searchContextUncoalesced(ctx context.Context, request Co
 		Completion:     model.SearchCompletionComplete,
 		PartialSources: append(append([]string(nil), tgBatch.PartialSources...), pluginBatch.PartialSources...),
 		SourceStatuses: mergeSourceStatuses(tgBatch.SourceStatuses, pluginBatch.SourceStatuses),
+		Execution:      mergeSearchExecution(tgBatch.Execution, pluginBatch.Execution),
 	}
 	if !tgBatch.Complete || !pluginBatch.Complete {
 		response.Completion = model.SearchCompletionPartial
@@ -640,6 +684,7 @@ func filterResponseByType(response model.SearchResponse, resultType string) mode
 			Completion:     response.Completion,
 			PartialSources: response.PartialSources,
 			SourceStatuses: response.SourceStatuses,
+			Execution:      response.Execution,
 		}
 	case "all":
 		return response
@@ -651,6 +696,7 @@ func filterResponseByType(response model.SearchResponse, resultType string) mode
 			Completion:     response.Completion,
 			PartialSources: response.PartialSources,
 			SourceStatuses: response.SourceStatuses,
+			Execution:      response.Execution,
 		}
 	default:
 		// // 默认返回全部
@@ -662,12 +708,32 @@ func filterResponseByType(response model.SearchResponse, resultType string) mode
 			Completion:     response.Completion,
 			PartialSources: response.PartialSources,
 			SourceStatuses: response.SourceStatuses,
+			Execution:      response.Execution,
 		}
 	}
 }
 
 // 根据时间和关键词排序结果
 func sortResultsByTimeAndKeywords(results []model.SearchResult) {
+	rankSearchResultsInPlace(results, "")
+}
+
+func rankSearchResults(results []model.SearchResult, keyword string) []model.SearchResult {
+	if strings.TrimSpace(keyword) == "" {
+		rankSearchResultsInPlace(results, "")
+		return results
+	}
+	ranked := make([]model.SearchResult, 0, len(results))
+	for _, result := range results {
+		if scoreSearchResultRelevance(result, keyword) > 0 {
+			ranked = append(ranked, result)
+		}
+	}
+	rankSearchResultsInPlace(ranked, keyword)
+	return ranked
+}
+
+func rankSearchResultsInPlace(results []model.SearchResult, keyword string) {
 	// 1. 计算每个结果的综合得分
 	scores := make([]ResultScore, len(results))
 
@@ -675,11 +741,12 @@ func sortResultsByTimeAndKeywords(results []model.SearchResult) {
 		source := getResultSource(result)
 
 		scores[i] = ResultScore{
-			Result:       result,
-			TimeScore:    calculateTimeScore(result.Datetime),
-			KeywordScore: getKeywordPriority(result.Title),
-			PluginScore:  getPluginLevelScore(source),
-			TotalScore:   0, // 稍后计算
+			Result:        result,
+			TimeScore:     calculateTimeScore(result.Datetime),
+			KeywordScore:  scoreSearchResultRelevance(result, keyword)*10 + getKeywordPriority(result.Title),
+			PluginScore:   getPluginLevelScore(source),
+			OriginalIndex: i,
+			TotalScore:    0, // 稍后计算
 		}
 
 		// 计算综合得分
@@ -689,14 +756,95 @@ func sortResultsByTimeAndKeywords(results []model.SearchResult) {
 	}
 
 	// 2. 按综合得分排序
-	sort.Slice(scores, func(i, j int) bool {
-		return scores[i].TotalScore > scores[j].TotalScore
+	sort.SliceStable(scores, func(i, j int) bool {
+		if scores[i].TotalScore != scores[j].TotalScore {
+			return scores[i].TotalScore > scores[j].TotalScore
+		}
+		return scores[i].OriginalIndex < scores[j].OriginalIndex
 	})
 
 	// 3. 更新原数组
 	for i, score := range scores {
 		results[i] = score.Result
 	}
+}
+
+func normalizeSearchText(value string) string {
+	return searchTextNoiseRegex.ReplaceAllString(strings.ToLower(strings.TrimSpace(value)), "")
+}
+
+func searchKeywordTerms(keyword string) []string {
+	raw := strings.FieldsFunc(strings.ToLower(strings.TrimSpace(keyword)), func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)
+	})
+	terms := make([]string, 0, len(raw)+1)
+	seen := make(map[string]struct{}, len(raw)+1)
+	for _, term := range append([]string{keyword}, raw...) {
+		normalized := normalizeSearchText(term)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		terms = append(terms, normalized)
+	}
+	return terms
+}
+
+func scoreTextRelevance(text, keyword string, title bool) int {
+	normalizedText := normalizeSearchText(text)
+	terms := searchKeywordTerms(keyword)
+	if normalizedText == "" || len(terms) == 0 {
+		return 0
+	}
+	query := terms[0]
+	base := 70
+	if title {
+		base = 700
+	}
+	if normalizedText == query {
+		return base + 900
+	}
+	if strings.HasPrefix(normalizedText, query) {
+		return base + 650 - min(len([]rune(normalizedText))/4, 120)
+	}
+	if index := strings.Index(normalizedText, query); index >= 0 {
+		return base + 450 - min(index, 160) - min(len([]rune(normalizedText))/8, 100)
+	}
+	matched := 0
+	for _, term := range terms[1:] {
+		if strings.Contains(normalizedText, term) {
+			matched++
+		}
+	}
+	if len(terms) > 1 && matched == len(terms)-1 {
+		return base + 180 + matched*30
+	}
+	return 0
+}
+
+func scoreSearchResultRelevance(result model.SearchResult, keyword string) int {
+	if strings.TrimSpace(keyword) == "" {
+		return 0
+	}
+	score := scoreTextRelevance(result.Title, keyword, true)
+	for _, link := range result.Links {
+		if linkScore := scoreTextRelevance(link.WorkTitle, keyword, true); linkScore > score {
+			score = linkScore
+		}
+	}
+	contentScore := scoreTextRelevance(result.Content, keyword, false)
+	if contentScore > score {
+		score = contentScore
+	}
+	for _, tag := range result.Tags {
+		if tagScore := scoreTextRelevance(tag, keyword, false); tagScore > score {
+			score = tagScore
+		}
+	}
+	return score
 }
 
 // 获取标题中包含优先关键词的优先级
@@ -713,6 +861,13 @@ func getKeywordPriority(title string) int {
 
 // 搜索单个频道
 func (s *SearchService) searchChannel(keyword string, channel string) ([]model.SearchResult, error) {
+	return s.searchChannelContext(context.Background(), keyword, channel)
+}
+
+func (s *SearchService) searchChannelContext(parent context.Context, keyword string, channel string) ([]model.SearchResult, error) {
+	if s.channelSearch != nil {
+		return s.channelSearch(parent, keyword, channel)
+	}
 	// 构建搜索URL
 	url := util.BuildSearchURL(channel, keyword, "")
 
@@ -720,7 +875,7 @@ func (s *SearchService) searchChannel(keyword string, channel string) ([]model.S
 	client := util.GetHTTPClient()
 
 	// 创建一个带超时的上下文
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 4*time.Second)
 	defer cancel()
 
 	// 创建请求
@@ -771,8 +926,6 @@ func extractLinkTitlePairsWithNewlines(content string) map[string]string {
 	lines := strings.Split(content, "\n")
 
 	// 链接正则表达式
-	linkRegex := regexp.MustCompile(`https?://[^\s"']+`)
-
 	// 第一遍扫描：识别标题-链接对
 	var lastTitle string
 	var lastTitleIndex int
@@ -784,7 +937,7 @@ func extractLinkTitlePairsWithNewlines(content string) map[string]string {
 		}
 
 		// 检查当前行是否包含链接
-		links := linkRegex.FindAllString(line, -1)
+		links := messageLinkRegex.FindAllString(line, -1)
 
 		if len(links) > 0 {
 			// 当前行包含链接
@@ -817,7 +970,7 @@ func extractLinkTitlePairsWithNewlines(content string) map[string]string {
 			// 检查下一行是否为链接行
 			if i+1 < len(lines) {
 				nextLine := strings.TrimSpace(lines[i+1])
-				if isLinkLine(nextLine) || linkRegex.MatchString(nextLine) {
+				if isLinkLine(nextLine) || messageLinkRegex.MatchString(nextLine) {
 					// 下一行是链接行或包含链接，当前行很可能是标题
 					lastTitle = cleanTitle(line)
 					lastTitleIndex = i
@@ -838,7 +991,7 @@ func extractLinkTitlePairsWithNewlines(content string) map[string]string {
 			continue
 		}
 
-		links := linkRegex.FindAllString(line, -1)
+		links := messageLinkRegex.FindAllString(line, -1)
 		if len(links) == 0 {
 			continue
 		}
@@ -851,8 +1004,8 @@ func extractLinkTitlePairsWithNewlines(content string) map[string]string {
 				// 向上查找最近的标题行
 				for j := i - 1; j >= 0; j-- {
 					if j == lastTitleIndex || (j+1 < len(lines) &&
-						linkRegex.MatchString(lines[j+1]) &&
-						!linkRegex.MatchString(lines[j])) {
+						messageLinkRegex.MatchString(lines[j+1]) &&
+						!messageLinkRegex.MatchString(lines[j])) {
 						candidateTitle := cleanTitle(lines[j])
 						if candidateTitle != "" {
 							nearestTitle = candidateTitle
@@ -992,8 +1145,7 @@ func extractTitleBeforeLink(text string) string {
 	}
 
 	// 尝试匹配常见的标题模式
-	titlePattern := regexp.MustCompile(`([^链地资网\s]+?(?:\([^)]+\))?(?:\s*\d+K)?(?:\s*臻彩)?(?:\s*MAX)?(?:\s*HDR)?(?:\s*更(?:新)?\d+集))$`)
-	matches := titlePattern.FindStringSubmatch(text)
+	matches := titleSuffixRegex.FindStringSubmatch(text)
 	if len(matches) > 1 {
 		return cleanTitle(matches[1])
 	}
@@ -1101,8 +1253,7 @@ func cleanTitle(title string) string {
 	title = strings.TrimPrefix(title, "片名:")
 
 	// 移除表情符号和特殊字符
-	emojiRegex := regexp.MustCompile(`[\p{So}\p{Sk}]`)
-	title = emojiRegex.ReplaceAllString(title, "")
+	title = titleEmojiRegex.ReplaceAllString(title, "")
 
 	return strings.TrimSpace(title)
 }
@@ -1119,9 +1270,6 @@ func mergeResultsByType(results []model.SearchResult, keyword string, cloudTypes
 
 	// 用于去重的映射，键为URL
 	uniqueLinks := make(map[string]model.MergedLink)
-
-	// 将关键词转为小写，用于不区分大小写的匹配
-	lowerKeyword := strings.ToLower(keyword)
 
 	// 遍历所有搜索结果
 	for _, result := range results {
@@ -1205,25 +1353,10 @@ func mergeResultsByType(results []model.SearchResult, keyword string, cloudTypes
 				}
 			}
 
-			// 检查插件是否需要跳过Service层过滤
-			var skipKeywordFilter bool = false
-			if result.UniqueID != "" && strings.Contains(result.UniqueID, "-") {
-				parts := strings.SplitN(result.UniqueID, "-", 2)
-				if len(parts) >= 1 {
-					pluginName := parts[0]
-					// 通过插件注册表动态获取过滤设置
-					if pluginInstance, exists := plugin.GetPluginByName(pluginName); exists {
-						skipKeywordFilter = pluginInstance.SkipServiceFilter()
-					}
-				}
-			}
-
-			// 关键词过滤：现在我们有了准确的链接-标题对应关系，只需检查每个链接的具体标题
-			if !skipKeywordFilter && keyword != "" {
-				// 只检查链接的具体标题，无论是TG来源还是插件来源
-				if !strings.Contains(strings.ToLower(title), lowerKeyword) {
-					continue
-				}
+			// 每个链接必须与查询相关。插件上游的过滤只作为候选来源，
+			// 不再允许一条命中关键词的大目录放行其余无关链接。
+			if keyword != "" && scoreTextRelevance(title, keyword, true) == 0 {
+				continue
 			}
 
 			// 确定数据来源
@@ -1231,12 +1364,8 @@ func mergeResultsByType(results []model.SearchResult, keyword string, cloudTypes
 			if result.Channel != "" {
 				// 来自TG频道
 				source = "tg:" + result.Channel
-			} else if result.UniqueID != "" && strings.Contains(result.UniqueID, "-") {
-				// 来自插件：UniqueID格式通常为 "插件名-ID"
-				parts := strings.SplitN(result.UniqueID, "-", 2)
-				if len(parts) >= 1 {
-					source = "plugin:" + parts[0]
-				}
+			} else if pluginName := pluginNameFromUniqueID(result.UniqueID); pluginName != "" {
+				source = "plugin:" + pluginName
 			} else {
 				// 无法确定来源，使用默认值
 				source = "unknown"
@@ -1278,22 +1407,17 @@ func mergeResultsByType(results []model.SearchResult, keyword string, cloudTypes
 	// 创建一个有序的链接列表，按原始results中的顺序
 	orderedLinks := make([]model.MergedLink, 0, len(uniqueLinks))
 	linkTypeMap := make(map[string]string) // URL -> Type的映射
+	orderedSeen := make(map[string]struct{}, len(uniqueLinks))
 
 	// 按原始results的顺序收集唯一链接
 	for _, result := range results {
 		for _, link := range result.Links {
 			if mergedLink, exists := uniqueLinks[link.URL]; exists {
 				// 检查是否已经添加过这个链接
-				found := false
-				for _, existing := range orderedLinks {
-					if existing.URL == link.URL {
-						found = true
-						break
-					}
-				}
-				if !found {
+				if _, found := orderedSeen[link.URL]; !found {
 					orderedLinks = append(orderedLinks, mergedLink)
 					linkTypeMap[link.URL] = link.Type
+					orderedSeen[link.URL] = struct{}{}
 				}
 			}
 		}
@@ -1357,7 +1481,12 @@ func (s *SearchService) searchTGWithStatus(ctx context.Context, keyword string, 
 		cached, hit, err := loadCachedSearch(enhancedTwoLevelCache, cacheKey)
 		if err == nil && hit && cached.Complete {
 			MarkSearchCacheStatus(ctx, SearchCacheHit)
-			return sourceSearchBatch{Results: cached.Results, Complete: true}, nil
+			execution := model.SearchExecution{Requested: len(channels), Cached: len(channels), Strategy: "channel-cache"}
+			if cached.Execution != nil {
+				execution = *cached.Execution
+				execution.Cached, execution.Executed = execution.Executed+execution.Cached, 0
+			}
+			return sourceSearchBatch{Results: cached.Results, Complete: true, Execution: execution}, nil
 		}
 		if err != nil {
 			MarkSearchCacheStatus(ctx, SearchCacheBypass)
@@ -1371,36 +1500,63 @@ func (s *SearchService) searchTGWithStatus(ctx context.Context, keyword string, 
 		MarkSearchCacheStatus(ctx, SearchCacheBypass)
 	}
 
-	// 缓存未命中或强制刷新，执行实际搜索
+	// 先按频道读取缓存，仅对 miss 的频道产生实时出站请求。
 	var results []model.SearchResult
-
-	// 使用工作池并行搜索多个频道
-	tasks := make([]pool.Task, 0, len(channels))
-
+	tasks := make([]searchscheduler.Task, 0, len(channels))
+	finished := make(map[string]struct{}, len(channels))
+	staleChannels := 0
 	for _, channel := range channels {
-		ch := channel // 创建副本，避免闭包问题
-		tasks = append(tasks, func() interface{} {
-			results, err := s.searchChannel(keyword, ch)
-			return tgChannelSearchResult{Channel: ch, Results: results, Err: err}
+		ch := channel
+		channelKey := cache.GenerateTGChannelCacheKey(keyword, ch)
+		if !forceRefresh && cacheInitialized && config.AppConfig.CacheEnabled && enhancedTwoLevelCache != nil {
+			cached, hit, cacheErr := loadCachedSearch(enhancedTwoLevelCache, channelKey)
+			if cacheErr == nil && hit && cached.Complete {
+				results = append(results, cached.Results...)
+				finished[ch] = struct{}{}
+				if !cached.fresh(time.Now()) {
+					staleChannels++
+					s.scheduleTGChannelRefresh(keyword, ch, channelKey)
+				}
+				continue
+			}
+		}
+		tasks = append(tasks, searchscheduler.Task{
+			Source: "tg:" + ch,
+			Run: func(taskCtx context.Context) searchscheduler.Result {
+				channelResults, searchErr := s.searchChannelContext(taskCtx, keyword, ch)
+				outcome := tgChannelSearchResult{Channel: ch, Results: channelResults, Err: searchErr}
+				if searchErr == nil && cacheInitialized && config.AppConfig.CacheEnabled && enhancedTwoLevelCache != nil {
+					ttl := time.Duration(config.AppConfig.CacheTTLMinutes) * time.Minute
+					_ = storeFreshCachedSearch(enhancedTwoLevelCache, channelKey, channelResults, ttl, tgChannelStaleGrace, nil)
+				}
+				count, unique := searchResultMetrics(channelResults)
+				return searchscheduler.Result{Value: outcome, Err: searchErr, ResultCount: count, UniqueCount: unique}
+			},
 		})
 	}
 
-	// 执行搜索任务并获取结果
-	workers := tgSearchWorkerCount(len(channels))
-	taskResults := executeTGTasksWithTimeout(tasks, workers, config.AppConfig.PluginTimeout)
+	workers := tgSearchWorkerCount(len(tasks))
+	if config.AppConfig != nil && config.AppConfig.SearchPerRequestTG > 0 && workers > config.AppConfig.SearchPerRequestTG {
+		workers = config.AppConfig.SearchPerRequestTG
+	}
+	if len(tasks) > 0 {
+		if err := ensureLiveSearchAdmission(ctx); err != nil {
+			return sourceSearchBatch{}, err
+		}
+	}
+	taskResults := GlobalSearchScheduler().Execute(ctx, searchscheduler.ClassTG, workers, config.AppConfig.PluginTimeout, tasks)
 
 	complete := len(taskResults) == len(tasks)
-	finished := make(map[string]struct{}, len(taskResults))
 	partialSources := make([]string, 0)
 	// 合并所有频道的结果
 	for _, result := range taskResults {
-		outcome, ok := result.(tgChannelSearchResult)
+		outcome, ok := result.Value.(tgChannelSearchResult)
 		if !ok {
 			complete = false
 			continue
 		}
 		finished[outcome.Channel] = struct{}{}
-		if outcome.Err != nil {
+		if outcome.Err != nil || result.Err != nil {
 			complete = false
 			partialSources = append(partialSources, "tg:"+outcome.Channel)
 			continue
@@ -1416,22 +1572,68 @@ func (s *SearchService) searchTGWithStatus(ctx context.Context, keyword string, 
 
 	// Cache updates are monotonic and carry completeness metadata. A timed-out
 	// subset can seed a later request but can never be served as complete.
+	strategy := "channel-cache"
+	if staleChannels > 0 {
+		strategy = "channel-cache-swr"
+	}
+	execution := model.SearchExecution{Requested: len(channels), Executed: len(taskResults), Cached: len(channels) - len(tasks), Strategy: strategy}
 	if cacheInitialized && config.AppConfig.CacheEnabled {
 		go func(res []model.SearchResult, isComplete bool) {
-			ttl := time.Duration(config.AppConfig.CacheTTLMinutes) * time.Minute
-			_, _ = mergeAndStoreCachedSearch(enhancedTwoLevelCache, cacheKey, res, ttl, isComplete)
+			ttl := aggregateSearchCacheTTL(res, isComplete, time.Duration(config.AppConfig.CacheTTLMinutes)*time.Minute)
+			_, _ = mergeAndStoreCachedSearchWithExecution(enhancedTwoLevelCache, cacheKey, res, ttl, isComplete, &execution)
 		}(results, complete)
 	}
 
-	return sourceSearchBatch{Results: results, Complete: complete, PartialSources: partialSources}, nil
+	return sourceSearchBatch{Results: results, Complete: complete, PartialSources: partialSources, Execution: execution}, nil
+}
+
+func (s *SearchService) scheduleTGChannelRefresh(keyword, channel, cacheKey string) {
+	refreshKey := keyword + "\x00" + channel
+	if _, loaded := tgChannelRefreshes.LoadOrStore(refreshKey, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer tgChannelRefreshes.Delete(refreshKey)
+		timeout := 30 * time.Second
+		freshTTL := time.Hour
+		if config.AppConfig != nil {
+			if config.AppConfig.PluginTimeout > 0 {
+				timeout = config.AppConfig.PluginTimeout
+			}
+			if config.AppConfig.CacheTTLMinutes > 0 {
+				freshTTL = time.Duration(config.AppConfig.CacheTTLMinutes) * time.Minute
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		scheduler := GlobalSearchScheduler()
+		admission, err := scheduler.Acquire(ctx, searchscheduler.PriorityBackground)
+		if err != nil {
+			return
+		}
+		defer admission.Release()
+		task := searchscheduler.Task{Source: "tg:" + channel, Run: func(taskCtx context.Context) searchscheduler.Result {
+			channelResults, searchErr := s.searchChannelContext(taskCtx, keyword, channel)
+			if searchErr == nil && cacheInitialized && config.AppConfig != nil && config.AppConfig.CacheEnabled && enhancedTwoLevelCache != nil {
+				_ = storeFreshCachedSearch(enhancedTwoLevelCache, cacheKey, channelResults, freshTTL, tgChannelStaleGrace, nil)
+			}
+			count, unique := searchResultMetrics(channelResults)
+			return searchscheduler.Result{Err: searchErr, ResultCount: count, UniqueCount: unique}
+		}}
+		_ = scheduler.Execute(ctx, searchscheduler.ClassTG, 1, timeout, []searchscheduler.Task{task})
+	}()
 }
 
 func tgSearchWorkerCount(channelCount int) int {
 	if channelCount <= 0 {
 		return 0
 	}
-	if channelCount > maxTGSearchWorkers {
-		return maxTGSearchWorkers
+	limit := 20
+	if config.AppConfig != nil && config.AppConfig.TGSearchWorkers > 0 {
+		limit = config.AppConfig.TGSearchWorkers
+	}
+	if channelCount > limit {
+		return limit
 	}
 	return channelCount
 }
@@ -1552,6 +1754,8 @@ func statusFromSearchError(err error) *model.SourceStatus {
 
 func (s *SearchService) searchPluginsWithStatus(ctx context.Context, keyword string, plugins []string, forceRefresh bool, concurrency int, ext map[string]interface{}) (sourceSearchBatch, error) {
 	baseExt := cloneSearchExt(ext)
+	deepSearch, _ := baseExt["deep"].(bool)
+	tieredRollout := config.AppConfig != nil && config.AppConfig.SearchTieredRollout
 	if forceRefresh {
 		baseExt["refresh"] = true
 	}
@@ -1561,12 +1765,18 @@ func (s *SearchService) searchPluginsWithStatus(ctx context.Context, keyword str
 	seed := cachedSearchResults{}
 
 	// 如果未启用强制刷新，尝试从缓存获取结果
-	if !forceRefresh && cacheInitialized && config.AppConfig.CacheEnabled && enhancedTwoLevelCache != nil {
+	if !forceRefresh && !deepSearch && cacheInitialized && config.AppConfig.CacheEnabled && enhancedTwoLevelCache != nil {
 		cached, hit, err := loadCachedSearch(enhancedTwoLevelCache, cacheKey)
-		if err == nil && hit && cached.Complete {
+		cacheCoversRequest := cached.Execution == nil || tieredRollout || cached.Execution.Deferred == 0
+		if err == nil && hit && cached.Complete && cacheCoversRequest {
 			MarkSearchCacheStatus(ctx, SearchCacheHit)
 			fmt.Printf("✅ [%s] 命中完整缓存 结果数: %d\n", keyword, len(cached.Results))
-			return sourceSearchBatch{Results: cached.Results, Complete: true}, nil
+			execution := model.SearchExecution{Cached: 1, Strategy: "tiered"}
+			if cached.Execution != nil {
+				execution = *cached.Execution
+				execution.Cached, execution.Executed = execution.Executed+execution.Cached, 0
+			}
+			return sourceSearchBatch{Results: cached.Results, Complete: true, Execution: execution}, nil
 		}
 		if err != nil {
 			MarkSearchCacheStatus(ctx, SearchCacheBypass)
@@ -1626,42 +1836,68 @@ func (s *SearchService) searchPluginsWithStatus(ctx context.Context, keyword str
 		concurrency = config.AppConfig.DefaultConcurrency
 	}
 
-	// 使用工作池执行并行搜索
-	tasks := make([]pool.Task, 0, len(availablePlugins))
+	// 提交到进程级插件池，所有请求共享预算并受每来源 bulkhead 保护。
+	tasks := make([]searchscheduler.Task, 0, len(availablePlugins))
 	for _, p := range availablePlugins {
 		instance := p // 创建副本，避免闭包问题
-		tasks = append(tasks, func() interface{} {
+		tasks = append(tasks, searchscheduler.Task{Source: "plugin:" + instance.Name(), Run: func(context.Context) searchscheduler.Result {
 			pluginExt := cloneSearchExt(baseExt)
-			// 设置主缓存键和当前关键词
 			instance.SetMainCacheKey(cacheKey)
 			instance.SetCurrentKeyword(keyword)
-
 			if detailed, ok := instance.(pluginSearchWithResult); ok {
 				result, err := detailed.SearchWithResult(keyword, pluginExt)
-				return pluginTaskResult{Source: instance.Name(), Results: result.Results, Complete: result.IsFinal, Err: err, Status: statusFromSearchError(err)}
+				outcome := pluginTaskResult{Source: instance.Name(), Results: result.Results, Complete: result.IsFinal, Err: err, Status: statusFromSearchError(err)}
+				return scheduledPluginResult(outcome)
 			}
-			results, err := instance.Search(keyword, pluginExt)
-			return pluginTaskResult{Source: instance.Name(), Results: results, Complete: err == nil, Err: err, Status: statusFromSearchError(err)}
-		})
+			pluginResults, err := instance.Search(keyword, pluginExt)
+			outcome := pluginTaskResult{Source: instance.Name(), Results: pluginResults, Complete: err == nil, Err: err, Status: statusFromSearchError(err)}
+			return scheduledPluginResult(outcome)
+		}})
 	}
 
-	// 执行搜索任务并获取结果
-	results := pool.ExecuteBatchWithTimeout(tasks, concurrency, config.AppConfig.PluginTimeout)
+	if config.AppConfig != nil && config.AppConfig.SearchPerRequestPlugin > 0 && concurrency > config.AppConfig.SearchPerRequestPlugin {
+		concurrency = config.AppConfig.SearchPerRequestPlugin
+	}
+	if len(tasks) > 0 {
+		if err := ensureLiveSearchAdmission(ctx); err != nil {
+			return sourceSearchBatch{}, err
+		}
+	}
+	executedCount := len(tasks)
+	results := make([]searchscheduler.Result, 0, len(tasks))
+	if tieredRollout && !deepSearch && len(tasks) > 15 {
+		executedCount = 15
+	}
+	results = append(results, GlobalSearchScheduler().Execute(ctx, searchscheduler.ClassPlugin, concurrency, config.AppConfig.PluginTimeout, tasks[:executedCount])...)
+	resultLinks := countPluginTaskLinks(results)
+	if tieredRollout && !deepSearch && resultLinks < 30 && executedCount < len(tasks) {
+		next := executedCount + 30
+		if next > len(tasks) {
+			next = len(tasks)
+		}
+		results = append(results, GlobalSearchScheduler().Execute(ctx, searchscheduler.ClassPlugin, concurrency, config.AppConfig.PluginTimeout, tasks[executedCount:next])...)
+		executedCount = next
+		resultLinks = countPluginTaskLinks(results)
+	}
+	if (deepSearch || (tieredRollout && resultLinks == 0)) && executedCount < len(tasks) {
+		results = append(results, GlobalSearchScheduler().Execute(ctx, searchscheduler.ClassPlugin, concurrency, config.AppConfig.PluginTimeout, tasks[executedCount:])...)
+		executedCount = len(tasks)
+	}
 
 	// 合并所有插件的结果，过滤掉无链接的结果
 	allResults := append([]model.SearchResult(nil), seed.Results...)
-	complete := len(results) == len(tasks)
+	complete := len(results) == executedCount
 	finished := make(map[string]struct{}, len(results))
 	partialSources := make([]string, 0)
 	sourceStatuses := make(map[string]model.SourceStatus)
 	for _, value := range results {
-		outcome, ok := value.(pluginTaskResult)
+		outcome, ok := value.Value.(pluginTaskResult)
 		if !ok {
 			complete = false
 			continue
 		}
 		finished[outcome.Source] = struct{}{}
-		if outcome.Err != nil || !outcome.Complete {
+		if outcome.Err != nil || value.Err != nil || !outcome.Complete {
 			complete = false
 			partialSources = append(partialSources, "plugin:"+outcome.Source)
 		}
@@ -1674,18 +1910,25 @@ func (s *SearchService) searchPluginsWithStatus(ctx context.Context, keyword str
 			}
 		}
 	}
-	for _, instance := range availablePlugins {
+	for _, instance := range availablePlugins[:executedCount] {
 		if _, ok := finished[instance.Name()]; !ok {
 			partialSources = append(partialSources, "plugin:"+instance.Name())
 		}
 	}
 	allResults = mergeSearchResults(nil, allResults)
+	strategy := "all-sources"
+	if tieredRollout && !deepSearch {
+		strategy = "tiered"
+	} else if deepSearch {
+		strategy = "deep"
+	}
+	execution := model.SearchExecution{Requested: len(tasks), Executed: executedCount, Deferred: len(tasks) - executedCount, Strategy: strategy}
 
 	// 恢复主程序缓存更新：确保最终合并结果被正确缓存
 	if cacheInitialized && config.AppConfig.CacheEnabled {
-		go func(res []model.SearchResult, kw string, key string, isComplete bool) {
-			ttl := time.Duration(config.AppConfig.CacheTTLMinutes) * time.Minute
-			merged, err := mergeAndStoreCachedSearch(enhancedTwoLevelCache, key, res, ttl, isComplete)
+		go func(res []model.SearchResult, kw string, key string, isComplete bool, plan model.SearchExecution) {
+			ttl := aggregateSearchCacheTTL(res, isComplete, time.Duration(config.AppConfig.CacheTTLMinutes)*time.Minute)
+			merged, err := mergeAndStoreCachedSearchWithExecution(enhancedTwoLevelCache, key, res, ttl, isComplete, &plan)
 			if err != nil {
 				fmt.Printf("[主程序] 缓存更新失败: %s | 错误: %v\n", key, err)
 				return
@@ -1693,13 +1936,50 @@ func (s *SearchService) searchPluginsWithStatus(ctx context.Context, keyword str
 			if config.AppConfig != nil && config.AppConfig.AsyncLogEnabled {
 				fmt.Printf("[主程序] 缓存更新完成: %s | 结果数: %d | 完整: %t\n", key, len(merged.Results), merged.Complete)
 			}
-		}(allResults, keyword, cacheKey, complete)
+		}(allResults, keyword, cacheKey, complete, execution)
 	}
 
 	if len(sourceStatuses) == 0 {
 		sourceStatuses = nil
 	}
-	return sourceSearchBatch{Results: allResults, Complete: complete, PartialSources: partialSources, SourceStatuses: sourceStatuses}, nil
+	return sourceSearchBatch{Results: allResults, Complete: complete, PartialSources: partialSources, SourceStatuses: sourceStatuses, Execution: execution}, nil
+}
+
+func countPluginTaskLinks(results []searchscheduler.Result) int {
+	count := 0
+	for _, result := range results {
+		outcome, ok := result.Value.(pluginTaskResult)
+		if !ok {
+			continue
+		}
+		for _, item := range outcome.Results {
+			count += len(item.Links)
+		}
+	}
+	return count
+}
+
+func scheduledPluginResult(outcome pluginTaskResult) searchscheduler.Result {
+	count, unique := searchResultMetrics(outcome.Results)
+	return searchscheduler.Result{Value: outcome, Err: outcome.Err, ResultCount: count, UniqueCount: unique}
+}
+
+func searchResultMetrics(results []model.SearchResult) (int, int) {
+	count := 0
+	seen := make(map[string]struct{})
+	for _, result := range results {
+		for _, link := range result.Links {
+			count++
+			key := strings.TrimSpace(link.URL)
+			if key == "" {
+				key = result.UniqueID
+			}
+			if key != "" {
+				seen[key] = struct{}{}
+			}
+		}
+	}
+	return count, len(seen)
 }
 
 // searchPluginsForIdentity keeps the legacy plugin cache for stateless
@@ -1733,16 +2013,22 @@ func (s *SearchService) searchPluginsForIdentityWithStatus(ctx context.Context, 
 		legacyNames = append(legacyNames, instance.Name())
 	}
 
-	legacyBatch := completeSourceSearchBatch()
-	if len(legacyNames) > 0 {
-		var err error
-		legacyBatch, err = s.searchPluginsWithStatus(ctx, keyword, legacyNames, forceRefresh, concurrency, ext)
-		if err != nil {
-			return sourceSearchBatch{}, err
-		}
+	type legacySearchResult struct {
+		batch sourceSearchBatch
+		err   error
 	}
+	legacyResult := make(chan legacySearchResult, 1)
+	go func() {
+		if len(legacyNames) == 0 {
+			legacyResult <- legacySearchResult{batch: completeSourceSearchBatch()}
+			return
+		}
+		batch, searchErr := s.searchPluginsWithStatus(ctx, keyword, legacyNames, forceRefresh, concurrency, ext)
+		legacyResult <- legacySearchResult{batch: batch, err: searchErr}
+	}()
 	if len(managed) == 0 {
-		return legacyBatch, nil
+		result := <-legacyResult
+		return result.batch, result.err
 	}
 	if !forceRefresh {
 		MarkSearchCacheStatus(ctx, SearchCacheBypass)
@@ -1784,48 +2070,68 @@ func (s *SearchService) searchPluginsForIdentityWithStatus(ctx context.Context, 
 		}
 	}
 
-	tasks := make([]pool.Task, 0, len(managed))
+	tasks := make([]searchscheduler.Task, 0, len(managed))
 	for _, item := range managed {
 		item := item
-		tasks = append(tasks, func() interface{} {
-			layers, err := s.credentials.Resolve(ctx, credentialIdentity, item.plugin.Name(), 20)
+		tasks = append(tasks, searchscheduler.Task{Source: "plugin:" + item.plugin.Name(), Run: func(taskCtx context.Context) searchscheduler.Result {
+			layers, err := s.credentials.Resolve(taskCtx, credentialIdentity, item.plugin.Name(), 20)
 			if err != nil {
-				return pluginTaskResult{Source: item.plugin.Name(), Complete: false, Err: err}
+				outcome := pluginTaskResult{Source: item.plugin.Name(), Complete: false, Err: err}
+				return scheduledPluginResult(outcome)
+			}
+			if len(layers.Private) == 0 && len(layers.Shared) == 0 {
+				return searchscheduler.Result{Value: pluginTaskResult{Source: item.plugin.Name(), Results: []model.SearchResult{}, Complete: true}}
 			}
 			pluginExt := cloneSearchExt(baseExt)
-			results, succeeded, searchErr := item.searcher.SearchCredentialLayer(ctx, keyword, pluginExt, layers.Private, access)
+			results, succeeded, searchErr := item.searcher.SearchCredentialLayer(taskCtx, keyword, pluginExt, layers.Private, access)
 			if succeeded {
-				return pluginTaskResult{Source: item.plugin.Name(), Results: results, Complete: searchErr == nil, Err: searchErr, Status: statusFromSearchError(searchErr)}
+				outcome := pluginTaskResult{Source: item.plugin.Name(), Results: results, Complete: searchErr == nil, Err: searchErr, Status: statusFromSearchError(searchErr)}
+				return scheduledPluginResult(outcome)
 			}
 			privateEmpty := errors.Is(searchErr, credential.ErrNoResults)
-			results, succeeded, searchErr = item.searcher.SearchCredentialLayer(ctx, keyword, pluginExt, layers.Shared, access)
+			results, succeeded, searchErr = item.searcher.SearchCredentialLayer(taskCtx, keyword, pluginExt, layers.Shared, access)
 			if !succeeded {
 				if privateEmpty || errors.Is(searchErr, credential.ErrNoResults) {
-					return pluginTaskResult{Source: item.plugin.Name(), Results: []model.SearchResult{}, Complete: true}
+					return searchscheduler.Result{Value: pluginTaskResult{Source: item.plugin.Name(), Results: []model.SearchResult{}, Complete: true}}
 				}
 				if searchErr == nil {
 					searchErr = fmt.Errorf("all credential layers failed")
 				}
-				return pluginTaskResult{Source: item.plugin.Name(), Complete: false, Err: searchErr}
+				outcome := pluginTaskResult{Source: item.plugin.Name(), Complete: false, Err: searchErr}
+				return scheduledPluginResult(outcome)
 			}
-			return pluginTaskResult{Source: item.plugin.Name(), Results: results, Complete: searchErr == nil, Err: searchErr, Status: statusFromSearchError(searchErr)}
-		})
+			outcome := pluginTaskResult{Source: item.plugin.Name(), Results: results, Complete: searchErr == nil, Err: searchErr, Status: statusFromSearchError(searchErr)}
+			return scheduledPluginResult(outcome)
+		}})
 	}
 
-	managedResults := pool.ExecuteBatchWithTimeout(tasks, concurrency, config.AppConfig.PluginTimeout)
+	if config.AppConfig != nil && config.AppConfig.SearchPerRequestPlugin > 0 && concurrency > config.AppConfig.SearchPerRequestPlugin {
+		concurrency = config.AppConfig.SearchPerRequestPlugin
+	}
+	if len(tasks) > 0 {
+		if err := ensureLiveSearchAdmission(ctx); err != nil {
+			return sourceSearchBatch{}, err
+		}
+	}
+	managedResults := GlobalSearchScheduler().Execute(ctx, searchscheduler.ClassCredential, concurrency, config.AppConfig.PluginTimeout, tasks)
+	legacyOutcome := <-legacyResult
+	if legacyOutcome.err != nil {
+		return sourceSearchBatch{}, legacyOutcome.err
+	}
+	legacyBatch := legacyOutcome.batch
 	allResults := append([]model.SearchResult(nil), legacyBatch.Results...)
 	complete := legacyBatch.Complete && len(managedResults) == len(tasks)
 	partialSources := append([]string(nil), legacyBatch.PartialSources...)
 	sourceStatuses := mergeSourceStatuses(legacyBatch.SourceStatuses)
 	finished := make(map[string]struct{}, len(managedResults))
 	for _, value := range managedResults {
-		outcome, ok := value.(pluginTaskResult)
+		outcome, ok := value.Value.(pluginTaskResult)
 		if !ok {
 			complete = false
 			continue
 		}
 		finished[outcome.Source] = struct{}{}
-		if outcome.Err != nil || !outcome.Complete {
+		if outcome.Err != nil || value.Err != nil || !outcome.Complete {
 			complete = false
 			partialSources = append(partialSources, "plugin:"+outcome.Source)
 		}
@@ -1846,7 +2152,13 @@ func (s *SearchService) searchPluginsForIdentityWithStatus(ctx context.Context, 
 			partialSources = append(partialSources, "plugin:"+item.plugin.Name())
 		}
 	}
-	return sourceSearchBatch{Results: mergeSearchResults(nil, allResults), Complete: complete, PartialSources: partialSources, SourceStatuses: sourceStatuses}, nil
+	managedExecution := model.SearchExecution{Requested: len(tasks), Executed: len(managedResults), Strategy: "credential"}
+	mergedExecution := mergeSearchExecution(legacyBatch.Execution, managedExecution)
+	result := sourceSearchBatch{Results: mergeSearchResults(nil, allResults), Complete: complete, PartialSources: partialSources, SourceStatuses: sourceStatuses}
+	if mergedExecution != nil {
+		result.Execution = *mergedExecution
+	}
+	return result, nil
 }
 
 func selectPlugins(all []plugin.AsyncSearchPlugin, requested []string) []plugin.AsyncSearchPlugin {
@@ -1929,11 +2241,12 @@ func intersectSources(requested, enabled []string) []string {
 
 // ResultScore 搜索结果评分结构
 type ResultScore struct {
-	Result       model.SearchResult
-	TimeScore    float64 // 时间得分
-	KeywordScore int     // 关键词得分
-	PluginScore  int     // 插件等级得分
-	TotalScore   float64 // 综合得分
+	Result        model.SearchResult
+	TimeScore     float64 // 时间得分
+	KeywordScore  int     // 关键词得分
+	PluginScore   int     // 插件等级得分
+	OriginalIndex int
+	TotalScore    float64 // 综合得分
 }
 
 // 插件等级缓存
@@ -1946,14 +2259,22 @@ func getResultSource(result model.SearchResult) string {
 	if result.Channel != "" {
 		// 来自TG频道
 		return "tg:" + result.Channel
-	} else if result.UniqueID != "" && strings.Contains(result.UniqueID, "-") {
-		// 来自插件：UniqueID格式通常为 "插件名-ID"
-		parts := strings.SplitN(result.UniqueID, "-", 2)
-		if len(parts) >= 1 {
-			return "plugin:" + parts[0]
-		}
+	} else if pluginName := pluginNameFromUniqueID(result.UniqueID); pluginName != "" {
+		return "plugin:" + pluginName
 	}
 	return "unknown"
+}
+
+func pluginNameFromUniqueID(uniqueID string) string {
+	uniqueID = strings.TrimSpace(uniqueID)
+	if uniqueID == "" {
+		return ""
+	}
+	separator := strings.IndexAny(uniqueID, "-:")
+	if separator <= 0 {
+		return ""
+	}
+	return uniqueID[:separator]
 }
 
 // getPluginLevelBySource 根据来源获取插件等级

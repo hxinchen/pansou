@@ -237,6 +237,9 @@ func TestHybridDatabaseSearchFiltersBeforePagingAndReadsEveryPage(t *testing.T) 
 	if len(store.queries) != 2 || store.queries[0].Page != 1 || store.queries[1].Page != 2 {
 		t.Fatalf("database queries = %#v", store.queries)
 	}
+	if store.queries[0].SkipTotal || !store.queries[1].SkipTotal {
+		t.Fatalf("SkipTotal by page = %v/%v, want false/true", store.queries[0].SkipTotal, store.queries[1].SkipTotal)
+	}
 	if store.queries[0].TitleQuery != "sample" {
 		t.Fatalf("title query = %q", store.queries[0].TitleQuery)
 	}

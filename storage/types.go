@@ -61,6 +61,12 @@ type Resource struct {
 	Keywords             []ResourceKeyword       `json:"keywords,omitempty"`
 }
 
+type ResourceCheckCompletion struct {
+	ResourceID int64
+	Status     string
+	CheckedAt  time.Time
+}
+
 type ResourceSourcePreview struct {
 	ID             int64     `json:"id"`
 	ResourceID     int64     `json:"resource_id"`
@@ -143,6 +149,7 @@ type ResourceFilter struct {
 	IncludeInvalid bool
 	Page           int
 	PageSize       int
+	SkipTotal      bool
 	Sort           string
 	SortBy         string
 	SortDir        string

@@ -15,8 +15,10 @@ import (
 	"pansou/credential"
 	"pansou/keywordsync"
 	"pansou/model"
+	"pansou/service"
 	"pansou/sourceconfig"
 	"pansou/storage"
+	"pansou/util/cache"
 )
 
 type AdminHandler struct {
@@ -28,6 +30,7 @@ type AdminHandler struct {
 	keywordSources       *keywordsync.Service
 	overviewCache        *adminOverviewCache
 	linkCheckStatusCache *adminLinkCheckStatusCache
+	searchCache          *cache.EnhancedTwoLevelCache
 	now                  func() time.Time
 }
 
@@ -55,8 +58,14 @@ func NewAdminHandler(store *storage.Store, runner *collection.Runner, sources ..
 }
 
 func (h *AdminHandler) Register(group *gin.RouterGroup) {
+	group.GET("/search-scheduler", func(c *gin.Context) {
+		c.JSON(http.StatusOK, model.NewSuccessResponse(service.GlobalSearchScheduler().Snapshot()))
+	})
+	group.GET("/search-scheduler/suggestions", h.searchSchedulerSuggestions)
+	group.POST("/search-scheduler/suggestions/apply", h.applySearchSchedulerSuggestions)
 	group.GET("/overview", h.overview)
 	group.GET("/trends", h.trends)
+	group.GET("/runtime-diagnostics", h.runtimeDiagnostics)
 	group.GET("/source-contributions", h.listSourceContributions)
 	group.GET("/source-contributions/:source_type/:source_key", h.getSourceContribution)
 	group.GET("/resources", h.listResources)

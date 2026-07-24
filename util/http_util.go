@@ -45,9 +45,9 @@ func NewHTTPClient(proxyURL string) (*http.Client, error) {
 		},
 
 		// 连接池优化
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   20,
-		MaxConnsPerHost:       100,
+		MaxIdleConns:          300,
+		MaxIdleConnsPerHost:   100,
+		MaxConnsPerHost:       200,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -101,8 +101,26 @@ func applyProxy(transport *http.Transport, rawProxyURL string) error {
 			return fmt.Errorf("SOCKS5代理初始化失败: %w", err)
 		}
 
-		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.Dial(network, addr)
+		if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
+			transport.DialContext = contextDialer.DialContext
+		} else {
+			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				type dialResult struct {
+					conn net.Conn
+					err  error
+				}
+				result := make(chan dialResult, 1)
+				go func() {
+					conn, dialErr := dialer.Dial(network, addr)
+					result <- dialResult{conn: conn, err: dialErr}
+				}()
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case outcome := <-result:
+					return outcome.conn, outcome.err
+				}
+			}
 		}
 	case "http", "https":
 		// HTTP/HTTPS代理

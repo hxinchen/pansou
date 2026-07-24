@@ -151,6 +151,7 @@ func formatSearchResponse(response model.SearchResponse, resultType string) mode
 }
 
 func (s *HybridSearchService) searchDatabase(ctx context.Context, keyword, resultType, sourceType string, channels, plugins, cloudTypes []string) (model.SearchResponse, time.Time, error) {
+	const maxDatabaseSearchResults = 1000
 	base := storage.ResourceFilter{
 		Keyword:    keyword,
 		TitleQuery: keyword,
@@ -184,6 +185,7 @@ func (s *HybridSearchService) searchDatabase(ctx context.Context, keyword, resul
 	for _, filter := range filters {
 		for pageNumber := 1; ; pageNumber++ {
 			filter.Page = pageNumber
+			filter.SkipTotal = pageNumber > 1
 			page, err := s.store.SearchResources(ctx, filter)
 			if err != nil {
 				return model.SearchResponse{}, time.Time{}, err
@@ -194,15 +196,23 @@ func (s *HybridSearchService) searchDatabase(ctx context.Context, keyword, resul
 				}
 			}
 			allResults = mergeDatabaseSearchResults(allResults, page.ToSearchResponse().Results)
-			if len(page.Items) == 0 || len(page.Items) < filter.PageSize || int64(pageNumber*filter.PageSize) >= page.Total {
+			if len(allResults) >= maxDatabaseSearchResults {
+				allResults = allResults[:maxDatabaseSearchResults]
+				break
+			}
+			if len(page.Items) == 0 || len(page.Items) < filter.PageSize || (!filter.SkipTotal && page.Total > 0 && int64(pageNumber*filter.PageSize) >= page.Total) {
 				break
 			}
 		}
 	}
 
+	// 数据库查询已通过 resource_keywords 与 TitleQuery 约束候选；这里保留
+	// 关联命中以兼容历史数据，但仍按文本相关度重新排序。
+	rankedResults := append([]model.SearchResult(nil), allResults...)
+	rankSearchResultsInPlace(rankedResults, keyword)
 	response := model.SearchResponse{
-		Results:      allResults,
-		MergedByType: mergeResultsByType(allResults, keyword, cloudTypes),
+		Results:      rankedResults,
+		MergedByType: mergeResultsByType(rankedResults, "", cloudTypes),
 		Completion:   model.SearchCompletionComplete,
 	}
 	if resultType == "merged_by_type" || resultType == "merge" || resultType == "" {
@@ -301,6 +311,8 @@ func (s *HybridSearchService) refreshInBackground(request ContextSearchRequest) 
 			s.refreshMu.Unlock()
 		}()
 		request.ForceRefresh = true
+		request.Ext = cloneExt(request.Ext)
+		request.Ext["search_priority"] = "background"
 		response, err := SearchWithContext(context.Background(), s.live, request)
 		if err != nil {
 			log.Printf("background live refresh failed for %q: %v", keyword, err)

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -10,6 +11,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"pansou/credential"
 	"pansou/model"
+	"pansou/service"
+	searchscheduler "pansou/service/scheduler"
 	"pansou/sourceconfig"
 	"pansou/storage"
 )
@@ -18,6 +21,14 @@ type CredentialHandler struct {
 	service       *credential.Service
 	adapters      map[string]any
 	sourceManager *sourceconfig.Manager
+	diagnostics   service.CredentialDiagnosticProvider
+}
+
+func (h *CredentialHandler) WithDiagnostics(provider service.CredentialDiagnosticProvider) *CredentialHandler {
+	if h != nil {
+		h.diagnostics = provider
+	}
+	return h
 }
 
 func NewCredentialHandler(s *credential.Service, a map[string]any, managers ...*sourceconfig.Manager) *CredentialHandler {
@@ -50,7 +61,7 @@ func (h *CredentialHandler) acquireAdapter(key string) (any, func(), bool) {
 	return adapter, func() {}, ok
 }
 
-func (h *CredentialHandler) adapterKeys() []string {
+func (h *CredentialHandler) adapterKeys(scope string) []string {
 	if h != nil && h.sourceManager != nil {
 		lease, err := h.sourceManager.Acquire()
 		if err == nil {
@@ -58,7 +69,14 @@ func (h *CredentialHandler) adapterKeys() []string {
 			if snapshot := lease.Snapshot(); snapshot != nil && snapshot.PluginManager != nil {
 				keys := make([]string, 0)
 				for _, instance := range snapshot.PluginManager.GetPlugins() {
+					if !credentialScopeSupported(instance, scope) {
+						continue
+					}
 					if _, password := instance.(credential.PasswordLoginAdapter); password {
+						keys = append(keys, strings.ToLower(instance.Name()))
+						continue
+					}
+					if _, token := instance.(credential.TokenLoginAdapter); token {
 						keys = append(keys, strings.ToLower(instance.Name()))
 						continue
 					}
@@ -71,7 +89,10 @@ func (h *CredentialHandler) adapterKeys() []string {
 		}
 	}
 	keys := make([]string, 0, len(h.adapters))
-	for key := range h.adapters {
+	for key, adapter := range h.adapters {
+		if !credentialScopeSupported(adapter, scope) {
+			continue
+		}
 		keys = append(keys, key)
 	}
 	return keys
@@ -90,6 +111,7 @@ func (h *CredentialHandler) RegisterAdmin(g *gin.RouterGroup) {
 	g.GET("/plugin-credentials", h.listAdmin)
 	g.POST("/plugin-credentials", h.createAdmin)
 	g.POST("/plugin-credentials/:id/relogin", h.reloginAdmin)
+	g.POST("/plugin-credentials/:id/search-test", h.searchTestAdmin)
 	g.POST("/plugin-credentials/:id/toggle", h.toggleAdmin)
 	g.PATCH("/plugin-credentials/:id", h.patchAdmin)
 	g.PUT("/plugin-credentials/:id/scope", h.scopeAdmin)
@@ -114,12 +136,15 @@ type credentialDTO struct {
 	ConsecutiveFailures int            `json:"consecutive_failures"`
 	LastErrorCode       string         `json:"last_error_code,omitempty"`
 	LastSuccessAt       any            `json:"last_success_at,omitempty"`
+	LastHealthCheckAt   any            `json:"last_health_check_at,omitempty"`
+	LastHealthStatus    string         `json:"last_health_status"`
+	LastHealthErrorCode string         `json:"last_health_error_code,omitempty"`
 	CreatedAt           any            `json:"created_at,omitempty"`
 	UpdatedAt           any            `json:"updated_at,omitempty"`
 }
 
 func safeCredential(v storage.PluginCredential) credentialDTO {
-	return credentialDTO{PublicID: v.PublicID, PluginKey: v.PluginKey, Scope: v.Scope, OwnerUserID: v.OwnerUserID, DisplayName: v.DisplayName, PublicMetadata: redactMetadata(v.PublicMetadata), OwnerEnabled: v.OwnerEnabled, Status: v.Status, ExpiresAt: v.ExpiresAt, AdminSuspended: v.AdminSuspendedAt != nil, ConsecutiveFailures: v.ConsecutiveFailures, LastErrorCode: v.LastErrorCode, LastSuccessAt: v.LastSuccessAt, CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt}
+	return credentialDTO{PublicID: v.PublicID, PluginKey: v.PluginKey, Scope: v.Scope, OwnerUserID: v.OwnerUserID, DisplayName: v.DisplayName, PublicMetadata: redactMetadata(v.PublicMetadata), OwnerEnabled: v.OwnerEnabled, Status: v.Status, ExpiresAt: v.ExpiresAt, AdminSuspended: v.AdminSuspendedAt != nil, ConsecutiveFailures: v.ConsecutiveFailures, LastErrorCode: v.LastErrorCode, LastSuccessAt: v.LastSuccessAt, LastHealthCheckAt: v.LastHealthCheckAt, LastHealthStatus: v.LastHealthStatus, LastHealthErrorCode: v.LastHealthErrorCode, CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt}
 }
 func safeCredentialPage(p storage.PluginCredentialPage) gin.H {
 	items := make([]credentialDTO, len(p.Items))
@@ -162,7 +187,7 @@ func (h *CredentialHandler) listAdmin(c *gin.Context) {
 	if !h.ready(c) {
 		return
 	}
-	p, e := h.service.ListAdmin(c, credentialFilter(c))
+	p, e := h.service.ListAdmin(c, adminCredentialFilter(c))
 	if e != nil {
 		h.respond(c, nil, e)
 		return
@@ -189,7 +214,7 @@ func (h *CredentialHandler) userPlugins(c *gin.Context) {
 			byPlugin[v.PluginKey]++
 		}
 	}
-	keys := h.adapterKeys()
+	keys := h.adapterKeys(storage.CredentialScopeUserPrivate)
 	items := make([]gin.H, 0, len(keys))
 	for _, key := range keys {
 		sharedCount := 0
@@ -211,10 +236,12 @@ func (h *CredentialHandler) userPlugins(c *gin.Context) {
 	h.respond(c, gin.H{"items": items}, nil)
 }
 func credentialPluginDescriptor(key string) gin.H {
-	display := map[string]string{"qqpd": "QQ频道", "gying": "观影", "panlian": "盘链", "weibo": "微博"}[key]
+	display := map[string]string{"aisoupan": "心悦搜索（Aisoupan）", "qqpd": "QQ频道", "gying": "观影", "panlian": "盘链", "weibo": "微博"}[key]
 	loginType := "password"
 	if key == "qqpd" || key == "weibo" {
 		loginType = "qr"
+	} else if key == "aisoupan" {
+		loginType = "token"
 	}
 	return gin.H{"key": key, "plugin_key": key, "display_name": display, "requires_account": true, "supports_multiple": true, "login_type": loginType}
 }
@@ -226,6 +253,7 @@ type credentialRequest struct {
 	DisplayName    string         `json:"display_name"`
 	Username       string         `json:"username"`
 	Password       string         `json:"password"`
+	Token          string         `json:"token"`
 	Enabled        *bool          `json:"enabled"`
 	CredentialID   string         `json:"credential_id"`
 	Suspended      *bool          `json:"suspended"`
@@ -275,6 +303,46 @@ func (h *CredentialHandler) reloginAdmin(c *gin.Context) {
 	}
 	h.loginCreate(c, id, nil, r, c.Param("id"))
 }
+
+type credentialSearchTestRequest struct {
+	Keyword string `json:"keyword"`
+}
+
+func (h *CredentialHandler) searchTestAdmin(c *gin.Context) {
+	if !h.ready(c) || h.diagnostics == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "凭证搜索测试不可用", "code": "credential_diagnostic_unavailable"})
+		return
+	}
+	var request credentialSearchTestRequest
+	if c.ShouldBindJSON(&request) != nil || strings.TrimSpace(request.Keyword) == "" {
+		badCredential(c)
+		return
+	}
+	result, err := h.diagnostics.TestCredential(c.Request.Context(), service.CredentialDiagnosticRequest{
+		CredentialID: c.Param("id"), Keyword: request.Keyword,
+	})
+	if err == nil {
+		c.JSON(http.StatusOK, model.NewSuccessResponse(result))
+		return
+	}
+	switch {
+	case errors.Is(err, storage.ErrNotFound), errors.Is(err, service.ErrCredentialDiagnosticForbidden):
+		c.JSON(http.StatusNotFound, gin.H{"error": "凭证不存在", "code": "credential_not_found"})
+	case errors.Is(err, storage.ErrInvalid):
+		badCredential(c)
+	case errors.Is(err, service.ErrCredentialDiagnosticUnavailable):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "凭证搜索测试不可用", "code": "credential_diagnostic_unavailable"})
+	case errors.Is(err, service.ErrCredentialDiagnosticUnsupported):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该插件不支持单账号搜索测试", "code": "credential_diagnostic_unsupported"})
+	case errors.Is(err, searchscheduler.ErrOverloaded):
+		c.Header("Retry-After", "2")
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "实时搜索繁忙，请稍后重试", "code": "SEARCH_OVERLOADED"})
+	case errors.Is(err, context.DeadlineExceeded):
+		c.JSON(http.StatusGatewayTimeout, gin.H{"error": "凭证搜索测试超时", "code": "credential_diagnostic_timeout"})
+	default:
+		c.JSON(http.StatusBadGateway, gin.H{"error": "凭证搜索测试失败", "code": "credential_diagnostic_failed"})
+	}
+}
 func (h *CredentialHandler) create(c *gin.Context, id int64, scope string) {
 	var r credentialRequest
 	if c.ShouldBindJSON(&r) != nil {
@@ -287,12 +355,23 @@ func (h *CredentialHandler) create(c *gin.Context, id int64, scope string) {
 func (h *CredentialHandler) loginCreate(c *gin.Context, actor int64, owner *int64, r credentialRequest, replaceID string) {
 	adapter, release, found := h.acquireAdapter(r.PluginKey)
 	defer release()
-	a, ok := adapter.(credential.PasswordLoginAdapter)
-	if !found || !ok {
-		c.JSON(400, gin.H{"error": "插件不支持密码登录", "code": "credential_login_unsupported"})
+	if !found || !credentialScopeSupported(adapter, r.Scope) {
+		c.JSON(400, gin.H{"error": "插件不支持该凭证范围", "code": "credential_scope_unsupported"})
 		return
 	}
-	m, e := a.LoginWithPassword(c, r.Username, r.Password)
+	var (
+		m credential.LoginMaterial
+		e error
+	)
+	switch a := adapter.(type) {
+	case credential.TokenLoginAdapter:
+		m, e = a.LoginWithToken(c, r.Token)
+	case credential.PasswordLoginAdapter:
+		m, e = a.LoginWithPassword(c, r.Username, r.Password)
+	default:
+		c.JSON(400, gin.H{"error": "插件不支持直接录入凭证", "code": "credential_login_unsupported"})
+		return
+	}
 	if e != nil {
 		h.respond(c, nil, e)
 		return
@@ -316,7 +395,15 @@ func (h *CredentialHandler) loginCreate(c *gin.Context, actor int64, owner *int6
 		h.respond(c, nil, e)
 		return
 	}
+	_ = h.service.RecordHealth(c, v.PublicID, storage.CredentialHealthHealthy, "", storage.CredentialStatusActive)
 	h.respond(c, safeCredential(v), nil)
+}
+
+func credentialScopeSupported(adapter any, scope string) bool {
+	if policy, ok := adapter.(credential.CredentialScopePolicy); ok {
+		return policy.SupportsCredentialScope(scope)
+	}
+	return scope == storage.CredentialScopeUserPrivate || scope == storage.CredentialScopeAdminPrivate || scope == storage.CredentialScopePublicShared
 }
 func (h *CredentialHandler) patchUser(c *gin.Context) {
 	id, ok := principalID(c)
@@ -485,6 +572,10 @@ func (h *CredentialHandler) beginAdminFlow(c *gin.Context) {
 	if r.Scope == "" {
 		r.Scope = storage.CredentialScopeAdminPrivate
 	}
+	if r.Scope != storage.CredentialScopeAdminPrivate && r.Scope != storage.CredentialScopePublicShared {
+		badCredential(c)
+		return
+	}
 	r.Metadata = mergeCredentialMetadata(r.Metadata, r.PublicMetadata)
 	h.beginFlowWith(c, id, r)
 }
@@ -551,7 +642,7 @@ func (h *CredentialHandler) pollFlow(c *gin.Context) {
 		return
 	}
 	if r.Material == nil || r.Status != "success" {
-		h.respond(c, r, nil)
+		h.respond(c, gin.H{"status": r.Status, "message": r.Message}, nil)
 		return
 	}
 	owner := (*int64)(nil)
@@ -574,6 +665,7 @@ func (h *CredentialHandler) pollFlow(c *gin.Context) {
 		h.respond(c, nil, e)
 		return
 	}
+	_ = h.service.RecordHealth(c, v.PublicID, storage.CredentialHealthHealthy, "", storage.CredentialStatusActive)
 	h.service.Flows().Delete(f.ID)
 	h.respond(c, gin.H{"status": "success", "credential": safeCredential(v)}, nil)
 }
@@ -592,6 +684,11 @@ func credentialFilter(c *gin.Context) storage.PluginCredentialFilter {
 	p, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	s, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
 	return storage.PluginCredentialFilter{PluginKeys: queryList(c, "plugin_key", "plugin"), Scopes: queryList(c, "scope", "scopes"), Statuses: queryList(c, "status", "statuses"), Page: p, PageSize: s}
+}
+func adminCredentialFilter(c *gin.Context) storage.PluginCredentialFilter {
+	filter := credentialFilter(c)
+	filter.Scopes = []string{storage.CredentialScopeAdminPrivate, storage.CredentialScopePublicShared}
+	return filter
 }
 func badCredential(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "请求参数无效", "code": "credential_invalid"})

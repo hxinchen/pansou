@@ -7,18 +7,19 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
-	
+
 	"pansou/util/json"
 )
 
 // 磁盘缓存项元数据
 type diskCacheMetadata struct {
-	Key         string    `json:"key"`
-	Expiry      time.Time `json:"expiry"`
-	LastUsed    time.Time `json:"last_used"`
-	Size        int       `json:"size"`
+	Key          string    `json:"key"`
+	Expiry       time.Time `json:"expiry"`
+	LastUsed     time.Time `json:"last_used"`
+	Size         int       `json:"size"`
 	LastModified time.Time `json:"last_modified"` // 添加最后修改时间字段
 }
 
@@ -88,7 +89,7 @@ func (c *DiskCache) loadMetadata() {
 
 		// 更新总大小
 		c.currSize += int64(meta.Size)
-		
+
 		// 存储元数据
 		c.metadata[meta.Key] = &meta
 	}
@@ -114,6 +115,10 @@ func (c *DiskCache) getFilename(key string) string {
 func (c *DiskCache) Set(key string, data []byte, ttl time.Duration) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	maxSize := int64(c.maxSizeMB) * 1024 * 1024
+	if int64(len(data)) > maxSize {
+		return fmt.Errorf("cache item exceeds disk shard capacity: %d > %d bytes", len(data), maxSize)
+	}
 
 	// 如果已存在，先减去旧项的大小
 	if meta, exists := c.metadata[key]; exists {
@@ -125,7 +130,6 @@ func (c *DiskCache) Set(key string, data []byte, ttl time.Duration) error {
 	}
 
 	// 检查空间
-	maxSize := int64(c.maxSizeMB) * 1024 * 1024
 	if c.currSize+int64(len(data)) > maxSize {
 		// 清理空间
 		c.evictLRU(int64(len(data)))
@@ -148,11 +152,11 @@ func (c *DiskCache) Set(key string, data []byte, ttl time.Duration) error {
 	// 创建元数据
 	now := time.Now()
 	meta := &diskCacheMetadata{
-		Key:         key,
-		Expiry:      now.Add(ttl),
-		LastUsed:    now,
+		Key:          key,
+		Expiry:       now.Add(ttl),
+		LastUsed:     now,
 		LastModified: now, // 设置最后修改时间
-		Size:        len(data),
+		Size:         len(data),
 	}
 
 	// 保存元数据
@@ -171,18 +175,25 @@ func (c *DiskCache) Set(key string, data []byte, ttl time.Duration) error {
 
 // Get 获取缓存
 func (c *DiskCache) Get(key string) ([]byte, bool, error) {
+	data, _, hit, err := c.GetWithTTL(key)
+	return data, hit, err
+}
+
+// GetWithTTL returns a live entry together with its remaining lifetime. The
+// remaining TTL is required when promoting a disk entry back into memory so a
+// cache hit cannot extend the entry's original expiration.
+func (c *DiskCache) GetWithTTL(key string) ([]byte, time.Duration, bool, error) {
 	c.mutex.RLock()
 	meta, exists := c.metadata[key]
 	c.mutex.RUnlock()
 
 	if !exists {
-		return nil, false, nil
+		return nil, 0, false, nil
 	}
 
-	// 检查是否过期
-	if time.Now().After(meta.Expiry) {
+	if time.Until(meta.Expiry) <= 0 {
 		c.Delete(key)
-		return nil, false, nil
+		return nil, 0, false, nil
 	}
 
 	// 获取文件路径
@@ -195,16 +206,21 @@ func (c *DiskCache) Get(key string) ([]byte, bool, error) {
 		if os.IsNotExist(err) {
 			c.Delete(key)
 		}
-		return nil, false, err
+		return nil, 0, false, err
 	}
 
-	// 更新最后使用时间
+	// Persisting this on every disk hit turns reads into synchronous writes.
+	// In-memory LRU precision is enough between process restarts.
 	c.mutex.Lock()
 	meta.LastUsed = time.Now()
-	c.saveMetadata(key, meta)
 	c.mutex.Unlock()
+	remainingTTL := time.Until(meta.Expiry)
+	if remainingTTL <= 0 {
+		_ = c.Delete(key)
+		return nil, 0, false, nil
+	}
 
-	return data, true, nil
+	return data, remainingTTL, true, nil
 }
 
 // Delete 删除缓存
@@ -287,15 +303,11 @@ func (c *DiskCache) evictLRU(requiredSpace int64) {
 		})
 	}
 
-	// 按最后使用时间排序
-	// 使用冒泡排序保持简单
-	for i := 0; i < len(items); i++ {
-		for j := 0; j < len(items)-i-1; j++ {
-			if items[j].lastUsed.After(items[j+1].lastUsed) {
-				items[j], items[j+1] = items[j+1], items[j]
-			}
-		}
-	}
+	// Sort once rather than using quadratic bubble sort while holding the cache
+	// lock. Large cache evictions otherwise block all shard reads and writes.
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].lastUsed.Before(items[j].lastUsed)
+	})
 
 	// 从最久未使用开始删除，直到有足够空间
 	maxSize := int64(c.maxSizeMB) * 1024 * 1024
@@ -347,7 +359,7 @@ func (c *DiskCache) Clear() error {
 	c.currSize = 0
 
 	return nil
-} 
+}
 
 // GetLastModified 获取缓存项的最后修改时间
 func (c *DiskCache) GetLastModified(key string) (time.Time, bool) {
@@ -360,4 +372,4 @@ func (c *DiskCache) GetLastModified(key string) (time.Time, bool) {
 	}
 
 	return meta.LastModified, true
-} 
+}

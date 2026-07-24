@@ -252,6 +252,15 @@ func (s *Service) ListAdmin(ctx context.Context, filter storage.PluginCredential
 	return s.repository.ListAdminPluginCredentials(ctx, filter)
 }
 
+// Get returns one credential for internal diagnostics. Callers must not expose
+// the encrypted envelope fields in API responses.
+func (s *Service) Get(ctx context.Context, publicID string) (storage.PluginCredential, error) {
+	if s == nil || s.repository == nil {
+		return storage.PluginCredential{}, errors.New("credential service is unavailable")
+	}
+	return s.repository.GetPluginCredentialByPublicID(ctx, strings.TrimSpace(publicID))
+}
+
 func (s *Service) SetUserEnabled(ctx context.Context, userID int64, publicID string, enabled bool) error {
 	return s.repository.SetCredentialOwnerEnabled(ctx, publicID, userID, enabled)
 }
@@ -425,6 +434,19 @@ func (s *Service) Success(ctx context.Context, publicID string) error {
 
 func (s *Service) Failure(ctx context.Context, publicID, status, code string, cooldown *time.Time) error {
 	return s.repository.RecordPluginCredentialFailure(ctx, storage.CredentialFailureInput{PublicID: publicID, Status: status, ErrorCode: code, FailedAt: s.now(), CooldownUntil: cooldown})
+}
+
+func (s *Service) RecordHealth(ctx context.Context, publicID, healthStatus, errorCode, credentialStatus string) error {
+	repository, ok := s.repository.(interface {
+		RecordPluginCredentialHealth(context.Context, storage.CredentialHealthInput) error
+	})
+	if !ok {
+		return nil
+	}
+	return repository.RecordPluginCredentialHealth(ctx, storage.CredentialHealthInput{
+		PublicID: publicID, HealthStatus: healthStatus, ErrorCode: errorCode,
+		CredentialStatus: credentialStatus, CheckedAt: s.now(),
+	})
 }
 
 func (s *Service) ChangeAdminScope(ctx context.Context, publicID, scope string) (storage.PluginCredential, error) {

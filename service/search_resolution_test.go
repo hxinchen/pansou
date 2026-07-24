@@ -3,11 +3,13 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"pansou/config"
 	"pansou/plugin"
 	"pansou/sourceconfig"
 	"pansou/tgchannel"
@@ -66,6 +68,32 @@ func TestResolveManagedSearchRequest(t *testing.T) {
 	}
 	if publicOnly.requiresLiveTG {
 		t.Fatal("explicit public-only selection should remain database-first")
+	}
+}
+
+func TestResolveManagedSearchRequestKeepsAllChannelsUntilTieredRollout(t *testing.T) {
+	previous := config.AppConfig
+	defer func() { config.AppConfig = previous }()
+	channels := make([]sourceconfig.Channel, 35)
+	for index := range channels {
+		channels[index] = sourceconfig.Channel{Key: fmt.Sprintf("channel_%02d", index), Enabled: true}
+	}
+	snapshot := sourceconfig.NewSnapshot(1, sourceconfig.Config{Channels: channels}, plugin.NewPluginManager())
+	config.AppConfig = &config.Config{SearchTieredRollout: false}
+	compatible, err := resolveManagedSearchRequest(ContextSearchRequest{}, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compatible.Channels) != 35 {
+		t.Fatalf("compatible channels=%d", len(compatible.Channels))
+	}
+	config.AppConfig.SearchTieredRollout = true
+	tiered, err := resolveManagedSearchRequest(ContextSearchRequest{}, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tiered.Channels) != 30 {
+		t.Fatalf("tiered channels=%d", len(tiered.Channels))
 	}
 }
 

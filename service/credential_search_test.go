@@ -117,6 +117,24 @@ func TestCredentialLayerHealthyEmptyAcrossLayersIsComplete(t *testing.T) {
 	}
 }
 
+func TestCredentialLayerWithoutAvailableAccountsDoesNotFailSource(t *testing.T) {
+	config.AppConfig = &config.Config{PluginTimeout: time.Second, DefaultConcurrency: 1}
+	manager := plugin.NewPluginManager()
+	instance := &fakeLayerPlugin{}
+	manager.RegisterPlugin(instance)
+	service := &SearchService{pluginManager: manager, credentials: fakeCredentialProvider{}}
+	batch, err := service.searchPluginsForIdentityWithStatus(context.Background(), SearchIdentity{Actor: SearchActorUser, UserID: 7}, "x", nil, false, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !batch.Complete || len(batch.Results) != 0 || len(batch.PartialSources) != 0 {
+		t.Fatalf("batch = %#v", batch)
+	}
+	if len(instance.calls) != 0 {
+		t.Fatalf("credential adapter calls = %#v, want none", instance.calls)
+	}
+}
+
 func TestCredentialLayerPartialStatusIsExposed(t *testing.T) {
 	config.AppConfig = &config.Config{PluginTimeout: time.Second, DefaultConcurrency: 1}
 	manager := plugin.NewPluginManager()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io/fs"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -11,22 +12,29 @@ import (
 	"pansou/config"
 	"pansou/credential"
 	"pansou/keywordsync"
+	"pansou/mihomo"
 	"pansou/plugin"
+	"pansou/proxypool"
 	"pansou/service"
 	"pansou/sourceconfig"
 	"pansou/storage"
 	"pansou/util"
+	"pansou/util/cache"
 	adminweb "pansou/web"
 )
 
 type RouterDependencies struct {
-	Store              *storage.Store
-	Runner             *collection.Runner
-	LinkChecks         *collection.LinkCheckQueue
-	SourceRuntime      *sourceconfig.Service
-	Credentials        *credential.Service
-	CredentialAdapters map[string]any
-	KeywordSources     *keywordsync.Service
+	Store                 *storage.Store
+	Runner                *collection.Runner
+	LinkChecks            *collection.LinkCheckQueue
+	SourceRuntime         *sourceconfig.Service
+	Credentials           *credential.Service
+	CredentialAdapters    map[string]any
+	CredentialDiagnostics service.CredentialDiagnosticProvider
+	KeywordSources        *keywordsync.Service
+	ProxyPool             *proxypool.Service
+	Mihomo                *mihomo.Service
+	SearchCache           *cache.EnhancedTwoLevelCache
 }
 
 // SetupRouter 设置路由
@@ -34,6 +42,10 @@ func SetupRouter(searchService service.SearchProvider, options ...RouterDependen
 	var dependencies RouterDependencies
 	if len(options) > 0 {
 		dependencies = options[0]
+	}
+	credentialDiagnostics := dependencies.CredentialDiagnostics
+	if credentialDiagnostics == nil {
+		credentialDiagnostics, _ = searchService.(service.CredentialDiagnosticProvider)
 	}
 
 	// 设置搜索服务
@@ -58,6 +70,15 @@ func SetupRouter(searchService service.SearchProvider, options ...RouterDependen
 	r.Use(LoggerMiddleware())
 	r.Use(util.GzipMiddleware()) // 添加压缩中间件
 	r.Use(AuthMiddleware())      // 添加认证中间件
+	r.Use(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if path == "/admin" || path == "/admin/" || strings.HasPrefix(path, "/admin/assets/") {
+			c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+			c.Header("Pragma", "no-cache")
+			c.Header("Expires", "0")
+		}
+		c.Next()
+	})
 
 	// 定义API路由组
 	api := r.Group("/api")
@@ -76,7 +97,7 @@ func SetupRouter(searchService service.SearchProvider, options ...RouterDependen
 		if dependencies.SourceRuntime != nil {
 			sourceManager = dependencies.SourceRuntime.Manager
 		}
-		NewCredentialHandler(dependencies.Credentials, dependencies.CredentialAdapters, sourceManager).RegisterUser(userAPI)
+		NewCredentialHandler(dependencies.Credentials, dependencies.CredentialAdapters, sourceManager).WithDiagnostics(credentialDiagnostics).RegisterUser(userAPI)
 
 		// 搜索接口 - 网页 JWT 与 API Key 共用同一用户限额和调用记录。
 		searchAPI := api.Group("")
@@ -114,12 +135,19 @@ func SetupRouter(searchService service.SearchProvider, options ...RouterDependen
 			channelsCount := len(channels)
 
 			response := gin.H{
-				"status":             "ok",
-				"auth_enabled":       config.AppConfig.AuthEnabled, // 添加认证状态
-				"multi_user_enabled": databaseAuthService != nil,
-				"plugins_enabled":    pluginsEnabled,
-				"channels":           channels,
-				"channels_count":     channelsCount,
+				"status":                "ok",
+				"auth_enabled":          config.AppConfig.AuthEnabled, // 添加认证状态
+				"multi_user_enabled":    databaseAuthService != nil,
+				"plugins_enabled":       pluginsEnabled,
+				"channels":              channels,
+				"channels_count":        channelsCount,
+				"search_scheduler":      service.GlobalSearchScheduler().Snapshot(),
+				"tiered_search_enabled": config.AppConfig.SearchTieredRollout,
+			}
+			if dependencies.ProxyPool != nil {
+				if summary, err := dependencies.ProxyPool.Summary(c.Request.Context()); err == nil {
+					response["proxy_pool"] = summary
+				}
 			}
 			if dependencies.Store == nil {
 				response["database_configured"] = false
@@ -153,15 +181,21 @@ func SetupRouter(searchService service.SearchProvider, options ...RouterDependen
 	adminHandler.linkChecks = dependencies.LinkChecks
 	adminHandler.credentials = dependencies.Credentials
 	adminHandler.keywordSources = dependencies.KeywordSources
+	adminHandler.searchCache = dependencies.SearchCache
 	if adminHandler.overviewCache != nil {
 		adminHandler.overviewCache.warmup()
 	}
 	adminHandler.Register(adminAPI)
+	if config.AppConfig != nil && config.AppConfig.PprofEnabled {
+		registerAdminPprof(adminAPI)
+	}
 	var adminSourceManager *sourceconfig.Manager
 	if dependencies.SourceRuntime != nil {
 		adminSourceManager = dependencies.SourceRuntime.Manager
 	}
-	NewCredentialHandler(dependencies.Credentials, dependencies.CredentialAdapters, adminSourceManager).RegisterAdmin(adminAPI)
+	NewCredentialHandler(dependencies.Credentials, dependencies.CredentialAdapters, adminSourceManager).WithDiagnostics(credentialDiagnostics).RegisterAdmin(adminAPI)
+	NewProxyPoolHandler(dependencies.ProxyPool).Register(adminAPI)
+	NewMihomoHandler(dependencies.Mihomo).Register(adminAPI)
 
 	// The admin shell is public so administrators can reach the login form.
 	// Its API group is registered separately with RequireAdminAuth.

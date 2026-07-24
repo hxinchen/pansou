@@ -9,7 +9,7 @@
   <link rel="icon" type="image/png" sizes="512x512" href="./assets/admin-icon.png">
   <link rel="apple-touch-icon" href="./assets/admin-icon.png">
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-  <link rel="stylesheet" href="./assets/styles.css">
+  <link rel="stylesheet" href="./assets/styles.css?v=202607202115">
 </head>
 <body>
   <div id="login-view" class="auth-layout" hidden>
@@ -81,6 +81,14 @@
         <a class="nav-item" href="#resources" data-view="resources">
           <i data-lucide="database" aria-hidden="true"></i>
           <span>资源库</span>
+        </a>
+        <a class="nav-item" href="#routing" data-view="routing">
+          <i data-lucide="route" aria-hidden="true"></i>
+          <span>线路路由</span>
+        </a>
+        <a class="nav-item" href="#proxy-pool" data-view="proxy-pool">
+          <i data-lucide="network" aria-hidden="true"></i>
+          <span>代理池</span>
         </a>
         <a class="nav-item" href="#keywords" data-view="keywords">
           <i data-lucide="tags" aria-hidden="true"></i>
@@ -395,6 +403,118 @@
             <p>调整筛选条件后重试</p>
           </div>
           <nav id="resources-pagination" class="pagination" aria-label="资源分页"></nav>
+        </section>
+
+        <section id="view-routing" class="view" data-page="routing" aria-labelledby="routing-title" hidden>
+          <div class="page-heading with-actions routing-page-heading">
+            <div>
+              <p class="eyebrow">NETWORK EGRESS</p>
+              <h1 id="routing-title">线路路由</h1>
+              <p class="page-lead">查看 Telegram 实际出站链路，并直接切换“良心云”代理组。</p>
+            </div>
+            <div class="page-actions">
+              <button id="mihomo-latency-test-button" class="button primary" type="button" data-action="benchmark-mihomo"><i data-lucide="gauge" aria-hidden="true"></i><span>一键测速</span></button>
+              <button class="button secondary" type="button" data-action="refresh-mihomo"><i data-lucide="refresh-cw" aria-hidden="true"></i><span>刷新出口</span></button>
+            </div>
+          </div>
+          <div id="mihomo-alert" class="inline-alert error" role="alert" hidden></div>
+          <div id="mihomo-benchmark-status" class="operation-status routing-benchmark-status" role="status" aria-live="polite" hidden></div>
+          <section id="mihomo-summary" class="routing-hero" aria-live="polite">
+            <div class="routing-hero-skeleton"><span></span><span></span><span></span></div>
+          </section>
+          <section class="routing-trace-panel" aria-labelledby="routing-trace-title">
+            <div class="routing-section-heading">
+              <div><span class="routing-index">01</span><div><h2 id="routing-trace-title">Telegram 实际链路</h2><p>规则模式按从左到右的顺序匹配和转发。</p></div></div>
+              <span id="mihomo-route-status" class="routing-live-chip">读取中</span>
+            </div>
+            <div id="mihomo-route" class="routing-trace" aria-live="polite"></div>
+          </section>
+          <div class="routing-workspace">
+            <section class="routing-node-panel" aria-labelledby="routing-nodes-title">
+              <div class="routing-section-heading routing-node-heading">
+                <div><span class="routing-index">02</span><div><h2 id="routing-nodes-title">选择出口线路</h2><p>一键测速后按延迟从低到高排列；选择具体节点会固定到对应地区。</p></div></div>
+                <span id="mihomo-node-count" class="routing-count">0 条线路</span>
+              </div>
+              <div class="routing-toolbar">
+                <label class="routing-search"><i data-lucide="search" aria-hidden="true"></i><input id="mihomo-query" type="search" placeholder="搜索地区、节点或协议"></label>
+                <select id="mihomo-region" aria-label="按地区筛选"><option value="">全部地区</option></select>
+              </div>
+              <div id="mihomo-candidates" class="routing-node-list" aria-live="polite"></div>
+            </section>
+            <aside class="routing-side-panel" aria-labelledby="routing-details-title">
+              <div class="routing-section-heading compact">
+                <div><span class="routing-index">03</span><div><h2 id="routing-details-title">运行细节</h2><p>控制器与规则状态。</p></div></div>
+              </div>
+              <div id="mihomo-details" class="routing-detail-list"></div>
+              <div class="routing-note"><i data-lucide="info" aria-hidden="true"></i><p><strong>为什么 GLOBAL 是 DIRECT 仍能采集 TG？</strong><span>Telegram 域名与 IP 会先命中专用规则并进入“良心云”，不会落到 GLOBAL。</span></p></div>
+            </aside>
+          </div>
+          <section class="mihomo-subscription-panel" aria-labelledby="mihomo-subscriptions-title">
+            <div class="routing-section-heading mihomo-subscription-heading">
+              <div><span class="routing-index">04</span><div><h2 id="mihomo-subscriptions-title">订阅管理</h2><p>原有“良心云”线路也会作为订阅来源展示；新增订阅可选择下载所用线路。</p></div></div>
+              <button class="button primary" type="button" data-action="new-mihomo-subscription"><i data-lucide="link-2" aria-hidden="true"></i><span>添加订阅</span></button>
+            </div>
+            <div id="mihomo-subscription-alert" class="inline-alert error" role="alert" hidden></div>
+            <div id="mihomo-subscription-status" class="operation-status mihomo-subscription-operation" role="status" aria-live="polite" hidden></div>
+            <div class="mihomo-subscription-summary">
+              <div><span>自动更新</span><strong id="mihomo-subscription-count">0 个订阅</strong></div>
+              <p><i data-lucide="shield-check" aria-hidden="true"></i><span>完整订阅地址仅写入服务器 Mihomo 配置；页面和接口始终脱敏显示。</span></p>
+            </div>
+            <div id="mihomo-subscriptions" class="mihomo-subscription-list" aria-live="polite">
+              <div class="routing-empty"><i data-lucide="loader-circle" class="spin" aria-hidden="true"></i><strong>正在读取订阅</strong><span>请稍候</span></div>
+            </div>
+          </section>
+        </section>
+
+        <section id="view-proxy-pool" class="view" data-page="proxy-pool" aria-labelledby="proxy-pool-title" hidden>
+          <div class="page-heading with-actions">
+            <div>
+              <p class="eyebrow">PROXY POOL</p>
+              <h1 id="proxy-pool-title">代理池</h1>
+              <p class="page-lead">导入、筛选和维护临时代理节点，为链接检测提供弹性出口。</p>
+            </div>
+            <div class="page-actions"><button class="button secondary" type="button" data-action="probe-proxy-pool"><i data-lucide="scan-line" aria-hidden="true"></i><span>探测待检节点</span></button></div>
+          </div>
+          <div id="proxy-pool-alert" class="inline-alert error" role="alert" hidden></div>
+          <div id="proxy-pool-probe-status" class="operation-status proxy-probe-status" role="status" aria-live="polite" hidden></div>
+          <div id="proxy-pool-runtime-status" class="proxy-runtime-strip" aria-live="polite"><span class="proxy-runtime-signal"></span><strong>正在读取代理路由状态</strong></div>
+          <div id="proxy-pool-stats" class="proxy-metric-grid" aria-live="polite">
+            <article class="proxy-metric skeleton-card"></article><article class="proxy-metric skeleton-card"></article>
+            <article class="proxy-metric skeleton-card"></article><article class="proxy-metric skeleton-card"></article>
+          </div>
+          <div class="proxy-control-grid">
+            <section class="proxy-import-panel">
+              <div class="proxy-section-heading"><span class="proxy-section-index">01</span><div><p class="panel-kicker">IMPORT BATCH</p><h2>追加代理批次</h2><p>支持 HTTP、HTTPS、SOCKS5 / SOCKS5H，一行一个地址。</p></div></div>
+              <form id="proxy-pool-import-form" class="proxy-import-form">
+                <label class="proxy-file-drop" for="proxy-pool-file">
+                  <input id="proxy-pool-file" type="file" accept=".txt,text/plain" required>
+                  <span class="proxy-file-icon"><i data-lucide="file-up" aria-hidden="true"></i></span>
+                  <span><strong id="proxy-pool-file-name">选择 TXT 文件</strong><small>点击选择，追加导入并自动去重</small></span>
+                </label>
+                <div class="proxy-import-fields">
+                  <label><span>批次名称</span><input id="proxy-pool-batch-name" type="text" placeholder="例如：海外 HTTP 代理 07-20"></label>
+                  <label><span>过期时间</span><input id="proxy-pool-expires-at" type="date"></label>
+                </div>
+                <div class="proxy-import-footer"><p><i data-lucide="shield-check" aria-hidden="true"></i><span>认证信息加密保存，页面仅显示脱敏地址；默认有效期 6 天。</span></p><button class="button primary" type="submit"><i data-lucide="upload" aria-hidden="true"></i><span>导入并去重</span></button></div>
+              </form>
+            </section>
+            <section class="proxy-policy-panel">
+              <div class="proxy-section-heading"><span class="proxy-section-index">02</span><div><p class="panel-kicker">ROUTING POLICY</p><h2>按网盘分配出口</h2><p>“基线”是当前 Mihomo 出口；代理池可作为优先线路或失败回退。</p></div></div>
+              <div id="proxy-pool-policies" class="proxy-pool-policies"></div>
+              <div class="proxy-policy-footer"><span>修改后统一保存，不影响账号型插件会话。</span><button class="button secondary" type="button" data-action="save-proxy-policies"><i data-lucide="save" aria-hidden="true"></i><span>保存策略</span></button></div>
+            </section>
+          </div>
+          <section class="proxy-data-panel proxy-pool-batches-panel">
+            <div class="proxy-data-heading"><div><span class="proxy-section-index">03</span><div><h2>导入批次</h2><p>按来源文件管理整批节点的启用状态和有效期。</p></div></div></div>
+            <div class="table-wrap"><table><thead><tr><th>批次</th><th>节点</th><th>健康</th><th>有效期</th><th>状态</th><th>操作</th></tr></thead><tbody id="proxy-pool-batches-body"></tbody></table></div>
+            <nav id="proxy-pool-batches-pagination" class="pagination" aria-label="代理批次分页"></nav>
+          </section>
+          <section class="proxy-data-panel proxy-pool-nodes-panel">
+            <div class="proxy-data-heading with-actions"><div><span class="proxy-section-index">04</span><div><h2>节点健康度</h2><p>查看延迟、成功率和冷却状态，支持单节点重测。</p></div></div><div class="proxy-filter-bar"><label><i data-lucide="search" aria-hidden="true"></i><input id="proxy-pool-query" type="search" placeholder="搜索地址或批次"></label><select id="proxy-pool-status"><option value="">全部状态</option><option value="healthy">健康</option><option value="pending">待检测</option><option value="cooling">冷却</option><option value="disabled">已停用</option><option value="expired">已过期</option></select><button class="button secondary" type="button" data-action="search-proxy-pool"><span>筛选</span></button></div></div>
+            <div class="table-wrap"><table><thead><tr><th>代理节点</th><th>状态</th><th>延迟</th><th>可靠性</th><th>最近检测</th><th>过期时间</th><th>操作</th></tr></thead><tbody id="proxy-pool-nodes-body"></tbody></table></div>
+            <div id="proxy-pool-nodes-empty" class="empty-state" hidden><i data-lucide="network" aria-hidden="true"></i><h2>暂无代理节点</h2><p>导入 TXT 后，节点会显示在这里。</p></div>
+            <nav id="proxy-pool-nodes-pagination" class="pagination" aria-label="代理节点分页"></nav>
+          </section>
         </section>
 
         <section id="view-keywords" class="view" data-page="keywords" aria-labelledby="keywords-title" hidden>
@@ -919,17 +1039,53 @@
               <div><h2 id="source-search-title">搜索调试</h2><p>使用当前已生效的来源配置执行正式搜索</p></div>
               <span id="source-search-version" class="type-badge">配置 —</span>
             </header>
-            <form id="source-search-form" class="source-search-form">
-              <label class="field source-search-keyword"><span>搜索关键词 <em>*</em></span><input id="source-search-keyword" name="keyword" type="search" maxlength="200" placeholder="输入要测试的资源关键词" required></label>
-              <label class="field"><span>来源范围</span><select id="source-search-scope" name="scope"><option value="all">全部来源</option><option value="plugin">仅插件</option><option value="tg">仅 TG</option></select></label>
-              <label class="toggle-field source-search-refresh"><span><strong>强制实时刷新</strong><small>绕过资源库缓存并执行实时搜索</small></span><input id="source-search-refresh" name="refresh" type="checkbox"><span class="toggle" aria-hidden="true"></span></label>
-              <fieldset class="source-search-picker" data-source-search-picker="plugin"><legend>插件（不选表示全部已启用）</legend><div id="source-search-plugins" class="source-search-options"></div></fieldset>
-              <fieldset class="source-search-picker" data-source-search-picker="tg"><legend>TG 频道（不选表示全部已启用）</legend><div id="source-search-channels" class="source-search-options"></div></fieldset>
-              <fieldset class="source-search-picker"><legend>网盘类型（不选表示全部）</legend><div id="source-search-clouds" class="source-search-options"></div></fieldset>
-              <div class="source-search-submit"><button id="source-search-submit" class="button primary" type="submit"><i data-lucide="search" aria-hidden="true"></i><span>开始搜索</span></button><small>结果会计入管理员 API 调用记录</small></div>
-            </form>
-            <div id="source-search-alert" class="inline-alert error" role="alert" hidden></div>
-            <div id="source-search-results" class="source-search-results" aria-live="polite"><div class="empty-state compact-empty"><i data-lucide="search" aria-hidden="true"></i><h3>等待搜索</h3><p>选择来源并输入关键词，验证当前生效配置。</p></div></div>
+            <div class="source-search-workspace">
+              <form id="source-search-form" class="source-search-form source-search-module">
+                <div class="source-search-module-heading">
+                  <div class="source-search-module-title"><span class="source-search-step">01</span><div><h3>搜索参数</h3><p>先定义关键词与执行方式，再按需缩小来源范围。</p></div></div>
+                  <span class="source-search-module-note">正式 API 请求</span>
+                </div>
+                <div class="source-search-query-grid">
+                  <label class="field source-search-keyword"><span>搜索关键词 <em>*</em></span><input id="source-search-keyword" name="keyword" type="search" maxlength="200" placeholder="输入要测试的资源关键词" required></label>
+                  <label class="field"><span>来源范围</span><select id="source-search-scope" name="scope"><option value="all">全部来源</option><option value="plugin">仅插件</option><option value="tg">仅 TG</option></select></label>
+                  <label class="toggle-field source-search-refresh"><span><strong>强制实时刷新</strong><small>绕过资源库缓存并执行实时搜索</small></span><input id="source-search-refresh" name="refresh" type="checkbox"><span class="toggle" aria-hidden="true"></span></label>
+                </div>
+                <div class="source-search-filter-heading">
+                  <div class="source-search-module-title"><span class="source-search-step">02</span><div><h3>来源约束</h3><p>筛选项留空时，自动使用当前范围内全部已启用来源。</p></div></div>
+                  <span class="source-search-module-note">按需展开</span>
+                </div>
+                <div class="source-search-filter-grid">
+                  <details class="source-search-picker" data-source-search-picker="plugin">
+                    <summary><span class="source-search-picker-name"><i data-lucide="plug" aria-hidden="true"></i><span><strong>插件</strong><small>指定参与搜索的内置插件</small></span></span><span id="source-search-plugin-summary" class="type-badge">全部已启用</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+                    <div class="source-search-picker-body"><div id="source-search-plugins" class="source-search-options"></div></div>
+                  </details>
+                  <details class="source-search-picker" data-source-search-picker="tg">
+                    <summary><span class="source-search-picker-name"><i data-lucide="send" aria-hidden="true"></i><span><strong>TG 频道</strong><small>指定参与搜索的频道</small></span></span><span id="source-search-channel-summary" class="type-badge">全部已启用</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+                    <div class="source-search-picker-body"><div id="source-search-channels" class="source-search-options"></div></div>
+                  </details>
+                  <details class="source-search-picker">
+                    <summary><span class="source-search-picker-name"><i data-lucide="hard-drive" aria-hidden="true"></i><span><strong>网盘类型</strong><small>只保留指定类型的结果</small></span></span><span id="source-search-cloud-summary" class="type-badge">全部类型</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+                    <div class="source-search-picker-body"><div id="source-search-clouds" class="source-search-options"></div></div>
+                  </details>
+                </div>
+                <div class="source-search-submit"><button id="source-search-submit" class="button primary" type="submit"><i data-lucide="search" aria-hidden="true"></i><span>开始搜索</span></button><small>结果会计入管理员 API 调用记录</small></div>
+              </form>
+
+              <aside class="source-search-insights" aria-label="搜索运行洞察">
+                <section class="source-search-module source-scheduler-module">
+                  <div class="source-search-module-heading compact">
+                    <div class="source-search-module-title"><span class="source-search-live-dot" aria-hidden="true"></span><div><h3>调度状态</h3><p>全局搜索容量与排队情况</p></div></div>
+                  </div>
+                  <div id="source-scheduler-status" class="source-scheduler-grid" aria-live="polite"><span class="source-scheduler-loading">读取中</span></div>
+                </section>
+                <div id="source-tier-suggestions" class="source-tier-suggestions" aria-live="polite"><div class="source-tier-loading">正在读取分层建议…</div></div>
+              </aside>
+            </div>
+            <div id="source-search-alert" class="inline-alert error source-search-alert" role="alert" hidden></div>
+            <section class="source-search-result-module" aria-labelledby="source-search-result-title">
+              <div class="source-search-result-heading"><div class="source-search-module-title"><span class="source-search-step">03</span><div><h3 id="source-search-result-title">搜索结果</h3><p>按网盘类型分组展示本次正式搜索返回的数据。</p></div></div></div>
+              <div id="source-search-results" class="source-search-results" aria-live="polite"><div class="empty-state compact-empty"><i data-lucide="search" aria-hidden="true"></i><h3>等待搜索</h3><p>选择来源并输入关键词，验证当前生效配置。</p></div></div>
+            </section>
           </section>
         </section>
       </main>
@@ -937,6 +1093,8 @@
       <nav class="mobile-nav" aria-label="移动端主导航">
         <a class="active" href="#overview" data-view="overview"><i data-lucide="layout-dashboard" aria-hidden="true"></i><span>概览</span></a>
         <a href="#resources" data-view="resources"><i data-lucide="database" aria-hidden="true"></i><span>资源</span></a>
+        <a href="#routing" data-view="routing"><i data-lucide="route" aria-hidden="true"></i><span>线路</span></a>
+        <a href="#proxy-pool" data-view="proxy-pool"><i data-lucide="network" aria-hidden="true"></i><span>代理池</span></a>
         <a href="#keywords" data-view="keywords"><i data-lucide="tags" aria-hidden="true"></i><span>关键词</span></a>
         <a href="#runs" data-view="runs"><i data-lucide="activity" aria-hidden="true"></i><span>任务</span></a>
         <a href="#sources" data-view="sources"><i data-lucide="waypoints" aria-hidden="true"></i><span>来源</span></a>
@@ -1274,6 +1432,26 @@
     </form>
   </dialog>
 
+  <dialog id="credential-search-test-dialog" class="dialog wide-dialog credential-search-test-dialog" aria-labelledby="credential-search-test-title">
+    <form id="credential-search-test-form" class="dialog-shell credential-search-test-shell">
+      <header class="dialog-header">
+        <div><p class="eyebrow">SINGLE CREDENTIAL SEARCH</p><h2 id="credential-search-test-title">单账号搜索测试</h2></div>
+        <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x"></i></button>
+      </header>
+      <div class="dialog-body credential-search-test-body">
+        <div class="plugin-credential-context"><span class="plugin-credential-context-icon"><i data-lucide="search-check"></i></span><div><strong>指定凭证诊断</strong><span id="credential-search-test-context">仅使用当前账号</span></div></div>
+        <div class="credential-search-test-query">
+          <label class="field"><span>搜索关键词</span><input id="credential-search-test-keyword" type="search" maxlength="200" required placeholder="输入要验证的资源关键词"></label>
+          <button id="credential-search-test-submit" class="button primary" type="submit"><i data-lucide="search"></i><span>开始测试</span></button>
+        </div>
+        <p class="credential-privacy-note"><i data-lucide="shield-check"></i><span>本次请求强制绕过缓存，只调用当前凭证，不会回退到其他账号，也不会读取用户私有凭证。</span></p>
+        <div id="credential-search-test-alert" class="inline-alert error" role="alert" hidden></div>
+        <div id="credential-search-test-results" class="source-search-results credential-search-test-results" aria-live="polite"></div>
+      </div>
+      <footer class="dialog-footer"><button class="button secondary" type="button" data-action="close-dialog">关闭</button></footer>
+    </form>
+  </dialog>
+
   <dialog id="plugin-qr-dialog" class="dialog" aria-labelledby="plugin-qr-title">
     <div class="dialog-shell qr-dialog-shell">
       <header class="dialog-header"><div><p class="eyebrow">SCAN TO LOGIN</p><h2 id="plugin-qr-title">扫码登录</h2></div><button class="icon-button" type="button" data-action="close-plugin-qr" aria-label="关闭"><i data-lucide="x"></i></button></header>
@@ -1296,6 +1474,58 @@
     </div>
   </dialog>
 
+  <dialog id="mihomo-subscription-dialog" class="dialog form-dialog mihomo-subscription-dialog" aria-labelledby="mihomo-subscription-dialog-title">
+    <form id="mihomo-subscription-form" class="dialog-shell">
+      <header class="dialog-header">
+        <div>
+          <p class="eyebrow">MIHOMO PROVIDER</p>
+          <h2 id="mihomo-subscription-dialog-title">添加订阅</h2>
+        </div>
+        <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
+      </header>
+      <div class="dialog-body form-grid">
+        <input name="id" type="hidden">
+        <label class="field full">
+          <span>订阅名称 <em>*</em></span>
+          <input name="name" type="text" required maxlength="64" autocomplete="off" placeholder="例如：主力机场">
+        </label>
+        <label class="field full">
+          <span>订阅链接 <em data-mihomo-url-required>*</em></span>
+          <input name="url" type="url" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="https://example.com/api/v1/client/subscribe?token=...">
+          <small id="mihomo-subscription-url-help">支持 HTTP / HTTPS 订阅地址。</small>
+        </label>
+        <label class="field full">
+          <span>自动更新周期</span>
+          <select name="interval_seconds">
+            <option value="900">每 15 分钟</option>
+            <option value="1800">每 30 分钟</option>
+            <option value="3600" selected>每 1 小时</option>
+            <option value="21600">每 6 小时</option>
+            <option value="43200">每 12 小时</option>
+            <option value="86400">每 24 小时</option>
+          </select>
+        </label>
+        <label class="field full">
+          <span>订阅下载线路</span>
+          <select name="fetch_via">
+            <option value="rule">跟随 Mihomo 规则</option>
+            <option value="auto">通过“自动选择”</option>
+            <option value="fallback">通过“故障转移”</option>
+            <option value="baseline">通过当前“良心云”线路</option>
+            <option value="direct">服务器直连</option>
+          </select>
+          <small>订阅站点在国内服务器上打不开时，建议选择“自动选择”或“故障转移”。</small>
+        </label>
+        <div class="mihomo-subscription-privacy full"><i data-lucide="lock-keyhole" aria-hidden="true"></i><p><strong>凭据保护</strong><span>订阅地址常包含 TOKEN。保存后管理端只显示域名和脱敏路径，日志也不会记录完整地址。</span></p></div>
+        <p id="mihomo-subscription-form-error" class="form-error full" role="alert" hidden></p>
+      </div>
+      <footer class="dialog-footer">
+        <button class="button secondary" type="button" data-action="close-dialog">取消</button>
+        <button id="mihomo-subscription-save" class="button primary" type="submit"><i data-lucide="save" aria-hidden="true"></i><span>保存订阅</span></button>
+      </footer>
+    </form>
+  </dialog>
+
   <dialog id="confirm-dialog" class="dialog confirm-dialog" aria-labelledby="confirm-title">
     <div class="dialog-shell">
       <div class="confirm-icon"><i data-lucide="triangle-alert" aria-hidden="true"></i></div>
@@ -1312,6 +1542,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script src="./assets/app.js"></script>
+  <script src="./assets/app.js?v=202607202115"></script>
 </body>
 </html>

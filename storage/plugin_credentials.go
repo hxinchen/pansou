@@ -16,7 +16,8 @@ const pluginCredentialColumns = `
 	ciphertext, nonce, key_version, credential_fingerprint, revision, owner_enabled,
 	admin_suspended_at, admin_suspended_by, status, expires_at, cooldown_until,
 	last_used_at, last_success_at, last_failure_at, last_error_code,
-	consecutive_failures, created_at, updated_at`
+	consecutive_failures, last_health_check_at, last_health_status,
+	last_health_error_code, created_at, updated_at`
 
 func scanPluginCredential(row rowScanner) (PluginCredential, error) {
 	var credential PluginCredential
@@ -30,7 +31,9 @@ func scanPluginCredential(row rowScanner) (PluginCredential, error) {
 		&credential.AdminSuspendedAt, &credential.AdminSuspendedBy, &credential.Status,
 		&credential.ExpiresAt, &credential.CooldownUntil, &credential.LastUsedAt,
 		&credential.LastSuccessAt, &credential.LastFailureAt, &credential.LastErrorCode,
-		&credential.ConsecutiveFailures, &credential.CreatedAt, &credential.UpdatedAt,
+		&credential.ConsecutiveFailures, &credential.LastHealthCheckAt,
+		&credential.LastHealthStatus, &credential.LastHealthErrorCode,
+		&credential.CreatedAt, &credential.UpdatedAt,
 	)
 	if err == nil {
 		credential.PublicMetadata = decodeStrictJSONObject(metadata)
@@ -200,6 +203,42 @@ func (s *Store) ListPluginCredentials(ctx context.Context, filter PluginCredenti
 		return PluginCredentialPage{}, fmt.Errorf("iterate plugin credentials: %w", err)
 	}
 	return PluginCredentialPage{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func (s *Store) ListPluginCredentialHealthCandidates(ctx context.Context, pluginKeys []string, dueBefore time.Time, limit int) ([]PluginCredential, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("storage is disabled")
+	}
+	pluginKeys = normalizeStringList(pluginKeys)
+	if len(pluginKeys) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+pluginCredentialColumns+` FROM plugin_credentials
+		WHERE plugin_key=ANY($1::text[])
+			AND owner_enabled=TRUE AND admin_suspended_at IS NULL
+			AND status IN ('active','expired')
+			AND (last_health_check_at IS NULL OR last_health_check_at<=$2)
+		ORDER BY last_health_check_at ASC NULLS FIRST, id ASC
+		LIMIT $3`, pluginKeys, dueBefore, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list credential health candidates: %w", err)
+	}
+	defer rows.Close()
+	credentials := make([]PluginCredential, 0, limit)
+	for rows.Next() {
+		credential, scanErr := scanPluginCredential(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan credential health candidate: %w", scanErr)
+		}
+		credentials = append(credentials, credential)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate credential health candidates: %w", err)
+	}
+	return credentials, nil
 }
 
 func buildPluginCredentialWhere(filter PluginCredentialFilter) (string, []any, error) {
@@ -613,6 +652,50 @@ func (s *Store) RecordPluginCredentialFailure(ctx context.Context, input Credent
 	return nil
 }
 
+func (s *Store) RecordPluginCredentialHealth(ctx context.Context, input CredentialHealthInput) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("storage is disabled")
+	}
+	if !validCredentialHealthStatus(input.HealthStatus) {
+		return fmt.Errorf("%w: credential health status %q", ErrInvalid, input.HealthStatus)
+	}
+	credentialStatus := strings.TrimSpace(input.CredentialStatus)
+	if credentialStatus != "" && !validCredentialStatus(credentialStatus) {
+		return fmt.Errorf("%w: credential status %q", ErrInvalid, credentialStatus)
+	}
+	checkedAt := input.CheckedAt
+	if checkedAt.IsZero() {
+		checkedAt = s.now()
+	}
+	command, err := s.pool.Exec(ctx, `UPDATE plugin_credentials SET
+		last_health_check_at=$2,last_health_status=$3,last_health_error_code=$4,
+		status=CASE WHEN $5='' THEN status ELSE $5 END,
+		last_error_code=CASE
+			WHEN $5='invalid' THEN $4
+			WHEN $5='active' THEN ''
+			ELSE last_error_code
+		END,
+		updated_at=now()
+		WHERE public_id=$1
+			AND (last_health_check_at IS NULL OR last_health_check_at<$2)`,
+		strings.TrimSpace(input.PublicID), checkedAt, input.HealthStatus,
+		strings.TrimSpace(input.ErrorCode), credentialStatus)
+	if err != nil {
+		return fmt.Errorf("record credential health: %w", err)
+	}
+	if command.RowsAffected() == 0 {
+		var exists bool
+		if scanErr := s.pool.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM plugin_credentials WHERE public_id=$1)`, input.PublicID).Scan(&exists); scanErr != nil {
+			return fmt.Errorf("check credential health: %w", scanErr)
+		}
+		if !exists {
+			return ErrNotFound
+		}
+	}
+	return nil
+}
+
 func validCredentialScopeOwner(scope string, ownerUserID *int64) bool {
 	if scope == CredentialScopeUserPrivate {
 		return ownerUserID != nil && *ownerUserID > 0
@@ -626,6 +709,11 @@ func validCredentialScope(scope string) bool {
 
 func validCredentialStatus(status string) bool {
 	return status == CredentialStatusActive || status == CredentialStatusInvalid || status == CredentialStatusExpired
+}
+
+func validCredentialHealthStatus(status string) bool {
+	return status == CredentialHealthUnknown || status == CredentialHealthHealthy ||
+		status == CredentialHealthError || status == CredentialHealthInvalid
 }
 
 func clearCredentialSecrets(credential *PluginCredential) {

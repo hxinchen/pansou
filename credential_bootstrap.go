@@ -20,7 +20,8 @@ import (
 
 const legacyCredentialMigrationKey = "legacy_plugin_credentials_v1"
 
-var accountPluginKeys = []string{"gying", "panlian", "qqpd", "weibo"}
+var managedCredentialPluginKeys = []string{"aisoupan", "gying", "panlian", "qqpd", "weibo"}
+var legacyCredentialPluginKeys = []string{"gying", "panlian", "qqpd", "weibo"}
 
 func bootstrapCredentialService(ctx context.Context, store *storage.Store, sources *sourceconfig.Service) (*credential.Service, error) {
 	if store == nil {
@@ -74,7 +75,7 @@ func accountPluginsEnabled(sources *sourceconfig.Service) bool {
 	if snapshot == nil {
 		return false
 	}
-	for _, key := range accountPluginKeys {
+	for _, key := range managedCredentialPluginKeys {
 		if snapshot.Config.Plugins[key].Enabled {
 			return true
 		}
@@ -89,7 +90,7 @@ type legacyCredentialFile struct {
 
 func discoverLegacyCredentialFiles(cachePath string) ([]legacyCredentialFile, error) {
 	result := make([]legacyCredentialFile, 0)
-	for _, key := range accountPluginKeys {
+	for _, key := range legacyCredentialPluginKeys {
 		directory := filepath.Join(cachePath, key+"_users")
 		entries, err := os.ReadDir(directory)
 		if errors.Is(err, os.ErrNotExist) {
@@ -123,8 +124,8 @@ func legacyAuxiliaryFile(name string) bool {
 }
 
 func migrateLegacyCredentials(ctx context.Context, store *storage.Store, service *credential.Service, sources *sourceconfig.Service, files []legacyCredentialFile) error {
-	parsers := make(map[string]credential.LegacyCredentialParser, len(accountPluginKeys))
-	closers := make([]plugin.AsyncSearchPlugin, 0, len(accountPluginKeys))
+	parsers := make(map[string]credential.LegacyCredentialParser, len(legacyCredentialPluginKeys))
+	closers := make([]plugin.AsyncSearchPlugin, 0, len(legacyCredentialPluginKeys))
 	defer func() {
 		for _, instance := range closers {
 			if closeable, ok := instance.(plugin.CloseablePlugin); ok {
@@ -132,7 +133,7 @@ func migrateLegacyCredentials(ctx context.Context, store *storage.Store, service
 			}
 		}
 	}()
-	for _, key := range accountPluginKeys {
+	for _, key := range legacyCredentialPluginKeys {
 		instance, err := configuredCredentialPlugin(key, sources)
 		if err != nil {
 			return err
@@ -146,8 +147,8 @@ func migrateLegacyCredentials(ctx context.Context, store *storage.Store, service
 	}
 
 	prepared := make([]storage.CreatePluginCredentialInput, 0, len(files))
-	counts := make(map[string]int, len(accountPluginKeys))
-	skippedCounts := make(map[string]int, len(accountPluginKeys))
+	counts := make(map[string]int, len(legacyCredentialPluginKeys))
+	skippedCounts := make(map[string]int, len(legacyCredentialPluginKeys))
 	for _, file := range files {
 		data, err := os.ReadFile(file.Path)
 		if err != nil {
@@ -238,8 +239,25 @@ func credentialAdapterMap(manager *plugin.PluginManager) map[string]any {
 			adapters[strings.ToLower(instance.Name())] = instance
 			continue
 		}
+		if _, token := instance.(credential.TokenLoginAdapter); token {
+			adapters[strings.ToLower(instance.Name())] = instance
+			continue
+		}
 		if _, qr := instance.(credential.QRLoginAdapter); qr {
 			adapters[strings.ToLower(instance.Name())] = instance
+		}
+	}
+	return adapters
+}
+
+func credentialHealthAdapterMap(manager *plugin.PluginManager) map[string]credential.HealthCheckAdapter {
+	adapters := make(map[string]credential.HealthCheckAdapter)
+	if manager == nil {
+		return adapters
+	}
+	for _, instance := range manager.GetPlugins() {
+		if adapter, ok := instance.(credential.HealthCheckAdapter); ok {
+			adapters[strings.ToLower(instance.Name())] = adapter
 		}
 	}
 	return adapters
