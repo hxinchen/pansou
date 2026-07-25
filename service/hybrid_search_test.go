@@ -21,6 +21,19 @@ type fakeLiveSearch struct {
 	forced   []bool
 	response model.SearchResponse
 	err      error
+	manager  *plugin.PluginManager
+}
+
+type broadDatabasePlugin struct {
+	*plugin.BaseAsyncPlugin
+}
+
+func newBroadDatabasePlugin(name string) *broadDatabasePlugin {
+	return &broadDatabasePlugin{BaseAsyncPlugin: plugin.NewBaseAsyncPluginWithFilter(name, 1, true)}
+}
+
+func (*broadDatabasePlugin) Search(string, map[string]interface{}) ([]model.SearchResult, error) {
+	return nil, nil
 }
 
 func (f *fakeLiveSearch) Search(_ string, _ []string, _ int, force bool, _ string, _ string, _ []string, _ []string, _ map[string]interface{}) (model.SearchResponse, error) {
@@ -31,7 +44,7 @@ func (f *fakeLiveSearch) Search(_ string, _ []string, _ int, force bool, _ strin
 	return f.response, f.err
 }
 
-func (f *fakeLiveSearch) GetPluginManager() *plugin.PluginManager { return nil }
+func (f *fakeLiveSearch) GetPluginManager() *plugin.PluginManager { return f.manager }
 
 type contextAwareLiveSearch struct {
 	fakeLiveSearch
@@ -245,6 +258,28 @@ func TestHybridDatabaseSearchFiltersBeforePagingAndReadsEveryPage(t *testing.T) 
 	}
 	if store.queries[0].Keyword != "" {
 		t.Fatalf("database search requires keyword attribution: %q", store.queries[0].Keyword)
+	}
+}
+
+func TestHybridDatabaseBroadPluginFiltersRemainKeywordBound(t *testing.T) {
+	manager := plugin.NewPluginManager()
+	manager.RegisterPlugin(newBroadDatabasePlugin("broad"))
+	hybrid := NewHybridSearchService(&fakeLiveSearch{manager: manager}, &fakeResourceStore{}, time.Hour)
+
+	filters := hybrid.databasePluginFilters(storage.ResourceFilter{TitleQuery: "sample"}, []string{"broad"})
+	if len(filters) != 2 {
+		t.Fatalf("filters = %#v, want title and attribution filters", filters)
+	}
+	if filters[0].TitleQuery != "sample" || filters[0].Keyword != "" {
+		t.Fatalf("title filter = %#v", filters[0])
+	}
+	if filters[1].TitleQuery != "" || filters[1].Keyword != "sample" {
+		t.Fatalf("attribution filter = %#v", filters[1])
+	}
+	for _, filter := range filters {
+		if filter.TitleQuery == "" && filter.Keyword == "" {
+			t.Fatalf("unbounded plugin filter = %#v", filter)
+		}
 	}
 }
 

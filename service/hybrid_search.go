@@ -228,7 +228,6 @@ func (s *HybridSearchService) databasePluginFilters(base storage.ResourceFilter,
 	if len(names) == 0 {
 		return nil
 	}
-	strict := make([]string, 0, len(names))
 	broad := make([]string, 0)
 	instances := make(map[string]plugin.AsyncSearchPlugin)
 	if manager := s.GetPluginManager(); manager != nil {
@@ -240,23 +239,20 @@ func (s *HybridSearchService) databasePluginFilters(base storage.ResourceFilter,
 		instance := instances[strings.ToLower(name)]
 		if instance != nil && instance.SkipServiceFilter() {
 			broad = append(broad, name)
-		} else {
-			strict = append(strict, name)
 		}
 	}
 	filters := make([]storage.ResourceFilter, 0, 2)
-	if len(strict) > 0 {
-		filter := base
-		filter.SourceTypes = []string{"plugin"}
-		filter.SourceKeys = strict
-		filters = append(filters, filter)
-	}
+	filter := base
+	filter.SourceTypes = []string{"plugin"}
+	filter.SourceKeys = names
+	filters = append(filters, filter)
 	if len(broad) > 0 {
-		filter := base
-		filter.TitleQuery = ""
-		filter.SourceTypes = []string{"plugin"}
-		filter.SourceKeys = broad
-		filters = append(filters, filter)
+		attributionFilter := base
+		attributionFilter.Keyword = base.TitleQuery
+		attributionFilter.TitleQuery = ""
+		attributionFilter.SourceTypes = []string{"plugin"}
+		attributionFilter.SourceKeys = broad
+		filters = append(filters, attributionFilter)
 	}
 	return filters
 }
