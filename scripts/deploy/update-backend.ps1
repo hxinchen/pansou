@@ -15,6 +15,9 @@ param(
     [switch]$EnableProxyPool,
     [int]$LinkCheckWorkers = 8,
     [int]$LinkCheckPerPlatform = 2,
+	[int]$ResourceRetentionDays = 60,
+	[int]$ResourceCleanupIntervalSeconds = 86400,
+	[int]$ResourceCleanupBatchSize = 1000,
     [int]$GracefulStopSeconds = 30,
     [switch]$SkipPublicCheck
 )
@@ -157,6 +160,9 @@ PROXY_POOL_ENABLED_VALUE=$proxyPoolEnabledQ
 GRACEFUL_STOP_SECONDS=$GracefulStopSeconds
 LINK_CHECK_WORKERS_VALUE=$LinkCheckWorkers
 LINK_CHECK_PLATFORM_VALUE=$LinkCheckPerPlatform
+RESOURCE_RETENTION_DAYS_VALUE=$ResourceRetentionDays
+RESOURCE_CLEANUP_INTERVAL_VALUE=$ResourceCleanupIntervalSeconds
+RESOURCE_CLEANUP_BATCH_SIZE_VALUE=$ResourceCleanupBatchSize
 ROLLBACK_CONTAINER=pansou-api-rollback
 
 mkdir -p "`$REMOTE_ROOT/build" "`$REMOTE_ROOT/cache" "`$REMOTE_ROOT/backups" "`$REMOTE_ROOT/scripts"
@@ -330,14 +336,12 @@ pansou_psql() {
 }
 
 if [ "`$(pansou_psql -Atqc "SELECT to_regclass('public.resources')")" = "resources" ]; then
-  echo 'Preparing pg_trgm indexes while the current API remains online...'
+  echo 'Preparing the title pg_trgm index while the current API remains online...'
   pansou_psql -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm'
   pansou_psql -v ON_ERROR_STOP=1 -c 'CREATE INDEX CONCURRENTLY IF NOT EXISTS resources_title_trgm_idx ON resources USING gin (title gin_trgm_ops)'
-  pansou_psql -v ON_ERROR_STOP=1 -c 'CREATE INDEX CONCURRENTLY IF NOT EXISTS resources_content_trgm_idx ON resources USING gin (content gin_trgm_ops)'
-  pansou_psql -v ON_ERROR_STOP=1 -c 'CREATE INDEX CONCURRENTLY IF NOT EXISTS resources_url_trgm_idx ON resources USING gin (url gin_trgm_ops)'
-  VALID_TRGM_INDEXES=`$(pansou_psql -Atqc "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE c.relname IN ('resources_title_trgm_idx','resources_content_trgm_idx','resources_url_trgm_idx') AND i.indisvalid AND i.indisready")
-  if [ "`$VALID_TRGM_INDEXES" -ne 3 ]; then
-    echo "Expected 3 valid trigram indexes, found `$VALID_TRGM_INDEXES. Existing API was not stopped." >&2
+  VALID_TRGM_INDEXES=`$(pansou_psql -Atqc "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE c.relname='resources_title_trgm_idx' AND i.indisvalid AND i.indisready")
+  if [ "`$VALID_TRGM_INDEXES" -ne 1 ]; then
+    echo "Expected a valid title trigram index, found `$VALID_TRGM_INDEXES. Existing API was not stopped." >&2
     exit 1
   fi
 fi
@@ -434,6 +438,9 @@ if ! docker run -d \
 	-e LINK_CHECK_BACKLOG_INTERVAL_SECONDS=300 \
 	-e LINK_CHECK_WRITE_BATCH_SIZE=16 \
 	-e LINK_CHECK_WRITE_FLUSH_SECONDS=1 \
+	-e RESOURCE_RETENTION_DAYS=`$RESOURCE_RETENTION_DAYS_VALUE \
+	-e RESOURCE_CLEANUP_INTERVAL_SECONDS=`$RESOURCE_CLEANUP_INTERVAL_VALUE \
+	-e RESOURCE_CLEANUP_BATCH_SIZE=`$RESOURCE_CLEANUP_BATCH_SIZE_VALUE \
   -e CACHE_PATH=/app/cache \
   -e "TRUSTED_PROXIES=`$TRUSTED_PROXIES_VALUE" \
   -e "PROXY=`$PROXY_URL_VALUE" \

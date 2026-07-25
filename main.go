@@ -249,6 +249,7 @@ func startServer() {
 	api.SetUsageServices(nil, nil)
 	if store != nil {
 		service.NewSchedulerMetricsRecorder(store, config.AppConfig.SearchMetricsInterval).Start(appCtx)
+		startResourceRetentionCleanup(appCtx, store)
 		credentialHealth := credential.NewHealthMonitor(store, credentialService, credentialHealthAdapterMap(pluginManager), credential.HealthMonitorConfig{
 			Enabled:      config.AppConfig.GyingHealthCheckEnabled,
 			Interval:     config.AppConfig.GyingHealthCheckInterval,

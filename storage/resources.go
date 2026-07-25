@@ -31,7 +31,6 @@ func sanitizeResourceInput(input ResourceInput) ResourceInput {
 	input.Source.MessageID = strings.ToValidUTF8(input.Source.MessageID, "")
 	input.Source.UniqueID = strings.ToValidUTF8(input.Source.UniqueID, "")
 	input.Source.Title = strings.ToValidUTF8(input.Source.Title, "")
-	input.Source.Content = strings.ToValidUTF8(input.Source.Content, "")
 	input.Source.Metadata = sanitizeUTF8Map(input.Source.Metadata)
 	return input
 }
@@ -225,13 +224,12 @@ func upsertResourceSource(ctx context.Context, tx pgx.Tx, resourceID int64, norm
 	_, err := tx.Exec(ctx, `
 		INSERT INTO resource_sources (
 			resource_id, source_type, source_key, source_identity, message_id, unique_id,
-			title, content, discovered_at, first_seen_at, last_seen_at, source_metadata
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11::jsonb)
+			title, discovered_at, first_seen_at, last_seen_at, source_metadata
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10::jsonb)
 		ON CONFLICT (resource_id, source_type, source_key, source_identity) DO UPDATE SET
 			message_id = CASE WHEN resource_sources.message_id='' THEN EXCLUDED.message_id ELSE resource_sources.message_id END,
 			unique_id = CASE WHEN resource_sources.unique_id='' THEN EXCLUDED.unique_id ELSE resource_sources.unique_id END,
 			title = CASE WHEN char_length(EXCLUDED.title)>char_length(resource_sources.title) THEN EXCLUDED.title ELSE resource_sources.title END,
-			content = CASE WHEN char_length(EXCLUDED.content)>char_length(resource_sources.content) THEN EXCLUDED.content ELSE resource_sources.content END,
 			discovered_at = GREATEST(resource_sources.discovered_at, EXCLUDED.discovered_at),
 			first_seen_at = LEAST(resource_sources.first_seen_at, EXCLUDED.first_seen_at),
 			last_seen_at = GREATEST(resource_sources.last_seen_at, EXCLUDED.last_seen_at),
@@ -239,7 +237,7 @@ func upsertResourceSource(ctx context.Context, tx pgx.Tx, resourceID int64, norm
 			source_metadata = resource_sources.source_metadata || EXCLUDED.source_metadata`,
 		resourceID, strings.TrimSpace(input.SourceType), strings.TrimSpace(input.SourceKey), identity,
 		strings.TrimSpace(input.MessageID), strings.TrimSpace(input.UniqueID), strings.TrimSpace(input.Title),
-		strings.TrimSpace(input.Content), discoveredAt, seenAt, metadataJSON(input.Metadata),
+		discoveredAt, seenAt, metadataJSON(input.Metadata),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert resource source: %w", err)
@@ -345,7 +343,7 @@ func (s *Store) upsertSearchResponse(ctx context.Context, keyword, keywordType, 
 				Source: ResourceSourceInput{
 					SourceType: sourceType, SourceKey: sourceKey,
 					SourceIdentity: firstNonEmpty(result.UniqueID, result.MessageID), MessageID: result.MessageID,
-					UniqueID: result.UniqueID, Title: result.Title, Content: result.Content,
+					UniqueID: result.UniqueID, Title: result.Title,
 					DiscoveredAt: discoveredAt, Metadata: metadata,
 				},
 				Keyword: keyword, KeywordType: keywordType,
@@ -685,19 +683,6 @@ func (s *Store) loadResourceAssociationSummaries(ctx context.Context, resources 
 	return nil
 }
 
-func scanResourceSource(row rowScanner) (ResourceSource, error) {
-	var source ResourceSource
-	var metadata []byte
-	err := row.Scan(&source.ID, &source.ResourceID, &source.SourceType, &source.SourceKey,
-		&source.SourceIdentity, &source.MessageID, &source.UniqueID, &source.Title, &source.Content,
-		&source.DiscoveredAt, &source.FirstSeenAt, &source.LastSeenAt, &source.DiscoveryCount, &metadata)
-	if err != nil {
-		return ResourceSource{}, err
-	}
-	source.SourceMetadata = decodeMetadata(metadata)
-	return source, nil
-}
-
 func scanResourceSourceListItem(row rowScanner) (ResourceSource, error) {
 	var source ResourceSource
 	err := row.Scan(&source.ID, &source.ResourceID, &source.SourceType, &source.SourceKey,
@@ -799,11 +784,16 @@ func (s *Store) loadResourceAssociations(ctx context.Context, resources []Resour
 		byID[resources[index].ID] = &resources[index]
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, resource_id, source_type, source_key, source_identity, message_id,
-			unique_id, title, content, discovered_at, first_seen_at, last_seen_at,
-			discovery_count, source_metadata
-		FROM resource_sources WHERE resource_id=ANY($1::bigint[])
-		ORDER BY resource_id, last_seen_at DESC, id DESC`, ids)
+		SELECT source.id, source.resource_id, source.source_type, source.source_key,
+			source.source_identity, source.message_id, source.unique_id, source.title,
+			source.discovered_at, source.first_seen_at, source.last_seen_at,
+			source.discovery_count, source.source_metadata
+		FROM unnest($1::bigint[]) AS ids(id)
+		CROSS JOIN LATERAL (
+			SELECT * FROM resource_sources rs WHERE rs.resource_id=ids.id
+			ORDER BY rs.last_seen_at DESC, rs.id DESC LIMIT 1
+		) source
+		ORDER BY source.resource_id`, ids)
 	if err != nil {
 		return fmt.Errorf("load resource sources: %w", err)
 	}
@@ -811,7 +801,7 @@ func (s *Store) loadResourceAssociations(ctx context.Context, resources []Resour
 		var source ResourceSource
 		var metadata []byte
 		if err := rows.Scan(&source.ID, &source.ResourceID, &source.SourceType, &source.SourceKey,
-			&source.SourceIdentity, &source.MessageID, &source.UniqueID, &source.Title, &source.Content,
+			&source.SourceIdentity, &source.MessageID, &source.UniqueID, &source.Title,
 			&source.DiscoveredAt, &source.FirstSeenAt, &source.LastSeenAt, &source.DiscoveryCount, &metadata); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan resource source: %w", err)

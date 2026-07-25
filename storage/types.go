@@ -87,7 +87,6 @@ type ResourceSource struct {
 	MessageID      string         `json:"message_id,omitempty"`
 	UniqueID       string         `json:"unique_id,omitempty"`
 	Title          string         `json:"title,omitempty"`
-	Content        string         `json:"content,omitempty"`
 	DiscoveredAt   time.Time      `json:"discovered_at"`
 	FirstSeenAt    time.Time      `json:"first_seen_at"`
 	LastSeenAt     time.Time      `json:"last_seen_at"`
@@ -113,7 +112,6 @@ type ResourceSourceInput struct {
 	MessageID      string
 	UniqueID       string
 	Title          string
-	Content        string
 	DiscoveredAt   time.Time
 	Metadata       map[string]any
 }

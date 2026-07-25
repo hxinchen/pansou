@@ -96,10 +96,10 @@ func TestPostgresStorageLifecycle(t *testing.T) {
 	inputs := []ResourceInput{
 		{URL: "https://pan.example/share/item?pwd=111&utm_source=one", Title: "alpha title", Content: "resource list private content", DiscoveredAt: now,
 			Source: ResourceSourceInput{SourceType: "tg", SourceKey: "channel-a", SourceIdentity: "message-a",
-				Content: "source list private content", Metadata: map[string]any{"token": "private"}}, Keyword: "Alpha"},
+				Metadata: map[string]any{"token": "private"}}, Keyword: "Alpha"},
 		{URL: "https://PAN.example/share/item?pwd=222&utm_source=two", Title: "a more complete alpha title", DiscoveredAt: now.Add(time.Minute),
 			Source: ResourceSourceInput{SourceType: "plugin", SourceKey: "pansearch", SourceIdentity: "result-a",
-				Content: "second source private content", Metadata: map[string]any{"token": "private-two"}}, Keyword: "Beta"},
+				Metadata: map[string]any{"token": "private-two"}}, Keyword: "Beta"},
 	}
 	var wait sync.WaitGroup
 	errorsByUpsert := make(chan error, len(inputs))
@@ -133,12 +133,13 @@ func TestPostgresStorageLifecycle(t *testing.T) {
 	if err != nil || resourceSources.Total != 2 || len(resourceSources.Items) != 1 {
 		t.Fatalf("resource sources page = %+v err=%v", resourceSources, err)
 	}
-	if resourceSources.Items[0].Content != "" || resourceSources.Items[0].SourceMetadata != nil {
+	if resourceSources.Items[0].SourceMetadata != nil {
 		t.Fatalf("resource source page leaked large fields: %+v", resourceSources.Items[0])
 	}
 	fullPage, err := store.ListResources(ctx, ResourceFilter{IncludeInvalid: true})
 	if err != nil || len(fullPage.Items) != 1 || fullPage.Items[0].Password == "" ||
-		fullPage.Items[0].Content == "" || len(fullPage.Items[0].Sources) != 2 {
+		fullPage.Items[0].Content == "" || len(fullPage.Items[0].Sources) != 1 ||
+		fullPage.Items[0].Sources[0].SourceType != "plugin" {
 		t.Fatalf("full resource search shape = %+v err=%v", fullPage, err)
 	}
 	resourceKeywords, err := store.ListResourceKeywords(ctx, page.Items[0].ID, ResourceAssociationFilter{PageSize: 1})
