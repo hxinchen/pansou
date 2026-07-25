@@ -330,17 +330,54 @@ func (s *Store) UpdateKeyword(ctx context.Context, id int64, input UpdateKeyword
 			WHERE keyword_id=$1 AND normalized_keyword<>$2`, updated.ID, updated.NormalizedKeyword); err != nil {
 			return Keyword{}, fmt.Errorf("remove renamed keyword associations: %w", err)
 		}
+		if err := mergeNormalizedKeywordLinks(ctx, tx, updated); err != nil {
+			return Keyword{}, err
+		}
 	}
 	if input.KeywordType != nil {
 		if _, err := tx.Exec(ctx, `UPDATE resource_keywords SET keyword_type=$2
 			WHERE keyword_id=$1`, updated.ID, updated.KeywordType); err != nil {
 			return Keyword{}, fmt.Errorf("update resource keyword type: %w", err)
 		}
+		if _, err := tx.Exec(ctx, `UPDATE resource_keyword_terms SET
+			keyword_type=$2, updated_at=now()
+			WHERE id IN (SELECT term_id FROM resource_keyword_links WHERE keyword_id=$1)`, updated.ID, updated.KeywordType); err != nil {
+			return Keyword{}, fmt.Errorf("update normalized resource keyword type: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Keyword{}, fmt.Errorf("commit update keyword: %w", err)
 	}
 	return updated, nil
+}
+
+func mergeNormalizedKeywordLinks(ctx context.Context, tx pgx.Tx, keyword Keyword) error {
+	var termID int64
+	if err := tx.QueryRow(ctx, `INSERT INTO resource_keyword_terms (
+		normalized_keyword, keyword, keyword_type
+	) VALUES ($1, $2, $3)
+	ON CONFLICT (normalized_keyword) DO UPDATE SET
+		keyword=EXCLUDED.keyword, keyword_type=EXCLUDED.keyword_type, updated_at=now()
+	RETURNING id`, keyword.NormalizedKeyword, keyword.Keyword, keyword.KeywordType).Scan(&termID); err != nil {
+		return fmt.Errorf("upsert renamed resource keyword term: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO resource_keyword_links (
+		resource_id, term_id, keyword_id, first_seen_at, last_seen_at, discovery_count
+	)
+	SELECT resource_id, $2, $1, first_seen_at, last_seen_at, discovery_count
+	FROM resource_keyword_links WHERE keyword_id=$1 AND term_id<>$2
+	ON CONFLICT (resource_id, term_id) DO UPDATE SET
+		keyword_id=$1,
+		first_seen_at=LEAST(resource_keyword_links.first_seen_at, EXCLUDED.first_seen_at),
+		last_seen_at=GREATEST(resource_keyword_links.last_seen_at, EXCLUDED.last_seen_at),
+		discovery_count=resource_keyword_links.discovery_count + EXCLUDED.discovery_count`, keyword.ID, termID); err != nil {
+		return fmt.Errorf("merge normalized keyword associations: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM resource_keyword_links
+		WHERE keyword_id=$1 AND term_id<>$2`, keyword.ID, termID); err != nil {
+		return fmt.Errorf("remove renamed normalized keyword associations: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) DeleteKeyword(ctx context.Context, id int64) error {

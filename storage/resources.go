@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
@@ -188,6 +189,9 @@ func (s *Store) upsertResourceTx(ctx context.Context, tx pgx.Tx, input ResourceI
 		return UpsertResult{}, fmt.Errorf("upsert resource: %w", scanErr)
 	}
 	result.Resource = resource
+	if err := attachResourceContent(ctx, tx, resource.ID, resource.Content); err != nil {
+		return UpsertResult{}, err
+	}
 
 	if strings.TrimSpace(input.Source.SourceType) != "" {
 		if err := upsertResourceSource(ctx, tx, resource.ID, normalizedURL, seenAt, input.Source); err != nil {
@@ -213,6 +217,32 @@ func scanResourceWithInserted(row rowScanner, inserted *bool) (Resource, error) 
 		inserted,
 	)
 	return resource, err
+}
+
+func attachResourceContent(ctx context.Context, tx pgx.Tx, resourceID int64, content string) error {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
+	}
+	hash := sha256.Sum256([]byte(content))
+	var contentID int64
+	err := tx.QueryRow(ctx, `INSERT INTO resource_contents (content_hash, content)
+		VALUES ($1, $2) ON CONFLICT (content_hash) DO NOTHING RETURNING id`, hash[:], content).Scan(&contentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `SELECT id FROM resource_contents
+			WHERE content_hash=$1 AND content=$2`, hash[:], content).Scan(&contentID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("resource content hash collision")
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("upsert resource content: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE resources SET content_id=$2
+		WHERE id=$1 AND content_id IS DISTINCT FROM $2`, resourceID, contentID); err != nil {
+		return fmt.Errorf("attach resource content: %w", err)
+	}
+	return nil
 }
 
 func upsertResourceSource(ctx context.Context, tx pgx.Tx, resourceID int64, normalizedURL string, seenAt time.Time, input ResourceSourceInput) error {
@@ -265,6 +295,40 @@ func upsertResourceKeyword(ctx context.Context, tx pgx.Tx, resourceID int64, see
 	)
 	if err != nil {
 		return fmt.Errorf("upsert resource keyword: %w", err)
+	}
+	return upsertNormalizedResourceKeyword(ctx, tx, resourceID, seenAt, keyword, normalized, keywordType)
+}
+
+func upsertNormalizedResourceKeyword(ctx context.Context, tx pgx.Tx, resourceID int64, seenAt time.Time, keyword, normalized, keywordType string) error {
+	var termID int64
+	err := tx.QueryRow(ctx, `INSERT INTO resource_keyword_terms (
+		normalized_keyword, keyword, keyword_type
+	) VALUES ($1, $2, $3)
+	ON CONFLICT (normalized_keyword) DO UPDATE SET
+		keyword = CASE WHEN char_length(EXCLUDED.keyword)>char_length(resource_keyword_terms.keyword)
+			THEN EXCLUDED.keyword ELSE resource_keyword_terms.keyword END,
+		keyword_type = CASE WHEN resource_keyword_terms.keyword_type='general'
+			THEN EXCLUDED.keyword_type ELSE resource_keyword_terms.keyword_type END,
+		updated_at = now()
+	WHERE char_length(EXCLUDED.keyword)>char_length(resource_keyword_terms.keyword)
+		OR (resource_keyword_terms.keyword_type='general' AND EXCLUDED.keyword_type<>'general')
+	RETURNING id`, normalized, strings.TrimSpace(keyword), keywordType).Scan(&termID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `SELECT id FROM resource_keyword_terms
+			WHERE normalized_keyword=$1`, normalized).Scan(&termID)
+	}
+	if err != nil {
+		return fmt.Errorf("upsert resource keyword term: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO resource_keyword_links (
+		resource_id, term_id, keyword_id, first_seen_at, last_seen_at
+	) VALUES ($1, $2, (SELECT id FROM keywords WHERE normalized_keyword=$3), $4, $4)
+	ON CONFLICT (resource_id, term_id) DO UPDATE SET
+		keyword_id = COALESCE(resource_keyword_links.keyword_id, EXCLUDED.keyword_id),
+		first_seen_at = LEAST(resource_keyword_links.first_seen_at, EXCLUDED.first_seen_at),
+		last_seen_at = GREATEST(resource_keyword_links.last_seen_at, EXCLUDED.last_seen_at),
+		discovery_count = resource_keyword_links.discovery_count + 1`, resourceID, termID, normalized, seenAt); err != nil {
+		return fmt.Errorf("upsert normalized resource keyword: %w", err)
 	}
 	return nil
 }

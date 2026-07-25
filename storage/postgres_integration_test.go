@@ -142,6 +142,27 @@ func TestPostgresStorageLifecycle(t *testing.T) {
 		fullPage.Items[0].Sources[0].SourceType != "plugin" {
 		t.Fatalf("full resource search shape = %+v err=%v", fullPage, err)
 	}
+	var contentRows, termRows, linkRows int
+	if err := store.pool.QueryRow(ctx, "SELECT count(*) FROM resource_contents").Scan(&contentRows); err != nil {
+		t.Fatalf("count resource contents: %v", err)
+	}
+	if err := store.pool.QueryRow(ctx, "SELECT count(*) FROM resource_keyword_terms").Scan(&termRows); err != nil {
+		t.Fatalf("count resource keyword terms: %v", err)
+	}
+	if err := store.pool.QueryRow(ctx, "SELECT count(*) FROM resource_keyword_links").Scan(&linkRows); err != nil {
+		t.Fatalf("count resource keyword links: %v", err)
+	}
+	if contentRows != 1 || termRows != 2 || linkRows != 2 {
+		t.Fatalf("normalized payload rows content/terms/links = %d/%d/%d, want 1/2/2", contentRows, termRows, linkRows)
+	}
+	var attachedContent string
+	if err := store.pool.QueryRow(ctx, `SELECT rc.content FROM resources r
+		JOIN resource_contents rc ON rc.id=r.content_id WHERE r.id=$1`, fullPage.Items[0].ID).Scan(&attachedContent); err != nil {
+		t.Fatalf("load attached resource content: %v", err)
+	}
+	if attachedContent != fullPage.Items[0].Content {
+		t.Fatalf("attached content = %q, want %q", attachedContent, fullPage.Items[0].Content)
+	}
 	resourceKeywords, err := store.ListResourceKeywords(ctx, page.Items[0].ID, ResourceAssociationFilter{PageSize: 1})
 	if err != nil || resourceKeywords.Total != 2 || len(resourceKeywords.Items) != 1 {
 		t.Fatalf("resource keywords page = %+v err=%v", resourceKeywords, err)
