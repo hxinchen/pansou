@@ -31,17 +31,16 @@ func TestPostgresSourceContributionsAndAttribution(t *testing.T) {
 		sourceType string
 		sourceKey  string
 		identity   string
-		count      int64
 		subSource  string
 	}
 	fixtures := []sourceFixture{
-		{resourceID: resourceIDs[0], sourceType: "plugin", sourceKey: "xdyh", identity: "xdyh-alpha-1", count: 2, subSource: "Alpha 站"},
-		{resourceID: resourceIDs[0], sourceType: "plugin", sourceKey: "xdyh", identity: "xdyh-beta-1", count: 3, subSource: "Beta 站"},
-		{resourceID: resourceIDs[1], sourceType: "plugin", sourceKey: "xdyh", identity: "xdyh-alpha-2", count: 4, subSource: "Alpha 站"},
-		{resourceID: resourceIDs[1], sourceType: "plugin", sourceKey: "xdyh", identity: "xdyh-unknown", count: 5},
-		{resourceID: resourceIDs[2], sourceType: "plugin", sourceKey: "beta", identity: "beta-1", count: 14},
-		{resourceID: resourceIDs[1], sourceType: "plugin", sourceKey: "odd' plugin %", identity: "odd-1", count: 7, subSource: "Odd 站"},
-		{resourceID: resourceIDs[0], sourceType: "tg", sourceKey: "channel-a", identity: "tg-1", count: 6},
+		{resourceID: resourceIDs[0], sourceType: "plugin", sourceKey: "xdyh", identity: "xdyh-alpha-1", subSource: "Alpha 站"},
+		{resourceID: resourceIDs[0], sourceType: "plugin", sourceKey: "xdyh", identity: "xdyh-beta-1", subSource: "Beta 站"},
+		{resourceID: resourceIDs[1], sourceType: "plugin", sourceKey: "xdyh", identity: "xdyh-alpha-2", subSource: "Alpha 站"},
+		{resourceID: resourceIDs[1], sourceType: "plugin", sourceKey: "xdyh", identity: "xdyh-unknown"},
+		{resourceID: resourceIDs[2], sourceType: "plugin", sourceKey: "beta", identity: "beta-1"},
+		{resourceID: resourceIDs[1], sourceType: "plugin", sourceKey: "odd' plugin %", identity: "odd-1", subSource: "Odd 站"},
+		{resourceID: resourceIDs[0], sourceType: "tg", sourceKey: "channel-a", identity: "tg-1"},
 	}
 	for _, fixture := range fixtures {
 		metadata := map[string]any{}
@@ -51,28 +50,28 @@ func TestPostgresSourceContributionsAndAttribution(t *testing.T) {
 		if _, err := store.pool.Exec(ctx, `
 			INSERT INTO resource_sources (
 				resource_id, source_type, source_key, source_identity,
-				discovered_at, first_seen_at, last_seen_at, discovery_count, source_metadata
-			) VALUES ($1, $2, $3, $4, $5, $5, $5, $6, $7::jsonb)`,
+				discovered_at, first_seen_at, last_seen_at, source_metadata
+			) VALUES ($1, $2, $3, $4, $5, $5, $5, $6::jsonb)`,
 			fixture.resourceID, fixture.sourceType, fixture.sourceKey, fixture.identity,
-			now, fixture.count, metadataJSON(metadata)); err != nil {
+			now, metadataJSON(metadata)); err != nil {
 			t.Fatalf("insert source %s/%s/%s: %v", fixture.sourceType, fixture.sourceKey, fixture.identity, err)
 		}
 	}
 
 	firstPage, err := store.ListSourceContributions(ctx, SourceContributionFilter{
-		SourceType: "plugin", Page: 1, PageSize: 1, SortBy: "discovery_count", SortDir: "desc",
+		SourceType: "plugin", Page: 1, PageSize: 1, SortBy: "resource_count", SortDir: "desc",
 	})
 	if err != nil {
 		t.Fatalf("ListSourceContributions first page: %v", err)
 	}
 	if firstPage.Total != 3 || len(firstPage.Items) != 1 || firstPage.Items[0].SourceKey != "xdyh" ||
-		firstPage.Items[0].ResourceCount != 2 || firstPage.Items[0].DiscoveryCount != 14 {
+		firstPage.Items[0].ResourceCount != 2 {
 		t.Fatalf("first contribution page = %+v", firstPage)
 	}
 	secondPage, err := store.ListSourceContributions(ctx, SourceContributionFilter{
-		SourceType: "plugin", Page: 2, PageSize: 1, SortBy: "discovery_count", SortDir: "desc",
+		SourceType: "plugin", Page: 2, PageSize: 1, SortBy: "resource_count", SortDir: "desc",
 	})
-	if err != nil || len(secondPage.Items) != 1 || secondPage.Items[0].SourceKey != "beta" {
+	if err != nil || len(secondPage.Items) != 1 || secondPage.Items[0].SourceKey != "odd' plugin %" {
 		t.Fatalf("second contribution page = %+v, err=%v", secondPage, err)
 	}
 	keyPage, err := store.ListSourceContributions(ctx, SourceContributionFilter{
@@ -88,17 +87,15 @@ func TestPostgresSourceContributionsAndAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSourceContribution: %v", err)
 	}
-	if detail.ResourceCount != 2 || detail.DiscoveryCount != 14 ||
-		detail.TypeResourceCount != 3 || detail.TypeDiscoveryCount != 35 ||
+	if detail.ResourceCount != 2 || detail.TypeResourceCount != 3 ||
 		detail.IdentifiedResourceCount != 2 || detail.SubSourcePairCount != 3 ||
-		!almostEqual(detail.ResourceShare, 2.0/3.0) || !almostEqual(detail.DiscoveryShare, 0.4) ||
+		!almostEqual(detail.ResourceShare, 2.0/3.0) ||
 		!almostEqual(detail.SubSourceCoverage, 1) {
 		t.Fatalf("source contribution detail = %+v", detail)
 	}
 	if detail.SubSources.Total != 2 || len(detail.SubSources.Items) != 1 ||
 		detail.SubSources.Items[0].SubSource != "Alpha 站" ||
 		detail.SubSources.Items[0].ResourceCount != 2 ||
-		detail.SubSources.Items[0].DiscoveryCount != 6 ||
 		!almostEqual(detail.SubSources.Items[0].PairShare, 2.0/3.0) {
 		t.Fatalf("sub-source contribution page = %+v", detail.SubSources)
 	}

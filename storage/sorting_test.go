@@ -45,7 +45,7 @@ func TestSortFieldWhitelists(t *testing.T) {
 		fields map[string]sortField
 		want   []string
 	}{
-		{name: "resources", fields: resourceSortFields, want: []string{"check_status", "discovery_count", "first_seen_at", "last_seen_at", "platform", "resource", "source_count"}},
+		{name: "resources", fields: resourceSortFields, want: []string{"check_status", "first_seen_at", "last_seen_at", "platform", "resource", "source_count"}},
 		{name: "keywords", fields: keywordSortFields, want: []string{"cooldown_seconds", "enabled", "keyword", "keyword_type", "next_eligible_at", "priority"}},
 		{name: "keyword API sources", fields: keywordAPISourceSortFields, want: []string{"last_item_count", "last_status", "name", "request_url", "sync_interval_seconds"}},
 		{name: "keyword API sync runs", fields: keywordAPISyncRunSortFields, want: []string{"progress", "source_name", "started_at", "status", "trigger", "unique_count"}},

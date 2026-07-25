@@ -68,11 +68,14 @@ func TestBuildResourceWhereIncludeUsesOR(t *testing.T) {
 
 func TestBuildResourceWhereAppliesTitleQueryBeforePagination(t *testing.T) {
 	t.Parallel()
-	where, args := buildResourceWhere(ResourceFilter{Keyword: "sample", TitleQuery: "sample"})
+	where, args := buildResourceWhere(ResourceFilter{TitleQuery: "sample"})
 	if !strings.Contains(where, "r.title ILIKE") {
 		t.Fatalf("missing title predicate: %s", where)
 	}
-	if len(args) != 2 || args[1] != "%sample%" {
+	if strings.Contains(where, "resource_keyword_links") {
+		t.Fatalf("title search unexpectedly requires keyword attribution: %s", where)
+	}
+	if len(args) != 1 || args[0] != "%sample%" {
 		t.Fatalf("args = %#v", args)
 	}
 }

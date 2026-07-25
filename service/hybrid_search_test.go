@@ -243,6 +243,9 @@ func TestHybridDatabaseSearchFiltersBeforePagingAndReadsEveryPage(t *testing.T) 
 	if store.queries[0].TitleQuery != "sample" {
 		t.Fatalf("title query = %q", store.queries[0].TitleQuery)
 	}
+	if store.queries[0].Keyword != "" {
+		t.Fatalf("database search requires keyword attribution: %q", store.queries[0].Keyword)
+	}
 }
 
 func TestHybridSearchResolvesSourcesBeforeDatabaseLookup(t *testing.T) {

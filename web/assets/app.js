@@ -1349,8 +1349,7 @@
           sourceType: sourceType,
           sourceKey: sourceKey,
           name: sourceKey,
-          count: numberValue(pick(item, ['resource_count', 'count', 'total', 'value'], 0)),
-          discoveries: numberValue(pick(item, ['discovery_count', 'discoveries'], 0))
+          count: numberValue(pick(item, ['resource_count', 'count', 'total', 'value'], 0))
         };
       });
     } else if (data && typeof data === 'object') {
@@ -1361,13 +1360,12 @@
           sourceType: sourceType,
           sourceKey: separator > 0 ? key.slice(separator + 1) : key,
           name: separator > 0 ? key.slice(separator + 1) : key,
-          count: numberValue(data[key]),
-          discoveries: 0
+          count: numberValue(data[key])
         };
       });
     }
     return items.sort(function (left, right) {
-      return right.count - left.count || right.discoveries - left.discoveries || left.name.localeCompare(right.name, 'zh-CN');
+      return right.count - left.count || left.name.localeCompare(right.name, 'zh-CN');
     }).slice(0, 8);
   }
 
@@ -1385,9 +1383,8 @@
     return ['plugin', 'tg'].reduce(function (result, type) {
       var item = pick(totals, [type], {}) || {};
       result.resource_count += numberValue(pick(item, ['resource_count'], 0));
-      result.discovery_count += numberValue(pick(item, ['discovery_count'], 0));
       return result;
-    }, { resource_count: 0, discovery_count: 0 });
+    }, { resource_count: 0 });
   }
 
   function renderSourceContributionScope() {
@@ -1410,7 +1407,7 @@
     renderSourceContributionScope();
     byId('source-contribution-caption').innerHTML = scope === 'all'
       ? '<span>全局来源排行</span><strong>展示前 ' + formatNumber(sources.length) + ' · TG / 插件可查看明细</strong>'
-      : '<span>' + escapeHTML(scopeLabel) + '累计贡献</span><strong>独立资源 ' + formatNumber(pick(totals, ['resource_count'], 0)) + ' · 发现 ' + formatNumber(pick(totals, ['discovery_count'], 0)) + '</strong>';
+      : '<span>' + escapeHTML(scopeLabel) + '资源覆盖</span><strong>独立资源 ' + formatNumber(pick(totals, ['resource_count'], 0)) + '</strong>';
     chart.setOption({
       animationDuration: 420,
       color: ['#1769e0'],
@@ -1421,7 +1418,7 @@
         textStyle: { color: '#fff', fontSize: 11 },
         formatter: function (params) {
           var item = params.data || {};
-          return escapeHTML(item.label || params.name || '来源') + '<br>独立资源 ' + formatNumber(item.value) + '<br>发现次数 ' + formatNumber(item.discoveryCount);
+          return escapeHTML(item.label || params.name || '来源') + '<br>独立资源 ' + formatNumber(item.value);
         }
       },
       grid: { left: 8, right: 16, top: 12, bottom: 5, containLabel: true },
@@ -1443,7 +1440,7 @@
         barMaxWidth: 13,
         itemStyle: { borderRadius: [0, 3, 3, 0] },
         data: sources.map(function (source) {
-          return { value: source.count, label: source.name, discoveryCount: source.discoveries, sourceType: source.sourceType, sourceKey: source.sourceKey };
+          return { value: source.count, label: source.name, sourceType: source.sourceType, sourceKey: source.sourceKey };
         })
       }]
     }, true);
@@ -1510,11 +1507,10 @@
       return '<tr data-contribution-key="' + escapeHTML(key) + '">' +
         '<td><button class="text-link contribution-source-link" type="button" data-action="open-source-contribution-detail" data-source-type="' + escapeHTML(type) + '" data-source-key="' + escapeHTML(key) + '">' + escapeHTML(key) + '</button>' + (showType ? ' <span class="type-badge">' + escapeHTML(contributionTypeLabel(type)) + '</span>' : '') + '</td>' +
         '<td>' + formatNumber(pick(item, ['resource_count'], 0)) + '</td>' +
-        '<td>' + formatNumber(pick(item, ['discovery_count'], 0)) + '</td>' +
       '</tr>';
     }).join('');
     body.innerHTML = '<div class="contribution-toolbar"><div><strong>' + escapeHTML(contributionState.scope === 'all' ? '全部来源' : contributionTypeLabel(contributionState.scope) + '来源') + '</strong><small> 共 ' + formatNumber(contributionState.total) + ' 项</small></div><div class="source-scope-tabs" role="tablist" aria-label="贡献明细类型"><button type="button" data-source-contribution-list-scope="plugin">插件</button><button type="button" data-source-contribution-list-scope="tg">TG</button><button type="button" data-source-contribution-list-scope="all">全部</button></div></div>' +
-      '<div class="contribution-table-wrap"><table class="contribution-table"><thead><tr>' + sortHeaderMarkup('来源', 'sourceContributions', 'source_key', 'asc') + sortHeaderMarkup('独立资源', 'sourceContributions', 'resource_count', 'desc') + sortHeaderMarkup('发现次数', 'sourceContributions', 'discovery_count', 'desc') + '</tr></thead><tbody>' + (rows || '<tr class="table-empty"><td colspan="3">暂无贡献数据</td></tr>') + '</tbody></table></div><div id="source-contribution-pagination" class="contribution-footer pagination"></div>';
+      '<div class="contribution-table-wrap"><table class="contribution-table"><thead><tr>' + sortHeaderMarkup('来源', 'sourceContributions', 'source_key', 'asc') + sortHeaderMarkup('独立资源', 'sourceContributions', 'resource_count', 'desc') + '</tr></thead><tbody>' + (rows || '<tr class="table-empty"><td colspan="2">暂无贡献数据</td></tr>') + '</tbody></table></div><div id="source-contribution-pagination" class="contribution-footer pagination"></div>';
     document.querySelectorAll('[data-source-contribution-list-scope]').forEach(function (button) {
       var active = button.dataset.sourceContributionListScope === contributionState.scope;
       button.classList.toggle('active', active);
@@ -1581,13 +1577,13 @@
     var coverage = numberValue(pick(data, ['sub_source_coverage'], 0));
     var pairCount = numberValue(pick(data, ['sub_source_pair_count'], 0));
     var rows = (detail.items || []).map(function (item) {
-      return '<tr><td><strong>' + escapeHTML(pick(item, ['sub_source'], '未识别')) + '</strong></td><td>' + formatNumber(pick(item, ['resource_count'], 0)) + '</td><td>' + formatNumber(pick(item, ['discovery_count'], 0)) + '<small class="table-cell-note">归因对占比 ' + formatPercent(pick(item, ['pair_share'], 0)) + '</small></td></tr>';
+      return '<tr><td><strong>' + escapeHTML(pick(item, ['sub_source'], '未识别')) + '</strong></td><td>' + formatNumber(pick(item, ['resource_count'], 0)) + '</td><td>' + formatPercent(pick(item, ['pair_share'], 0)) + '</td></tr>';
     }).join('');
     var body = byId('source-contribution-dialog-body');
     body.innerHTML = '<div class="contribution-toolbar"><button class="button secondary" type="button" data-action="back-source-contributions">' + icon('arrow-left') + '<span>返回列表</span></button><span class="type-badge">' + escapeHTML(contributionTypeLabel(detail.sourceType)) + '</span></div>' +
-      '<section class="contribution-detail-hero"><h3>' + escapeHTML(detail.sourceKey) + '</h3><div class="contribution-metrics"><div><strong>' + formatNumber(pick(data, ['resource_count'], 0)) + '</strong><span>独立资源 · 同类占比 ' + formatPercent(pick(data, ['resource_share'], 0)) + '</span></div><div><strong>' + formatNumber(pick(data, ['discovery_count'], 0)) + '</strong><span>发现次数 · 同类占比 ' + formatPercent(pick(data, ['discovery_share'], 0)) + '</span></div><div><strong>' + formatPercent(coverage) + '</strong><span>内部来源识别覆盖率</span></div></div></section>' +
+      '<section class="contribution-detail-hero"><h3>' + escapeHTML(detail.sourceKey) + '</h3><div class="contribution-metrics"><div><strong>' + formatNumber(pick(data, ['resource_count'], 0)) + '</strong><span>独立资源 · 同类占比 ' + formatPercent(pick(data, ['resource_share'], 0)) + '</span></div><div><strong>' + formatPercent(coverage) + '</strong><span>内部来源识别覆盖率</span></div></div></section>' +
       '<div class="contribution-toolbar"><div><strong>内部来源</strong><small> ' + formatNumber(pairCount) + ' 个已识别归因对</small></div><span class="muted-text">历史未知数据不会推测回填</span></div>' +
-      '<div class="contribution-table-wrap"><table class="contribution-table"><thead><tr>' + sortHeaderMarkup('内部来源', 'sourceContributionDetails', 'sub_source', 'asc') + sortHeaderMarkup('独立资源', 'sourceContributionDetails', 'resource_count', 'desc') + sortHeaderMarkup('发现次数 / 占比', 'sourceContributionDetails', 'discovery_count', 'desc') + '</tr></thead><tbody>' + (rows || '<tr class="table-empty"><td colspan="3">暂未识别到插件内部来源</td></tr>') + '</tbody></table></div><div id="source-contribution-detail-pagination" class="contribution-footer pagination"></div>';
+      '<div class="contribution-table-wrap"><table class="contribution-table"><thead><tr>' + sortHeaderMarkup('内部来源', 'sourceContributionDetails', 'sub_source', 'asc') + sortHeaderMarkup('独立资源', 'sourceContributionDetails', 'resource_count', 'desc') + '<th>归因占比</th></tr></thead><tbody>' + (rows || '<tr class="table-empty"><td colspan="3">暂未识别到插件内部来源</td></tr>') + '</tbody></table></div><div id="source-contribution-detail-pagination" class="contribution-footer pagination"></div>';
     renderPagination('source-contribution-detail-pagination', detail.page, detail.pages, 'sourceContributionDetails');
     updateSortHeaders('sourceContributionDetails');
     refreshIcons(body);
@@ -1649,7 +1645,7 @@
     showAlert('resources-alert', '');
     byId('resources-empty').hidden = true;
     byId('resources-pagination').innerHTML = '';
-    tableLoading('resources-body', 7);
+    tableLoading('resources-body', 6);
 
     var query = Object.assign({}, state.resources.query, tableSortQuery('resources'), {
       page: state.resources.page,
@@ -2078,14 +2074,12 @@
       var status = normalizedStatus(resource);
       var sources = resourceSources(resource);
       var sourceTotal = numberValue(pick(resource, ['source_count'], sources.length), sources.length);
-      var discoveryCount = numberValue(pick(resource, ['discovery_count', 'found_count', 'discover_count'], 1));
       var lastSeen = pick(resource, ['last_seen_at', 'last_discovered_at', 'updated_at', 'discovered_at'], null);
       return '<tr>' +
         '<td><div class="resource-cell"><div class="resource-title" title="' + escapeHTML(title) + '">' + escapeHTML(title) + '</div><div class="resource-link" title="' + escapeHTML(url) + '">' + escapeHTML(url) + '</div></div></td>' +
         '<td><span class="type-badge">' + escapeHTML(diskLabels[diskType] || diskType) + '</span></td>' +
         '<td>' + statusBadge(status) + '</td>' +
         '<td><div class="source-stack">' + sources.slice(0, 2).map(sourceBadge).join('') + (sourceTotal > sources.length ? '<span class="muted">+' + (sourceTotal - sources.length) + '</span>' : '') + '</div></td>' +
-        '<td>' + formatNumber(discoveryCount) + '</td>' +
         '<td title="' + escapeHTML(formatDate(lastSeen, true)) + '">' + escapeHTML(relativeTime(lastSeen)) + '</td>' +
         '<td><div class="row-actions">' +
           '<button class="row-action" type="button" data-action="copy-resource" data-url="' + escapeHTML(url) + '" aria-label="复制链接" title="复制链接">' + icon('copy') + '</button>' +
@@ -2191,7 +2185,6 @@
       '<section class="detail-section"><h3>发现信息</h3><dl class="detail-grid">' +
         '<div class="detail-pair"><dt>首次发现</dt><dd>' + escapeHTML(formatDate(pick(resource, ['first_seen_at', 'first_discovered_at', 'created_at'], null), true)) + '</dd></div>' +
         '<div class="detail-pair"><dt>最近发现</dt><dd>' + escapeHTML(formatDate(pick(resource, ['last_seen_at', 'last_discovered_at', 'updated_at'], null), true)) + '</dd></div>' +
-        '<div class="detail-pair"><dt>发现次数</dt><dd>' + formatNumber(pick(resource, ['discovery_count', 'found_count', 'discover_count'], 1)) + '</dd></div>' +
         '<div class="detail-pair"><dt>最近检测</dt><dd>' + escapeHTML(formatDate(pick(resource, ['checked_at', 'last_checked_at'], null), true)) + '</dd></div>' +
       '</dl></section>' +
       '<details class="detail-section lazy-detail" data-resource-related="keywords" data-resource-id="' + escapeHTML(resourceID) + '"><summary><h3>关联关键词</h3><span class="muted">' + formatNumber(keywordCount) + ' 项 · 展开加载</span></summary><div data-resource-related-content="keywords"></div></details>' +

@@ -75,25 +75,25 @@ const resourceMutationColumns = `
 	id, normalized_url, url, password, platform, title, ''::text,
 	link_datetime, check_status, last_checked_at, candidate_check_status, candidate_checked_at,
 	first_seen_at, last_seen_at,
-	discovery_count, created_at, updated_at`
+	created_at, updated_at`
 
 const resourceColumns = `
 	r.id, r.normalized_url, r.url, r.password, r.platform, r.title, COALESCE(rc.content, ''),
 	r.link_datetime, r.check_status, r.last_checked_at, r.candidate_check_status, r.candidate_checked_at,
 	r.first_seen_at, r.last_seen_at,
-	r.discovery_count, r.created_at, r.updated_at`
+	r.created_at, r.updated_at`
 
 const resourceColumnsWithoutContent = `
 	r.id, r.normalized_url, r.url, r.password, r.platform, r.title, ''::text,
 	r.link_datetime, r.check_status, r.last_checked_at, r.candidate_check_status, r.candidate_checked_at,
 	r.first_seen_at, r.last_seen_at,
-	r.discovery_count, r.created_at, r.updated_at`
+	r.created_at, r.updated_at`
 
 const resourceListColumns = `
 	r.id, r.normalized_url, r.url, r.platform, left(r.title, 500),
 	r.link_datetime, r.check_status, r.last_checked_at, r.candidate_check_status, r.candidate_checked_at,
 	r.first_seen_at, r.last_seen_at,
-	r.discovery_count, r.created_at, r.updated_at`
+	r.created_at, r.updated_at`
 
 const maxImmediateLinkCheckCandidates = 500
 
@@ -110,7 +110,7 @@ func scanResource(row rowScanner) (Resource, error) {
 		&resource.Platform, &resource.Title, &resource.Content, &resource.LinkDatetime,
 		&resource.CheckStatus, &resource.LastCheckedAt, &resource.CandidateCheckStatus,
 		&resource.CandidateCheckedAt, &resource.FirstSeenAt,
-		&resource.LastSeenAt, &resource.DiscoveryCount, &resource.CreatedAt, &resource.UpdatedAt,
+		&resource.LastSeenAt, &resource.CreatedAt, &resource.UpdatedAt,
 	)
 	return resource, err
 }
@@ -122,7 +122,7 @@ func scanResourceListItem(row rowScanner) (Resource, error) {
 		&resource.Title, &resource.LinkDatetime, &resource.CheckStatus,
 		&resource.LastCheckedAt, &resource.CandidateCheckStatus, &resource.CandidateCheckedAt,
 		&resource.FirstSeenAt, &resource.LastSeenAt,
-		&resource.DiscoveryCount, &resource.CreatedAt, &resource.UpdatedAt,
+		&resource.CreatedAt, &resource.UpdatedAt,
 	)
 	return resource, err
 }
@@ -189,7 +189,6 @@ func (s *Store) upsertResourceTx(ctx context.Context, tx pgx.Tx, input ResourceI
 			candidate_checked_at = CASE WHEN EXCLUDED.last_checked_at IS NOT NULL THEN NULL ELSE resources.candidate_checked_at END,
 			first_seen_at = LEAST(resources.first_seen_at, EXCLUDED.first_seen_at),
 			last_seen_at = GREATEST(resources.last_seen_at, EXCLUDED.last_seen_at),
-			discovery_count = resources.discovery_count + 1,
 			updated_at = now()
 		RETURNING `+resourceMutationColumns+`, (xmax = 0)`,
 		normalizedURL, cleanedURL, strings.TrimSpace(input.Password),
@@ -212,7 +211,7 @@ func (s *Store) upsertResourceTx(ctx context.Context, tx pgx.Tx, input ResourceI
 		}
 	}
 	if NormalizeKeyword(input.Keyword) != "" {
-		if err := upsertResourceKeyword(ctx, tx, resource.ID, seenAt, input.Keyword, input.KeywordType); err != nil {
+		if err := upsertResourceKeyword(ctx, tx, resource.ID, input.Keyword, input.KeywordType); err != nil {
 			return UpsertResult{}, err
 		}
 	}
@@ -226,7 +225,7 @@ func scanResourceWithInserted(row rowScanner, inserted *bool) (Resource, error) 
 		&resource.Platform, &resource.Title, &resource.Content, &resource.LinkDatetime,
 		&resource.CheckStatus, &resource.LastCheckedAt, &resource.CandidateCheckStatus,
 		&resource.CandidateCheckedAt, &resource.FirstSeenAt,
-		&resource.LastSeenAt, &resource.DiscoveryCount, &resource.CreatedAt, &resource.UpdatedAt,
+		&resource.LastSeenAt, &resource.CreatedAt, &resource.UpdatedAt,
 		inserted,
 	)
 	return resource, err
@@ -283,7 +282,6 @@ func upsertResourceSource(ctx context.Context, tx pgx.Tx, resourceID int64, norm
 			discovered_at = GREATEST(resource_sources.discovered_at, EXCLUDED.discovered_at),
 			first_seen_at = LEAST(resource_sources.first_seen_at, EXCLUDED.first_seen_at),
 			last_seen_at = GREATEST(resource_sources.last_seen_at, EXCLUDED.last_seen_at),
-			discovery_count = resource_sources.discovery_count + 1,
 			source_metadata = resource_sources.source_metadata || EXCLUDED.source_metadata`,
 		resourceID, strings.TrimSpace(input.SourceType), strings.TrimSpace(input.SourceKey), identity,
 		strings.TrimSpace(input.MessageID), strings.TrimSpace(input.UniqueID), strings.TrimSpace(input.Title),
@@ -295,15 +293,15 @@ func upsertResourceSource(ctx context.Context, tx pgx.Tx, resourceID int64, norm
 	return nil
 }
 
-func upsertResourceKeyword(ctx context.Context, tx pgx.Tx, resourceID int64, seenAt time.Time, keyword, keywordType string) error {
+func upsertResourceKeyword(ctx context.Context, tx pgx.Tx, resourceID int64, keyword, keywordType string) error {
 	normalized := NormalizeKeyword(keyword)
 	if keywordType = strings.TrimSpace(keywordType); keywordType == "" {
 		keywordType = DefaultKeywordType
 	}
-	return upsertNormalizedResourceKeyword(ctx, tx, resourceID, seenAt, keyword, normalized, keywordType)
+	return upsertNormalizedResourceKeyword(ctx, tx, resourceID, keyword, normalized, keywordType)
 }
 
-func upsertNormalizedResourceKeyword(ctx context.Context, tx pgx.Tx, resourceID int64, seenAt time.Time, keyword, normalized, keywordType string) error {
+func upsertNormalizedResourceKeyword(ctx context.Context, tx pgx.Tx, resourceID int64, keyword, normalized, keywordType string) error {
 	var termID int64
 	err := tx.QueryRow(ctx, `INSERT INTO resource_keyword_terms (
 		normalized_keyword, keyword, keyword_type
@@ -325,13 +323,12 @@ func upsertNormalizedResourceKeyword(ctx context.Context, tx pgx.Tx, resourceID 
 		return fmt.Errorf("upsert resource keyword term: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO resource_keyword_links (
-		resource_id, term_id, keyword_id, first_seen_at, last_seen_at
-	) VALUES ($1, $2, (SELECT id FROM keywords WHERE normalized_keyword=$3), $4, $4)
+		resource_id, term_id, keyword_id
+	) VALUES ($1, $2, (SELECT id FROM keywords WHERE normalized_keyword=$3))
 	ON CONFLICT (resource_id, term_id) DO UPDATE SET
-		keyword_id = COALESCE(resource_keyword_links.keyword_id, EXCLUDED.keyword_id),
-		first_seen_at = LEAST(resource_keyword_links.first_seen_at, EXCLUDED.first_seen_at),
-		last_seen_at = GREATEST(resource_keyword_links.last_seen_at, EXCLUDED.last_seen_at),
-		discovery_count = resource_keyword_links.discovery_count + 1`, resourceID, termID, normalized, seenAt); err != nil {
+		keyword_id = EXCLUDED.keyword_id
+	WHERE resource_keyword_links.keyword_id IS NULL
+		AND EXCLUDED.keyword_id IS NOT NULL`, resourceID, termID, normalized); err != nil {
 		return fmt.Errorf("upsert normalized resource keyword: %w", err)
 	}
 	return nil
@@ -561,8 +558,6 @@ func (s *Store) listResources(ctx context.Context, filter ResourceFilter, summar
 			sortBy, sortDir = "first_seen_at", "asc"
 		case "first_seen_desc":
 			sortBy, sortDir = "first_seen_at", "desc"
-		case "discoveries_desc":
-			sortBy, sortDir = "discovery_count", "desc"
 		case "last_seen_asc":
 			sortBy, sortDir = "last_seen_at", "asc"
 		}
@@ -727,8 +722,7 @@ func (s *Store) loadResourceAssociationSummaries(ctx context.Context, resources 
 	rows.Close()
 
 	rows, err = s.pool.Query(ctx, `SELECT preview.id, preview.resource_id, preview.source_type,
-		preview.source_key, preview.source_identity, left(preview.title, 300), preview.last_seen_at,
-		preview.discovery_count
+		preview.source_key, preview.source_identity, left(preview.title, 300), preview.last_seen_at
 		FROM unnest($1::bigint[]) AS ids(id)
 		CROSS JOIN LATERAL (
 			SELECT * FROM resource_sources rs WHERE rs.resource_id=ids.id
@@ -742,7 +736,7 @@ func (s *Store) loadResourceAssociationSummaries(ctx context.Context, resources 
 	for rows.Next() {
 		var source ResourceSourcePreview
 		if err := rows.Scan(&source.ID, &source.ResourceID, &source.SourceType, &source.SourceKey,
-			&source.SourceIdentity, &source.Title, &source.LastSeenAt, &source.DiscoveryCount); err != nil {
+			&source.SourceIdentity, &source.Title, &source.LastSeenAt); err != nil {
 			return fmt.Errorf("scan resource source preview: %w", err)
 		}
 		if resource := byID[source.ResourceID]; resource != nil {
@@ -759,7 +753,7 @@ func scanResourceSourceListItem(row rowScanner) (ResourceSource, error) {
 	var source ResourceSource
 	err := row.Scan(&source.ID, &source.ResourceID, &source.SourceType, &source.SourceKey,
 		&source.SourceIdentity, &source.MessageID, &source.UniqueID, &source.Title,
-		&source.DiscoveredAt, &source.FirstSeenAt, &source.LastSeenAt, &source.DiscoveryCount)
+		&source.DiscoveredAt, &source.FirstSeenAt, &source.LastSeenAt)
 	return source, err
 }
 
@@ -783,7 +777,7 @@ func (s *Store) ListResourceSources(ctx context.Context, resourceID int64, filte
 	}
 	rows, err := s.pool.Query(ctx, `SELECT id, resource_id, source_type, source_key,
 		source_identity, message_id, unique_id, left(title, 500), discovered_at,
-		first_seen_at, last_seen_at, discovery_count
+		first_seen_at, last_seen_at
 		FROM resource_sources WHERE resource_id=$1
 		ORDER BY last_seen_at DESC, id DESC LIMIT $2 OFFSET $3`, resourceID, pageSize, (page-1)*pageSize)
 	if err != nil {
@@ -823,11 +817,11 @@ func (s *Store) ListResourceKeywords(ctx context.Context, resourceID int64, filt
 		}
 	}
 	rows, err := s.pool.Query(ctx, `SELECT link.resource_id, link.keyword_id, term.keyword,
-		term.normalized_keyword, term.keyword_type, link.first_seen_at, link.last_seen_at, link.discovery_count
+		term.normalized_keyword, term.keyword_type
 		FROM resource_keyword_links link
 		JOIN resource_keyword_terms term ON term.id=link.term_id
 		WHERE link.resource_id=$1
-		ORDER BY link.last_seen_at DESC, term.normalized_keyword LIMIT $2 OFFSET $3`, resourceID, pageSize, (page-1)*pageSize)
+		ORDER BY term.normalized_keyword LIMIT $2 OFFSET $3`, resourceID, pageSize, (page-1)*pageSize)
 	if err != nil {
 		return ResourceKeywordPage{}, fmt.Errorf("list resource keywords: %w", err)
 	}
@@ -836,7 +830,7 @@ func (s *Store) ListResourceKeywords(ctx context.Context, resourceID int64, filt
 	for rows.Next() {
 		var item ResourceKeyword
 		if err := rows.Scan(&item.ResourceID, &item.KeywordID, &item.Keyword, &item.NormalizedKeyword,
-			&item.KeywordType, &item.FirstSeenAt, &item.LastSeenAt, &item.DiscoveryCount); err != nil {
+			&item.KeywordType); err != nil {
 			return ResourceKeywordPage{}, fmt.Errorf("scan resource keyword: %w", err)
 		}
 		items = append(items, item)
@@ -860,8 +854,7 @@ func (s *Store) loadResourceAssociations(ctx context.Context, resources []Resour
 	rows, err := s.pool.Query(ctx, `
 		SELECT source.id, source.resource_id, source.source_type, source.source_key,
 			source.source_identity, source.message_id, source.unique_id, source.title,
-			source.discovered_at, source.first_seen_at, source.last_seen_at,
-			source.discovery_count, source.source_metadata
+			source.discovered_at, source.first_seen_at, source.last_seen_at, source.source_metadata
 		FROM unnest($1::bigint[]) AS ids(id)
 		CROSS JOIN LATERAL (
 			SELECT * FROM resource_sources rs WHERE rs.resource_id=ids.id
@@ -876,7 +869,7 @@ func (s *Store) loadResourceAssociations(ctx context.Context, resources []Resour
 		var metadata []byte
 		if err := rows.Scan(&source.ID, &source.ResourceID, &source.SourceType, &source.SourceKey,
 			&source.SourceIdentity, &source.MessageID, &source.UniqueID, &source.Title,
-			&source.DiscoveredAt, &source.FirstSeenAt, &source.LastSeenAt, &source.DiscoveryCount, &metadata); err != nil {
+			&source.DiscoveredAt, &source.FirstSeenAt, &source.LastSeenAt, &metadata); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan resource source: %w", err)
 		}
@@ -892,12 +885,11 @@ func (s *Store) loadResourceAssociations(ctx context.Context, resources []Resour
 	rows.Close()
 
 	keywordRows, err := s.pool.Query(ctx, `
-		SELECT link.resource_id, link.keyword_id, term.keyword, term.normalized_keyword, term.keyword_type,
-			link.first_seen_at, link.last_seen_at, link.discovery_count
+		SELECT link.resource_id, link.keyword_id, term.keyword, term.normalized_keyword, term.keyword_type
 		FROM resource_keyword_links link
 		JOIN resource_keyword_terms term ON term.id=link.term_id
 		WHERE link.resource_id=ANY($1::bigint[])
-		ORDER BY link.resource_id, link.last_seen_at DESC`, ids)
+		ORDER BY link.resource_id, term.normalized_keyword`, ids)
 	if err != nil {
 		return fmt.Errorf("load resource keywords: %w", err)
 	}
@@ -905,8 +897,7 @@ func (s *Store) loadResourceAssociations(ctx context.Context, resources []Resour
 	for keywordRows.Next() {
 		var keyword ResourceKeyword
 		if err := keywordRows.Scan(&keyword.ResourceID, &keyword.KeywordID, &keyword.Keyword,
-			&keyword.NormalizedKeyword, &keyword.KeywordType, &keyword.FirstSeenAt,
-			&keyword.LastSeenAt, &keyword.DiscoveryCount); err != nil {
+			&keyword.NormalizedKeyword, &keyword.KeywordType); err != nil {
 			return fmt.Errorf("scan resource keyword: %w", err)
 		}
 		if resource := byID[keyword.ResourceID]; resource != nil {

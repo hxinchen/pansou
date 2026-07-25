@@ -46,7 +46,6 @@ func TestContributionSortWhitelists(t *testing.T) {
 	}{
 		{name: "source key", field: "source_key", dir: "asc", fields: sourceContributionSortFields, want: "lower(source_key) ASC, ROW(lower(source_type), source_type, source_key) ASC"},
 		{name: "resource count", field: "resource_count", dir: "desc", fields: sourceContributionSortFields, want: "resource_count DESC, ROW(lower(source_type || ':' || source_key), source_type, source_key) DESC"},
-		{name: "sub-source discovery", field: "discovery_count", dir: "desc", fields: subSourceContributionSortFields, want: "discovery_count DESC, ROW(lower(sub_source), sub_source) DESC"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

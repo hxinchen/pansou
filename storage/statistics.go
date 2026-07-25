@@ -155,11 +155,10 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 			},
 		}
 		rows, err := s.pool.Query(ctx, `
-			SELECT source_type, source_key, count(DISTINCT resource_id), sum(discovery_count)
+			SELECT source_type, source_key, count(DISTINCT resource_id)
 			FROM resource_sources
 			GROUP BY source_type, source_key
-			ORDER BY count(DISTINCT resource_id) DESC, sum(discovery_count) DESC,
-				source_type, source_key
+			ORDER BY count(DISTINCT resource_id) DESC, source_type, source_key
 			LIMIT 10`)
 		if err != nil {
 			result.err = fmt.Errorf("load source contributions: %w", err)
@@ -170,7 +169,7 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 		for rows.Next() {
 			var contribution SourceContribution
 			if err := rows.Scan(&contribution.SourceType, &contribution.SourceKey,
-				&contribution.ResourceCount, &contribution.DiscoveryCount); err != nil {
+				&contribution.ResourceCount); err != nil {
 				result.err = fmt.Errorf("scan source contribution: %w", err)
 				sourcesCh <- result
 				return
@@ -184,8 +183,7 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 		}
 
 		totalRows, err := s.pool.Query(ctx, `
-			SELECT source_type, count(DISTINCT resource_id)::bigint,
-				COALESCE(sum(discovery_count), 0)::bigint
+			SELECT source_type, count(DISTINCT resource_id)::bigint
 			FROM resource_sources
 			WHERE source_type IN ('plugin', 'tg')
 			GROUP BY source_type`)
@@ -196,7 +194,7 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 		}
 		for totalRows.Next() {
 			var total SourceContributionTotal
-			if err := totalRows.Scan(&total.SourceType, &total.ResourceCount, &total.DiscoveryCount); err != nil {
+			if err := totalRows.Scan(&total.SourceType, &total.ResourceCount); err != nil {
 				totalRows.Close()
 				result.err = fmt.Errorf("scan source type total: %w", err)
 				sourcesCh <- result
@@ -215,19 +213,18 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 		typeRows, err := s.pool.Query(ctx, `
 			WITH contributions AS (
 				SELECT source_type, source_key,
-					count(DISTINCT resource_id)::bigint AS resource_count,
-					COALESCE(sum(discovery_count), 0)::bigint AS discovery_count
+					count(DISTINCT resource_id)::bigint AS resource_count
 				FROM resource_sources
 				WHERE source_type IN ('plugin', 'tg')
 				GROUP BY source_type, source_key
 			), ranked AS (
 				SELECT *, row_number() OVER (
 					PARTITION BY source_type
-					ORDER BY resource_count DESC, discovery_count DESC, lower(source_key), source_key
+					ORDER BY resource_count DESC, lower(source_key), source_key
 				) AS source_rank
 				FROM contributions
 			)
-			SELECT source_type, source_key, resource_count, discovery_count
+			SELECT source_type, source_key, resource_count
 			FROM ranked
 			WHERE source_rank <= 10
 			ORDER BY source_type, source_rank`)
@@ -239,7 +236,7 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 		for typeRows.Next() {
 			var contribution SourceContribution
 			if err := typeRows.Scan(&contribution.SourceType, &contribution.SourceKey,
-				&contribution.ResourceCount, &contribution.DiscoveryCount); err != nil {
+				&contribution.ResourceCount); err != nil {
 				typeRows.Close()
 				result.err = fmt.Errorf("scan top source by type: %w", err)
 				sourcesCh <- result

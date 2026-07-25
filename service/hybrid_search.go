@@ -153,7 +153,6 @@ func formatSearchResponse(response model.SearchResponse, resultType string) mode
 func (s *HybridSearchService) searchDatabase(ctx context.Context, keyword, resultType, sourceType string, channels, plugins, cloudTypes []string) (model.SearchResponse, time.Time, error) {
 	const maxDatabaseSearchResults = 1000
 	base := storage.ResourceFilter{
-		Keyword:    keyword,
 		TitleQuery: keyword,
 		Platforms:  cloudTypes,
 		Page:       1,

@@ -51,7 +51,6 @@ type Resource struct {
 	CandidateCheckedAt   *time.Time              `json:"candidate_checked_at,omitempty"`
 	FirstSeenAt          time.Time               `json:"first_seen_at"`
 	LastSeenAt           time.Time               `json:"last_seen_at"`
-	DiscoveryCount       int64                   `json:"discovery_count"`
 	CreatedAt            time.Time               `json:"created_at"`
 	UpdatedAt            time.Time               `json:"updated_at"`
 	SourceCount          int64                   `json:"source_count"`
@@ -75,7 +74,6 @@ type ResourceSourcePreview struct {
 	SourceIdentity string    `json:"source_identity"`
 	Title          string    `json:"title,omitempty"`
 	LastSeenAt     time.Time `json:"last_seen_at"`
-	DiscoveryCount int64     `json:"discovery_count"`
 }
 
 type ResourceSource struct {
@@ -90,19 +88,15 @@ type ResourceSource struct {
 	DiscoveredAt   time.Time      `json:"discovered_at"`
 	FirstSeenAt    time.Time      `json:"first_seen_at"`
 	LastSeenAt     time.Time      `json:"last_seen_at"`
-	DiscoveryCount int64          `json:"discovery_count"`
 	SourceMetadata map[string]any `json:"source_metadata,omitempty"`
 }
 
 type ResourceKeyword struct {
-	ResourceID        int64     `json:"resource_id"`
-	KeywordID         *int64    `json:"keyword_id,omitempty"`
-	Keyword           string    `json:"keyword"`
-	NormalizedKeyword string    `json:"normalized_keyword"`
-	KeywordType       string    `json:"keyword_type"`
-	FirstSeenAt       time.Time `json:"first_seen_at"`
-	LastSeenAt        time.Time `json:"last_seen_at"`
-	DiscoveryCount    int64     `json:"discovery_count"`
+	ResourceID        int64  `json:"resource_id"`
+	KeywordID         *int64 `json:"keyword_id,omitempty"`
+	Keyword           string `json:"keyword"`
+	NormalizedKeyword string `json:"normalized_keyword"`
+	KeywordType       string `json:"keyword_type"`
 }
 
 type ResourceSourceInput struct {
@@ -394,16 +388,14 @@ type StatusCount struct {
 }
 
 type SourceContribution struct {
-	SourceType     string `json:"source_type"`
-	SourceKey      string `json:"source_key"`
-	ResourceCount  int64  `json:"resource_count"`
-	DiscoveryCount int64  `json:"discovery_count"`
+	SourceType    string `json:"source_type"`
+	SourceKey     string `json:"source_key"`
+	ResourceCount int64  `json:"resource_count"`
 }
 
 type SourceContributionTotal struct {
-	SourceType     string `json:"source_type"`
-	ResourceCount  int64  `json:"resource_count"`
-	DiscoveryCount int64  `json:"discovery_count"`
+	SourceType    string `json:"source_type"`
+	ResourceCount int64  `json:"resource_count"`
 }
 
 type SourceContributionFilter struct {
@@ -422,10 +414,9 @@ type SourceContributionPage struct {
 }
 
 type SubSourceContribution struct {
-	SubSource      string  `json:"sub_source"`
-	ResourceCount  int64   `json:"resource_count"`
-	DiscoveryCount int64   `json:"discovery_count"`
-	PairShare      float64 `json:"pair_share"`
+	SubSource     string  `json:"sub_source"`
+	ResourceCount int64   `json:"resource_count"`
+	PairShare     float64 `json:"pair_share"`
 }
 
 type SubSourceContributionPage struct {
@@ -446,11 +437,8 @@ type SourceContributionDetail struct {
 	SourceType              string                    `json:"source_type"`
 	SourceKey               string                    `json:"source_key"`
 	ResourceCount           int64                     `json:"resource_count"`
-	DiscoveryCount          int64                     `json:"discovery_count"`
 	TypeResourceCount       int64                     `json:"type_resource_count"`
-	TypeDiscoveryCount      int64                     `json:"type_discovery_count"`
 	ResourceShare           float64                   `json:"resource_share"`
-	DiscoveryShare          float64                   `json:"discovery_share"`
 	IdentifiedResourceCount int64                     `json:"identified_resource_count"`
 	SubSourcePairCount      int64                     `json:"sub_source_pair_count"`
 	SubSourceCoverage       float64                   `json:"sub_source_coverage"`

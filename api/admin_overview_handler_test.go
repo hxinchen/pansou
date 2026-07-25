@@ -55,11 +55,11 @@ func TestAdminOverviewAPIIncludesTrendsMetadataAndSupportsForce(t *testing.T) {
 			return storage.OverviewStats{
 				ResourceCount: resourceCount.Load(),
 				SourceTypeTotals: map[string]storage.SourceContributionTotal{
-					"plugin": {SourceType: "plugin", ResourceCount: 8, DiscoveryCount: 12},
-					"tg":     {SourceType: "tg", ResourceCount: 5, DiscoveryCount: 7},
+					"plugin": {SourceType: "plugin", ResourceCount: 8},
+					"tg":     {SourceType: "tg", ResourceCount: 5},
 				},
 				TopSourcesByType: map[string][]storage.SourceContribution{
-					"plugin": {{SourceType: "plugin", SourceKey: "xdyh", ResourceCount: 8, DiscoveryCount: 12}},
+					"plugin": {{SourceType: "plugin", SourceKey: "xdyh", ResourceCount: 8}},
 					"tg":     {},
 				},
 			}, nil

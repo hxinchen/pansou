@@ -15,10 +15,6 @@ var sourceContributionSortFields = map[string]sortField{
 		Expression: "resource_count",
 		TieBreaker: "ROW(lower(source_type || ':' || source_key), source_type, source_key)",
 	},
-	"discovery_count": {
-		Expression: "discovery_count",
-		TieBreaker: "ROW(lower(source_type || ':' || source_key), source_type, source_key)",
-	},
 }
 
 var subSourceContributionSortFields = map[string]sortField{
@@ -28,10 +24,6 @@ var subSourceContributionSortFields = map[string]sortField{
 	},
 	"resource_count": {
 		Expression: "resource_count",
-		TieBreaker: "ROW(lower(sub_source), sub_source)",
-	},
-	"discovery_count": {
-		Expression: "discovery_count",
 		TieBreaker: "ROW(lower(sub_source), sub_source)",
 	},
 }
@@ -52,7 +44,7 @@ func (s *Store) ListSourceContributions(ctx context.Context, filter SourceContri
 	sortClause, err := buildSortClause(
 		filter.SortBy,
 		filter.SortDir,
-		"resource_count DESC, discovery_count DESC, lower(source_type || ':' || source_key) ASC, source_type ASC, source_key ASC",
+		"resource_count DESC, lower(source_type || ':' || source_key) ASC, source_type ASC, source_key ASC",
 		sourceContributionSortFields,
 	)
 	if err != nil {
@@ -83,13 +75,12 @@ func (s *Store) ListSourceContributions(ctx context.Context, filter SourceContri
 	rows, err := s.pool.Query(ctx, `
 		WITH contributions AS (
 			SELECT source_type, source_key,
-				count(DISTINCT resource_id)::bigint AS resource_count,
-				COALESCE(sum(discovery_count), 0)::bigint AS discovery_count
+				count(DISTINCT resource_id)::bigint AS resource_count
 			FROM resource_sources
 			WHERE `+where+`
 			GROUP BY source_type, source_key
 		)
-		SELECT source_type, source_key, resource_count, discovery_count
+		SELECT source_type, source_key, resource_count
 		FROM contributions
 		ORDER BY `+sortClause+`
 		LIMIT $`+fmt.Sprint(limitParam)+` OFFSET $`+fmt.Sprint(offsetParam), queryArgs...)
@@ -101,7 +92,7 @@ func (s *Store) ListSourceContributions(ctx context.Context, filter SourceContri
 	items := make([]SourceContribution, 0, pageSize)
 	for rows.Next() {
 		var item SourceContribution
-		if err := rows.Scan(&item.SourceType, &item.SourceKey, &item.ResourceCount, &item.DiscoveryCount); err != nil {
+		if err := rows.Scan(&item.SourceType, &item.SourceKey, &item.ResourceCount); err != nil {
 			return SourceContributionPage{}, fmt.Errorf("scan source contribution: %w", err)
 		}
 		items = append(items, item)
@@ -130,7 +121,7 @@ func (s *Store) GetSourceContribution(ctx context.Context, sourceType, sourceKey
 	sortClause, err := buildSortClause(
 		filter.SortBy,
 		filter.SortDir,
-		"resource_count DESC, discovery_count DESC, lower(sub_source) ASC, sub_source ASC",
+		"resource_count DESC, lower(sub_source) ASC, sub_source ASC",
 		subSourceContributionSortFields,
 	)
 	if err != nil {
@@ -141,15 +132,11 @@ func (s *Store) GetSourceContribution(ctx context.Context, sourceType, sourceKey
 	err = s.pool.QueryRow(ctx, `
 		SELECT
 			count(DISTINCT resource_id) FILTER (WHERE source_key = $2)::bigint,
-			COALESCE(sum(discovery_count) FILTER (WHERE source_key = $2), 0)::bigint,
-			count(DISTINCT resource_id)::bigint,
-			COALESCE(sum(discovery_count), 0)::bigint
+			count(DISTINCT resource_id)::bigint
 		FROM resource_sources
 		WHERE source_type = $1`, sourceType, sourceKey).Scan(
 		&detail.ResourceCount,
-		&detail.DiscoveryCount,
 		&detail.TypeResourceCount,
-		&detail.TypeDiscoveryCount,
 	)
 	if err != nil {
 		return SourceContributionDetail{}, fmt.Errorf("load source contribution: %w", err)
@@ -158,7 +145,6 @@ func (s *Store) GetSourceContribution(ctx context.Context, sourceType, sourceKey
 		return SourceContributionDetail{}, fmt.Errorf("%w: source contribution", ErrNotFound)
 	}
 	detail.ResourceShare = ratio(detail.ResourceCount, detail.TypeResourceCount)
-	detail.DiscoveryShare = ratio(detail.DiscoveryCount, detail.TypeDiscoveryCount)
 
 	var subSourceTotal int64
 	err = s.pool.QueryRow(ctx, `
@@ -185,19 +171,17 @@ func (s *Store) GetSourceContribution(ctx context.Context, sourceType, sourceKey
 	rows, err := s.pool.Query(ctx, `
 		WITH pairs AS (
 			SELECT resource_id,
-				NULLIF(btrim(source_metadata->>'sub_source'), '') AS sub_source,
-				COALESCE(sum(discovery_count), 0)::bigint AS discovery_count
+				NULLIF(btrim(source_metadata->>'sub_source'), '') AS sub_source
 			FROM resource_sources
 			WHERE source_type = $1 AND source_key = $2
 				AND NULLIF(btrim(source_metadata->>'sub_source'), '') IS NOT NULL
 			GROUP BY resource_id, NULLIF(btrim(source_metadata->>'sub_source'), '')
 		), contributions AS (
-			SELECT sub_source, count(*)::bigint AS resource_count,
-				COALESCE(sum(discovery_count), 0)::bigint AS discovery_count
+			SELECT sub_source, count(*)::bigint AS resource_count
 			FROM pairs
 			GROUP BY sub_source
 		)
-		SELECT sub_source, resource_count, discovery_count
+		SELECT sub_source, resource_count
 		FROM contributions
 		ORDER BY `+sortClause+`
 		LIMIT $3 OFFSET $4`, sourceType, sourceKey, pageSize, (page-1)*pageSize)
@@ -209,7 +193,7 @@ func (s *Store) GetSourceContribution(ctx context.Context, sourceType, sourceKey
 	items := make([]SubSourceContribution, 0, pageSize)
 	for rows.Next() {
 		var item SubSourceContribution
-		if err := rows.Scan(&item.SubSource, &item.ResourceCount, &item.DiscoveryCount); err != nil {
+		if err := rows.Scan(&item.SubSource, &item.ResourceCount); err != nil {
 			return SourceContributionDetail{}, fmt.Errorf("scan sub-source contribution: %w", err)
 		}
 		item.PairShare = ratio(item.ResourceCount, detail.SubSourcePairCount)

@@ -347,15 +347,13 @@ func mergeNormalizedKeywordLinks(ctx context.Context, tx pgx.Tx, keyword Keyword
 		return fmt.Errorf("upsert renamed resource keyword term: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO resource_keyword_links (
-		resource_id, term_id, keyword_id, first_seen_at, last_seen_at, discovery_count
+		resource_id, term_id, keyword_id
 	)
-	SELECT resource_id, $2, $1, first_seen_at, last_seen_at, discovery_count
+	SELECT resource_id, $2, $1
 	FROM resource_keyword_links WHERE keyword_id=$1 AND term_id<>$2
 	ON CONFLICT (resource_id, term_id) DO UPDATE SET
-		keyword_id=$1,
-		first_seen_at=LEAST(resource_keyword_links.first_seen_at, EXCLUDED.first_seen_at),
-		last_seen_at=GREATEST(resource_keyword_links.last_seen_at, EXCLUDED.last_seen_at),
-		discovery_count=resource_keyword_links.discovery_count + EXCLUDED.discovery_count`, keyword.ID, termID); err != nil {
+		keyword_id=$1
+	WHERE resource_keyword_links.keyword_id IS DISTINCT FROM $1`, keyword.ID, termID); err != nil {
 		return fmt.Errorf("merge normalized keyword associations: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM resource_keyword_links

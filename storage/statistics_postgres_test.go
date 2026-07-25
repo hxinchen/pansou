@@ -75,19 +75,18 @@ func TestPostgresOverviewSnapshotActivityAndTrends(t *testing.T) {
 		resourceID int64
 		sourceType string
 		sourceKey  string
-		count      int64
 	}{
-		{resourceID: resourceIDs[0], sourceType: "tg", sourceKey: "alpha", count: 2},
-		{resourceID: resourceIDs[1], sourceType: "tg", sourceKey: "alpha", count: 3},
-		{resourceID: resourceIDs[0], sourceType: "plugin", sourceKey: "beta", count: 10},
+		{resourceID: resourceIDs[0], sourceType: "tg", sourceKey: "alpha"},
+		{resourceID: resourceIDs[1], sourceType: "tg", sourceKey: "alpha"},
+		{resourceID: resourceIDs[0], sourceType: "plugin", sourceKey: "beta"},
 	} {
 		if _, err := store.pool.Exec(ctx, `
 			INSERT INTO resource_sources (
 				resource_id, source_type, source_key, source_identity,
-				discovered_at, first_seen_at, last_seen_at, discovery_count
-			) VALUES ($1, $2, $3, $4, $5, $5, $5, $6)`,
+				discovered_at, first_seen_at, last_seen_at
+			) VALUES ($1, $2, $3, $4, $5, $5, $5)`,
 			source.resourceID, source.sourceType, source.sourceKey,
-			fmt.Sprintf("overview-source-%d", i), now, source.count); err != nil {
+			fmt.Sprintf("overview-source-%d", i), now); err != nil {
 			t.Fatalf("insert source %d: %v", i, err)
 		}
 	}
@@ -156,17 +155,17 @@ func TestPostgresOverviewSnapshotActivityAndTrends(t *testing.T) {
 		t.Fatalf("snapshot unexpectedly contains activity: %+v", snapshot)
 	}
 	if len(snapshot.TopSources) != 2 || snapshot.TopSources[0] != (SourceContribution{
-		SourceType: "tg", SourceKey: "alpha", ResourceCount: 2, DiscoveryCount: 5,
+		SourceType: "tg", SourceKey: "alpha", ResourceCount: 2,
 	}) {
 		t.Fatalf("snapshot top sources = %+v", snapshot.TopSources)
 	}
 	if got := snapshot.SourceTypeTotals["plugin"]; got != (SourceContributionTotal{
-		SourceType: "plugin", ResourceCount: 1, DiscoveryCount: 10,
+		SourceType: "plugin", ResourceCount: 1,
 	}) {
 		t.Fatalf("plugin source total = %+v", got)
 	}
 	if got := snapshot.SourceTypeTotals["tg"]; got != (SourceContributionTotal{
-		SourceType: "tg", ResourceCount: 2, DiscoveryCount: 5,
+		SourceType: "tg", ResourceCount: 2,
 	}) {
 		t.Fatalf("tg source total = %+v", got)
 	}

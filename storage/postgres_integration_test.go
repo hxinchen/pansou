@@ -123,7 +123,7 @@ func TestPostgresStorageLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListResources: %v", err)
 	}
-	if page.Total != 1 || page.Items[0].DiscoveryCount != 2 || page.Items[0].SourceCount != 2 ||
+	if page.Total != 1 || page.Items[0].SourceCount != 2 ||
 		page.Items[0].KeywordCount != 2 || len(page.Items[0].SourcePreview) != 2 ||
 		len(page.Items[0].Sources) != 0 || len(page.Items[0].Keywords) != 0 ||
 		page.Items[0].Password != "" || page.Items[0].Content != "" {

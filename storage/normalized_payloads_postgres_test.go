@@ -49,16 +49,15 @@ func TestNormalizedKeywordLinksFollowKeywordLifecycle(t *testing.T) {
 		t.Fatalf("update keyword: %v", err)
 	}
 	var normalized, linkedType string
-	var discoveryCount int64
-	if err := store.pool.QueryRow(ctx, `SELECT term.normalized_keyword, term.keyword_type, link.discovery_count
+	if err := store.pool.QueryRow(ctx, `SELECT term.normalized_keyword, term.keyword_type
 		FROM resource_keyword_links link
 		JOIN resource_keyword_terms term ON term.id=link.term_id
 		WHERE link.resource_id=$1 AND link.keyword_id=$2`, result.Resource.ID, updated.ID).
-		Scan(&normalized, &linkedType, &discoveryCount); err != nil {
+		Scan(&normalized, &linkedType); err != nil {
 		t.Fatalf("load renamed normalized link: %v", err)
 	}
-	if normalized != NormalizeKeyword(renamed) || linkedType != keywordType || discoveryCount != 1 {
-		t.Fatalf("renamed normalized link = %q/%q/%d", normalized, linkedType, discoveryCount)
+	if normalized != NormalizeKeyword(renamed) || linkedType != keywordType {
+		t.Fatalf("renamed normalized link = %q/%q", normalized, linkedType)
 	}
 	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM resource_keyword_links
 		WHERE keyword_id=$1`, updated.ID).Scan(&linkRows); err != nil || linkRows != 2 {
@@ -153,7 +152,7 @@ func TestLegacyPayloadStorageRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert normalized resource: %v", err)
 	}
-	var legacyKeywordTable, legacyContentColumn bool
+	var legacyKeywordTable, legacyContentColumn, discoveryAnalyticsColumns bool
 	if err := store.pool.QueryRow(ctx, `SELECT to_regclass(current_schema() || '.resource_keywords') IS NOT NULL`).Scan(&legacyKeywordTable); err != nil {
 		t.Fatalf("check legacy keyword table: %v", err)
 	}
@@ -163,8 +162,18 @@ func TestLegacyPayloadStorageRemoved(t *testing.T) {
 	)`).Scan(&legacyContentColumn); err != nil {
 		t.Fatalf("check legacy content column: %v", err)
 	}
-	if legacyKeywordTable || legacyContentColumn {
-		t.Fatalf("legacy storage remains table=%v content_column=%v", legacyKeywordTable, legacyContentColumn)
+	if err := store.pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema=current_schema() AND (
+			(table_name IN ('resources', 'resource_sources') AND column_name='discovery_count') OR
+			(table_name='resource_keyword_links' AND column_name IN ('first_seen_at', 'last_seen_at', 'discovery_count'))
+		)
+	)`).Scan(&discoveryAnalyticsColumns); err != nil {
+		t.Fatalf("check discovery analytics columns: %v", err)
+	}
+	if legacyKeywordTable || legacyContentColumn || discoveryAnalyticsColumns {
+		t.Fatalf("legacy storage remains table=%v content_column=%v discovery_columns=%v",
+			legacyKeywordTable, legacyContentColumn, discoveryAnalyticsColumns)
 	}
 	detail, err := store.GetResource(ctx, result.Resource.ID)
 	if err != nil || detail.Content != "new payload" || detail.KeywordCount != 1 {
