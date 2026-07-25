@@ -1269,7 +1269,7 @@
           data: points.map(function (point) { return point.added; })
         },
         {
-          name: '发现次数',
+          name: '有效资源',
           type: 'line',
           smooth: 0.28,
           symbol: 'none',
