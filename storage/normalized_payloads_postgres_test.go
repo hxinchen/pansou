@@ -91,13 +91,6 @@ func TestNormalizedPayloadReadPathsIgnoreLegacyStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert resource: %v", err)
 	}
-	if _, err := store.pool.Exec(ctx, `UPDATE resources SET content='legacy stale' WHERE id=$1`, result.Resource.ID); err != nil {
-		t.Fatalf("stale legacy content: %v", err)
-	}
-	if _, err := store.pool.Exec(ctx, `DELETE FROM resource_keywords WHERE resource_id=$1`, result.Resource.ID); err != nil {
-		t.Fatalf("delete legacy keyword link: %v", err)
-	}
-
 	page, err := store.ListResources(ctx, ResourceFilter{
 		Keyword: "Original", KeywordType: "movie", Query: "normalized body", IncludeInvalid: true,
 	})
@@ -149,7 +142,7 @@ func TestCreateKeywordAttachesExistingNormalizedLinks(t *testing.T) {
 	}
 }
 
-func TestNormalizedWritesLeaveLegacyPayloadsEmpty(t *testing.T) {
+func TestLegacyPayloadStorageRemoved(t *testing.T) {
 	now := time.Date(2026, time.July, 25, 15, 0, 0, 0, time.UTC)
 	store := newPostgresTestStore(t, now)
 	ctx := context.Background()
@@ -160,16 +153,18 @@ func TestNormalizedWritesLeaveLegacyPayloadsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert normalized resource: %v", err)
 	}
-	var legacyContent string
-	var legacyKeywordRows int
-	if err := store.pool.QueryRow(ctx, `SELECT content FROM resources WHERE id=$1`, result.Resource.ID).Scan(&legacyContent); err != nil {
-		t.Fatalf("load legacy content: %v", err)
+	var legacyKeywordTable, legacyContentColumn bool
+	if err := store.pool.QueryRow(ctx, `SELECT to_regclass(current_schema() || '.resource_keywords') IS NOT NULL`).Scan(&legacyKeywordTable); err != nil {
+		t.Fatalf("check legacy keyword table: %v", err)
 	}
-	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM resource_keywords WHERE resource_id=$1`, result.Resource.ID).Scan(&legacyKeywordRows); err != nil {
-		t.Fatalf("count legacy keyword rows: %v", err)
+	if err := store.pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema=current_schema() AND table_name='resources' AND column_name='content'
+	)`).Scan(&legacyContentColumn); err != nil {
+		t.Fatalf("check legacy content column: %v", err)
 	}
-	if legacyContent != "" || legacyKeywordRows != 0 {
-		t.Fatalf("legacy writes content=%q keyword_rows=%d", legacyContent, legacyKeywordRows)
+	if legacyKeywordTable || legacyContentColumn {
+		t.Fatalf("legacy storage remains table=%v content_column=%v", legacyKeywordTable, legacyContentColumn)
 	}
 	detail, err := store.GetResource(ctx, result.Resource.ID)
 	if err != nil || detail.Content != "new payload" || detail.KeywordCount != 1 {
