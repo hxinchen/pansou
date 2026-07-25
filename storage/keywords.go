@@ -99,10 +99,6 @@ func (s *Store) CreateKeyword(ctx context.Context, input CreateKeywordInput) (Ke
 }
 
 func attachKeywordResources(ctx context.Context, tx pgx.Tx, keywordID int64, normalized string) error {
-	if _, err := tx.Exec(ctx, `UPDATE resource_keywords SET keyword_id=$1
-		WHERE normalized_keyword=$2 AND keyword_id IS NULL`, keywordID, normalized); err != nil {
-		return fmt.Errorf("attach legacy keyword resources: %w", err)
-	}
 	if _, err := tx.Exec(ctx, `UPDATE resource_keyword_links link SET keyword_id=$1
 		FROM resource_keyword_terms term
 		WHERE term.id=link.term_id AND term.normalized_keyword=$2 AND link.keyword_id IS NULL`, keywordID, normalized); err != nil {
@@ -323,34 +319,11 @@ func (s *Store) UpdateKeyword(ctx context.Context, id int64, input UpdateKeyword
 		return Keyword{}, mapWriteError("update keyword", err)
 	}
 	if input.Keyword != nil {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO resource_keywords (
-				resource_id, keyword_id, keyword, normalized_keyword, keyword_type,
-				first_seen_at, last_seen_at, discovery_count
-			)
-			SELECT resource_id, $1, $2, $3, $4, first_seen_at, last_seen_at, discovery_count
-			FROM resource_keywords WHERE keyword_id=$1 AND normalized_keyword<>$3
-			ON CONFLICT (resource_id, normalized_keyword) DO UPDATE SET
-				keyword_id=$1, keyword=EXCLUDED.keyword, keyword_type=EXCLUDED.keyword_type,
-				first_seen_at=LEAST(resource_keywords.first_seen_at, EXCLUDED.first_seen_at),
-				last_seen_at=GREATEST(resource_keywords.last_seen_at, EXCLUDED.last_seen_at),
-				discovery_count=resource_keywords.discovery_count + EXCLUDED.discovery_count`,
-			updated.ID, updated.Keyword, updated.NormalizedKeyword, updated.KeywordType); err != nil {
-			return Keyword{}, fmt.Errorf("merge renamed keyword associations: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `DELETE FROM resource_keywords
-			WHERE keyword_id=$1 AND normalized_keyword<>$2`, updated.ID, updated.NormalizedKeyword); err != nil {
-			return Keyword{}, fmt.Errorf("remove renamed keyword associations: %w", err)
-		}
 		if err := mergeNormalizedKeywordLinks(ctx, tx, updated); err != nil {
 			return Keyword{}, err
 		}
 	}
 	if input.KeywordType != nil {
-		if _, err := tx.Exec(ctx, `UPDATE resource_keywords SET keyword_type=$2
-			WHERE keyword_id=$1`, updated.ID, updated.KeywordType); err != nil {
-			return Keyword{}, fmt.Errorf("update resource keyword type: %w", err)
-		}
 		if _, err := tx.Exec(ctx, `UPDATE resource_keyword_terms SET
 			keyword_type=$2, updated_at=now()
 			WHERE id IN (SELECT term_id FROM resource_keyword_links WHERE keyword_id=$1)`, updated.ID, updated.KeywordType); err != nil {

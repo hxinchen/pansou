@@ -68,15 +68,12 @@ func TestNormalizedKeywordLinksFollowKeywordLifecycle(t *testing.T) {
 	if err := store.DeleteKeyword(ctx, keyword.ID); err != nil {
 		t.Fatalf("delete keyword: %v", err)
 	}
-	var oldKeywordID, newKeywordID *int64
-	if err := store.pool.QueryRow(ctx, `SELECT keyword_id FROM resource_keywords WHERE resource_id=$1`, result.Resource.ID).Scan(&oldKeywordID); err != nil {
-		t.Fatalf("load legacy link after delete: %v", err)
-	}
+	var newKeywordID *int64
 	if err := store.pool.QueryRow(ctx, `SELECT keyword_id FROM resource_keyword_links WHERE resource_id=$1`, result.Resource.ID).Scan(&newKeywordID); err != nil {
 		t.Fatalf("load normalized link after delete: %v", err)
 	}
-	if oldKeywordID != nil || newKeywordID != nil {
-		t.Fatalf("keyword IDs after delete = legacy:%v normalized:%v, want nil", oldKeywordID, newKeywordID)
+	if newKeywordID != nil {
+		t.Fatalf("normalized keyword ID after delete = %v, want nil", newKeywordID)
 	}
 }
 
@@ -143,14 +140,39 @@ func TestCreateKeywordAttachesExistingNormalizedLinks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create managed keyword: %v", err)
 	}
-	var legacyKeywordID, normalizedKeywordID *int64
-	if err := store.pool.QueryRow(ctx, `SELECT keyword_id FROM resource_keywords WHERE resource_id=$1`, result.Resource.ID).Scan(&legacyKeywordID); err != nil {
-		t.Fatalf("load attached legacy keyword: %v", err)
-	}
+	var normalizedKeywordID *int64
 	if err := store.pool.QueryRow(ctx, `SELECT keyword_id FROM resource_keyword_links WHERE resource_id=$1`, result.Resource.ID).Scan(&normalizedKeywordID); err != nil {
 		t.Fatalf("load attached normalized keyword: %v", err)
 	}
-	if legacyKeywordID == nil || normalizedKeywordID == nil || *legacyKeywordID != keyword.ID || *normalizedKeywordID != keyword.ID {
-		t.Fatalf("attached keyword IDs = legacy:%v normalized:%v, want %d", legacyKeywordID, normalizedKeywordID, keyword.ID)
+	if normalizedKeywordID == nil || *normalizedKeywordID != keyword.ID {
+		t.Fatalf("attached normalized keyword ID = %v, want %d", normalizedKeywordID, keyword.ID)
+	}
+}
+
+func TestNormalizedWritesLeaveLegacyPayloadsEmpty(t *testing.T) {
+	now := time.Date(2026, time.July, 25, 15, 0, 0, 0, time.UTC)
+	store := newPostgresTestStore(t, now)
+	ctx := context.Background()
+	result, err := store.UpsertResource(ctx, ResourceInput{
+		URL: "https://normalized.example/new-writes", Title: "normalized write", Content: "new payload",
+		Keyword: "New Keyword", DiscoveredAt: now,
+	})
+	if err != nil {
+		t.Fatalf("upsert normalized resource: %v", err)
+	}
+	var legacyContent string
+	var legacyKeywordRows int
+	if err := store.pool.QueryRow(ctx, `SELECT content FROM resources WHERE id=$1`, result.Resource.ID).Scan(&legacyContent); err != nil {
+		t.Fatalf("load legacy content: %v", err)
+	}
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM resource_keywords WHERE resource_id=$1`, result.Resource.ID).Scan(&legacyKeywordRows); err != nil {
+		t.Fatalf("count legacy keyword rows: %v", err)
+	}
+	if legacyContent != "" || legacyKeywordRows != 0 {
+		t.Fatalf("legacy writes content=%q keyword_rows=%d", legacyContent, legacyKeywordRows)
+	}
+	detail, err := store.GetResource(ctx, result.Resource.ID)
+	if err != nil || detail.Content != "new payload" || detail.KeywordCount != 1 {
+		t.Fatalf("normalized detail=%+v err=%v", detail, err)
 	}
 }

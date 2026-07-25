@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -70,8 +71,8 @@ func sanitizeUTF8Value(value any) any {
 	}
 }
 
-const resourceReturningColumns = `
-	id, normalized_url, url, password, platform, title, content,
+const resourceMutationColumns = `
+	id, normalized_url, url, password, platform, title, ''::text,
 	link_datetime, check_status, last_checked_at, candidate_check_status, candidate_checked_at,
 	first_seen_at, last_seen_at,
 	discovery_count, created_at, updated_at`
@@ -169,15 +170,14 @@ func (s *Store) upsertResourceTx(ctx context.Context, tx pgx.Tx, input ResourceI
 	var result UpsertResult
 	row := tx.QueryRow(ctx, `
 		INSERT INTO resources (
-			normalized_url, url, password, platform, title, content, link_datetime,
+			normalized_url, url, password, platform, title, link_datetime,
 			check_status, last_checked_at, first_seen_at, last_seen_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
 		ON CONFLICT (normalized_url) DO UPDATE SET
 			url = CASE WHEN char_length(EXCLUDED.url) > char_length(resources.url) THEN EXCLUDED.url ELSE resources.url END,
 			password = CASE WHEN char_length(EXCLUDED.password) > char_length(resources.password) THEN EXCLUDED.password ELSE resources.password END,
 			platform = CASE WHEN resources.platform = '' THEN EXCLUDED.platform ELSE resources.platform END,
 			title = CASE WHEN char_length(EXCLUDED.title) > char_length(resources.title) THEN EXCLUDED.title ELSE resources.title END,
-			content = CASE WHEN char_length(EXCLUDED.content) > char_length(resources.content) THEN EXCLUDED.content ELSE resources.content END,
 			link_datetime = CASE
 				WHEN resources.link_datetime IS NULL THEN EXCLUDED.link_datetime
 				WHEN EXCLUDED.link_datetime IS NULL THEN resources.link_datetime
@@ -191,19 +191,20 @@ func (s *Store) upsertResourceTx(ctx context.Context, tx pgx.Tx, input ResourceI
 			last_seen_at = GREATEST(resources.last_seen_at, EXCLUDED.last_seen_at),
 			discovery_count = resources.discovery_count + 1,
 			updated_at = now()
-		RETURNING `+resourceReturningColumns+`, (xmax = 0)`,
+		RETURNING `+resourceMutationColumns+`, (xmax = 0)`,
 		normalizedURL, cleanedURL, strings.TrimSpace(input.Password),
-		strings.TrimSpace(input.Platform), strings.TrimSpace(input.Title), strings.TrimSpace(input.Content),
+		strings.TrimSpace(input.Platform), strings.TrimSpace(input.Title),
 		input.LinkDatetime, input.CheckStatus, input.LastCheckedAt, seenAt,
 	)
 	resource, scanErr := scanResourceWithInserted(row, &result.Inserted)
 	if scanErr != nil {
 		return UpsertResult{}, fmt.Errorf("upsert resource: %w", scanErr)
 	}
-	result.Resource = resource
-	if err := attachResourceContent(ctx, tx, resource.ID, resource.Content); err != nil {
+	resource.Content, err = attachResourceContent(ctx, tx, resource.ID, input.Content)
+	if err != nil {
 		return UpsertResult{}, err
 	}
+	result.Resource = resource
 
 	if strings.TrimSpace(input.Source.SourceType) != "" {
 		if err := upsertResourceSource(ctx, tx, resource.ID, normalizedURL, seenAt, input.Source); err != nil {
@@ -231,10 +232,17 @@ func scanResourceWithInserted(row rowScanner, inserted *bool) (Resource, error) 
 	return resource, err
 }
 
-func attachResourceContent(ctx context.Context, tx pgx.Tx, resourceID int64, content string) error {
+func attachResourceContent(ctx context.Context, tx pgx.Tx, resourceID int64, content string) (string, error) {
 	content = strings.TrimSpace(content)
-	if content == "" {
-		return nil
+	var current string
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(current_content.content, '')
+		FROM resources resource
+		LEFT JOIN resource_contents current_content ON current_content.id=resource.content_id
+		WHERE resource.id=$1 FOR UPDATE OF resource`, resourceID).Scan(&current); err != nil {
+		return "", fmt.Errorf("load current resource content: %w", err)
+	}
+	if utf8.RuneCountInString(content) <= utf8.RuneCountInString(current) {
+		return current, nil
 	}
 	hash := sha256.Sum256([]byte(content))
 	var contentID int64
@@ -244,17 +252,17 @@ func attachResourceContent(ctx context.Context, tx pgx.Tx, resourceID int64, con
 		err = tx.QueryRow(ctx, `SELECT id FROM resource_contents
 			WHERE content_hash=$1 AND content=$2`, hash[:], content).Scan(&contentID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("resource content hash collision")
+			return "", fmt.Errorf("resource content hash collision")
 		}
 	}
 	if err != nil {
-		return fmt.Errorf("upsert resource content: %w", err)
+		return "", fmt.Errorf("upsert resource content: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE resources SET content_id=$2
 		WHERE id=$1 AND content_id IS DISTINCT FROM $2`, resourceID, contentID); err != nil {
-		return fmt.Errorf("attach resource content: %w", err)
+		return "", fmt.Errorf("attach resource content: %w", err)
 	}
-	return nil
+	return content, nil
 }
 
 func upsertResourceSource(ctx context.Context, tx pgx.Tx, resourceID int64, normalizedURL string, seenAt time.Time, input ResourceSourceInput) error {
@@ -291,22 +299,6 @@ func upsertResourceKeyword(ctx context.Context, tx pgx.Tx, resourceID int64, see
 	normalized := NormalizeKeyword(keyword)
 	if keywordType = strings.TrimSpace(keywordType); keywordType == "" {
 		keywordType = DefaultKeywordType
-	}
-	_, err := tx.Exec(ctx, `
-		INSERT INTO resource_keywords (
-			resource_id, keyword_id, keyword, normalized_keyword, keyword_type, first_seen_at, last_seen_at
-		) VALUES ($1, (SELECT id FROM keywords WHERE normalized_keyword=$2), $3, $2, $4, $5, $5)
-		ON CONFLICT (resource_id, normalized_keyword) DO UPDATE SET
-			keyword_id = COALESCE(resource_keywords.keyword_id, EXCLUDED.keyword_id),
-			keyword = CASE WHEN char_length(EXCLUDED.keyword)>char_length(resource_keywords.keyword) THEN EXCLUDED.keyword ELSE resource_keywords.keyword END,
-			keyword_type = CASE WHEN resource_keywords.keyword_type='general' THEN EXCLUDED.keyword_type ELSE resource_keywords.keyword_type END,
-			first_seen_at = LEAST(resource_keywords.first_seen_at, EXCLUDED.first_seen_at),
-			last_seen_at = GREATEST(resource_keywords.last_seen_at, EXCLUDED.last_seen_at),
-			discovery_count = resource_keywords.discovery_count + 1`,
-		resourceID, normalized, strings.TrimSpace(keyword), keywordType, seenAt,
-	)
-	if err != nil {
-		return fmt.Errorf("upsert resource keyword: %w", err)
 	}
 	return upsertNormalizedResourceKeyword(ctx, tx, resourceID, seenAt, keyword, normalized, keywordType)
 }
