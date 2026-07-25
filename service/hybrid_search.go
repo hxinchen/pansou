@@ -206,7 +206,7 @@ func (s *HybridSearchService) searchDatabase(ctx context.Context, keyword, resul
 		}
 	}
 
-	// 数据库查询已通过 resource_keywords 与 TitleQuery 约束候选；这里保留
+	// 数据库查询已通过归一化关键词关联与 TitleQuery 约束候选；这里保留
 	// 关联命中以兼容历史数据，但仍按文本相关度重新排序。
 	rankedResults := append([]model.SearchResult(nil), allResults...)
 	rankSearchResultsInPlace(rankedResults, keyword)
