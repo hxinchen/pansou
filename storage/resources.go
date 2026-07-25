@@ -70,11 +70,23 @@ func sanitizeUTF8Value(value any) any {
 	}
 }
 
-const resourceColumns = `
+const resourceReturningColumns = `
 	id, normalized_url, url, password, platform, title, content,
 	link_datetime, check_status, last_checked_at, candidate_check_status, candidate_checked_at,
 	first_seen_at, last_seen_at,
 	discovery_count, created_at, updated_at`
+
+const resourceColumns = `
+	r.id, r.normalized_url, r.url, r.password, r.platform, r.title, COALESCE(rc.content, ''),
+	r.link_datetime, r.check_status, r.last_checked_at, r.candidate_check_status, r.candidate_checked_at,
+	r.first_seen_at, r.last_seen_at,
+	r.discovery_count, r.created_at, r.updated_at`
+
+const resourceColumnsWithoutContent = `
+	r.id, r.normalized_url, r.url, r.password, r.platform, r.title, ''::text,
+	r.link_datetime, r.check_status, r.last_checked_at, r.candidate_check_status, r.candidate_checked_at,
+	r.first_seen_at, r.last_seen_at,
+	r.discovery_count, r.created_at, r.updated_at`
 
 const resourceListColumns = `
 	r.id, r.normalized_url, r.url, r.platform, left(r.title, 500),
@@ -179,7 +191,7 @@ func (s *Store) upsertResourceTx(ctx context.Context, tx pgx.Tx, input ResourceI
 			last_seen_at = GREATEST(resources.last_seen_at, EXCLUDED.last_seen_at),
 			discovery_count = resources.discovery_count + 1,
 			updated_at = now()
-		RETURNING `+resourceColumns+`, (xmax = 0)`,
+		RETURNING `+resourceReturningColumns+`, (xmax = 0)`,
 		normalizedURL, cleanedURL, strings.TrimSpace(input.Password),
 		strings.TrimSpace(input.Platform), strings.TrimSpace(input.Title), strings.TrimSpace(input.Content),
 		input.LinkDatetime, input.CheckStatus, input.LastCheckedAt, seenAt,
@@ -526,19 +538,19 @@ func timePointer(value time.Time) *time.Time {
 }
 
 func (s *Store) SearchResources(ctx context.Context, filter ResourceFilter) (ResourcePage, error) {
-	return s.ListResources(ctx, filter)
+	return s.listResources(ctx, filter, false, false)
 }
 
 func (s *Store) ListResources(ctx context.Context, filter ResourceFilter) (ResourcePage, error) {
-	return s.listResources(ctx, filter, false)
+	return s.listResources(ctx, filter, false, true)
 }
 
 // ListResourceSummaries returns the lightweight shape used by the admin list.
 func (s *Store) ListResourceSummaries(ctx context.Context, filter ResourceFilter) (ResourcePage, error) {
-	return s.listResources(ctx, filter, true)
+	return s.listResources(ctx, filter, true, false)
 }
 
-func (s *Store) listResources(ctx context.Context, filter ResourceFilter, summaryOnly bool) (ResourcePage, error) {
+func (s *Store) listResources(ctx context.Context, filter ResourceFilter, summaryOnly, includeContent bool) (ResourcePage, error) {
 	if s == nil || s.pool == nil {
 		return ResourcePage{}, fmt.Errorf("storage is disabled")
 	}
@@ -568,11 +580,15 @@ func (s *Store) listResources(ctx context.Context, filter ResourceFilter, summar
 		return ResourcePage{}, err
 	}
 	queryArgs := append(append([]any(nil), args...), pageSize, (page-1)*pageSize)
-	columns := resourceColumns
+	columns := resourceColumnsWithoutContent
+	from := "resources r"
 	if summaryOnly {
 		columns = resourceListColumns
+	} else if includeContent {
+		columns = resourceColumns
+		from += " LEFT JOIN resource_contents rc ON rc.id=r.content_id"
 	}
-	rows, err := s.pool.Query(ctx, "SELECT "+columns+" FROM resources r WHERE "+where+" ORDER BY "+sortClause+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
+	rows, err := s.pool.Query(ctx, "SELECT "+columns+" FROM "+from+" WHERE "+where+" ORDER BY "+sortClause+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2), queryArgs...)
 	if err != nil {
 		return ResourcePage{}, fmt.Errorf("list resources: %w", err)
 	}
@@ -613,15 +629,15 @@ func buildResourceWhere(filter ResourceFilter) (string, []any) {
 	}
 	if normalized := NormalizeKeyword(filter.Keyword); normalized != "" {
 		placeholder := addArg(normalized)
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM resource_keywords rk WHERE rk.resource_id=r.id AND rk.normalized_keyword="+placeholder+")")
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM resource_keyword_links rkl JOIN resource_keyword_terms rkt ON rkt.id=rkl.term_id WHERE rkl.resource_id=r.id AND rkt.normalized_keyword="+placeholder+")")
 	}
 	if filter.KeywordType != "" {
 		placeholder := addArg(filter.KeywordType)
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM resource_keywords rk WHERE rk.resource_id=r.id AND rk.keyword_type="+placeholder+")")
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM resource_keyword_links rkl JOIN resource_keyword_terms rkt ON rkt.id=rkl.term_id WHERE rkl.resource_id=r.id AND rkt.keyword_type="+placeholder+")")
 	}
 	if query := strings.TrimSpace(filter.Query); query != "" {
 		placeholder := addArg("%" + query + "%")
-		conditions = append(conditions, "(r.title ILIKE "+placeholder+" OR r.content ILIKE "+placeholder+" OR r.url ILIKE "+placeholder+")")
+		conditions = append(conditions, "(r.title ILIKE "+placeholder+" OR EXISTS (SELECT 1 FROM resource_contents rc_filter WHERE rc_filter.id=r.content_id AND rc_filter.content ILIKE "+placeholder+") OR r.url ILIKE "+placeholder+")")
 	}
 	if query := strings.TrimSpace(filter.TitleQuery); query != "" {
 		placeholder := addArg("%" + query + "%")
@@ -648,14 +664,14 @@ func buildResourceWhere(filter ResourceFilter) (string, []any) {
 	includeConditions := make([]string, 0, len(filter.Include))
 	for _, value := range normalizeStringList(filter.Include) {
 		placeholder := addArg("%" + value + "%")
-		includeConditions = append(includeConditions, "r.title ILIKE "+placeholder+" OR r.content ILIKE "+placeholder)
+		includeConditions = append(includeConditions, "r.title ILIKE "+placeholder+" OR EXISTS (SELECT 1 FROM resource_contents rc_filter WHERE rc_filter.id=r.content_id AND rc_filter.content ILIKE "+placeholder+")")
 	}
 	if len(includeConditions) > 0 {
 		conditions = append(conditions, "("+strings.Join(includeConditions, " OR ")+")")
 	}
 	for _, value := range normalizeStringList(filter.Exclude) {
 		placeholder := addArg("%" + value + "%")
-		conditions = append(conditions, "NOT (r.title ILIKE "+placeholder+" OR r.content ILIKE "+placeholder+")")
+		conditions = append(conditions, "NOT (r.title ILIKE "+placeholder+" OR EXISTS (SELECT 1 FROM resource_contents rc_filter WHERE rc_filter.id=r.content_id AND rc_filter.content ILIKE "+placeholder+"))")
 	}
 	if filter.From != nil {
 		conditions = append(conditions, "r.last_seen_at >= "+addArg(*filter.From))
@@ -670,7 +686,7 @@ func (s *Store) GetResource(ctx context.Context, id int64) (Resource, error) {
 	if s == nil || s.pool == nil {
 		return Resource{}, fmt.Errorf("storage is disabled")
 	}
-	resource, err := scanResource(s.pool.QueryRow(ctx, "SELECT "+resourceColumns+" FROM resources WHERE id=$1", id))
+	resource, err := scanResource(s.pool.QueryRow(ctx, "SELECT "+resourceColumns+" FROM resources r LEFT JOIN resource_contents rc ON rc.id=r.content_id WHERE r.id=$1", id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Resource{}, ErrNotFound
 	}
@@ -696,7 +712,7 @@ func (s *Store) loadResourceAssociationSummaries(ctx context.Context, resources 
 	}
 	rows, err := s.pool.Query(ctx, `SELECT ids.id,
 		(SELECT count(*) FROM resource_sources rs WHERE rs.resource_id=ids.id),
-		(SELECT count(*) FROM resource_keywords rk WHERE rk.resource_id=ids.id)
+		(SELECT count(*) FROM resource_keyword_links rkl WHERE rkl.resource_id=ids.id)
 		FROM unnest($1::bigint[]) AS ids(id)`, ids)
 	if err != nil {
 		return fmt.Errorf("load resource association counts: %w", err)
@@ -802,7 +818,7 @@ func (s *Store) ListResourceKeywords(ctx context.Context, resourceID int64, filt
 	}
 	page, pageSize := normalizePage(filter.Page, filter.PageSize, 50, 100)
 	var total int64
-	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM resource_keywords WHERE resource_id=$1", resourceID).Scan(&total); err != nil {
+	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM resource_keyword_links WHERE resource_id=$1", resourceID).Scan(&total); err != nil {
 		return ResourceKeywordPage{}, fmt.Errorf("count resource keywords: %w", err)
 	}
 	if total == 0 {
@@ -814,10 +830,12 @@ func (s *Store) ListResourceKeywords(ctx context.Context, resourceID int64, filt
 			return ResourceKeywordPage{}, ErrNotFound
 		}
 	}
-	rows, err := s.pool.Query(ctx, `SELECT resource_id, keyword_id, keyword,
-		normalized_keyword, keyword_type, first_seen_at, last_seen_at, discovery_count
-		FROM resource_keywords WHERE resource_id=$1
-		ORDER BY last_seen_at DESC, normalized_keyword LIMIT $2 OFFSET $3`, resourceID, pageSize, (page-1)*pageSize)
+	rows, err := s.pool.Query(ctx, `SELECT link.resource_id, link.keyword_id, term.keyword,
+		term.normalized_keyword, term.keyword_type, link.first_seen_at, link.last_seen_at, link.discovery_count
+		FROM resource_keyword_links link
+		JOIN resource_keyword_terms term ON term.id=link.term_id
+		WHERE link.resource_id=$1
+		ORDER BY link.last_seen_at DESC, term.normalized_keyword LIMIT $2 OFFSET $3`, resourceID, pageSize, (page-1)*pageSize)
 	if err != nil {
 		return ResourceKeywordPage{}, fmt.Errorf("list resource keywords: %w", err)
 	}
@@ -882,10 +900,12 @@ func (s *Store) loadResourceAssociations(ctx context.Context, resources []Resour
 	rows.Close()
 
 	keywordRows, err := s.pool.Query(ctx, `
-		SELECT resource_id, keyword_id, keyword, normalized_keyword, keyword_type,
-			first_seen_at, last_seen_at, discovery_count
-		FROM resource_keywords WHERE resource_id=ANY($1::bigint[])
-		ORDER BY resource_id, last_seen_at DESC`, ids)
+		SELECT link.resource_id, link.keyword_id, term.keyword, term.normalized_keyword, term.keyword_type,
+			link.first_seen_at, link.last_seen_at, link.discovery_count
+		FROM resource_keyword_links link
+		JOIN resource_keyword_terms term ON term.id=link.term_id
+		WHERE link.resource_id=ANY($1::bigint[])
+		ORDER BY link.resource_id, link.last_seen_at DESC`, ids)
 	if err != nil {
 		return fmt.Errorf("load resource keywords: %w", err)
 	}
@@ -1074,7 +1094,7 @@ func (s *Store) ListResourcesDueForCheck(ctx context.Context, policy LinkCheckPo
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.pool.Query(ctx, "SELECT "+resourceColumns+` FROM resources
+	rows, err := s.pool.Query(ctx, "SELECT "+resourceColumnsWithoutContent+` FROM resources r
 		WHERE `+resourcesDueForCheckWhere+`
 		ORDER BY
 			CASE

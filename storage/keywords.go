@@ -89,14 +89,26 @@ func (s *Store) CreateKeyword(ctx context.Context, input CreateKeywordInput) (Ke
 	if err != nil {
 		return Keyword{}, mapWriteError("create keyword", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE resource_keywords SET keyword_id=$1
-		WHERE normalized_keyword=$2 AND keyword_id IS NULL`, keyword.ID, normalized); err != nil {
-		return Keyword{}, fmt.Errorf("attach keyword resources: %w", err)
+	if err := attachKeywordResources(ctx, tx, keyword.ID, normalized); err != nil {
+		return Keyword{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Keyword{}, fmt.Errorf("commit create keyword: %w", err)
 	}
 	return keyword, nil
+}
+
+func attachKeywordResources(ctx context.Context, tx pgx.Tx, keywordID int64, normalized string) error {
+	if _, err := tx.Exec(ctx, `UPDATE resource_keywords SET keyword_id=$1
+		WHERE normalized_keyword=$2 AND keyword_id IS NULL`, keywordID, normalized); err != nil {
+		return fmt.Errorf("attach legacy keyword resources: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE resource_keyword_links link SET keyword_id=$1
+		FROM resource_keyword_terms term
+		WHERE term.id=link.term_id AND term.normalized_keyword=$2 AND link.keyword_id IS NULL`, keywordID, normalized); err != nil {
+		return fmt.Errorf("attach normalized keyword resources: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) GetKeyword(ctx context.Context, id int64) (Keyword, error) {

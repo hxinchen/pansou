@@ -758,9 +758,8 @@ func (s *Store) FinalizeKeywordAPISyncRun(ctx context.Context, input KeywordAPIS
 		}
 		if inserted {
 			result.InsertedKeywords++
-			if _, err := tx.Exec(ctx, `UPDATE resource_keywords SET keyword_id=$1
-				WHERE normalized_keyword=$2 AND keyword_id IS NULL`, keywordID, value.Normalized); err != nil {
-				return KeywordAPISyncRun{}, KeywordAPISourceSyncResult{}, fmt.Errorf("attach API keyword resources for sync run: %w", err)
+			if err := attachKeywordResources(ctx, tx, keywordID, value.Normalized); err != nil {
+				return KeywordAPISyncRun{}, KeywordAPISourceSyncResult{}, err
 			}
 		} else {
 			result.ExistingKeywords++

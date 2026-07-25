@@ -431,9 +431,8 @@ func (s *Store) CompleteKeywordAPISourceSync(ctx context.Context, input KeywordA
 		}
 		if inserted {
 			result.InsertedKeywords++
-			if _, err := tx.Exec(ctx, `UPDATE resource_keywords SET keyword_id=$1
-				WHERE normalized_keyword=$2 AND keyword_id IS NULL`, keywordID, value.Normalized); err != nil {
-				return KeywordAPISourceSyncResult{}, fmt.Errorf("attach API keyword resources: %w", err)
+			if err := attachKeywordResources(ctx, tx, keywordID, value.Normalized); err != nil {
+				return KeywordAPISourceSyncResult{}, err
 			}
 		} else {
 			result.ExistingKeywords++

@@ -55,6 +55,9 @@ func TestBuildResourceWhereIncludeUsesOR(t *testing.T) {
 	if strings.Count(where, " ILIKE ") != 4 || !strings.Contains(where, " OR r.title ILIKE ") {
 		t.Fatalf("include predicate is not OR-composed: %s", where)
 	}
+	if !strings.Contains(where, "resource_contents") || strings.Contains(where, " OR r.content ILIKE") {
+		t.Fatalf("include predicate did not use normalized content storage: %s", where)
+	}
 	if strings.Contains(where, ") AND (r.title ILIKE") {
 		t.Fatalf("include predicates were AND-composed: %s", where)
 	}
@@ -70,6 +73,20 @@ func TestBuildResourceWhereAppliesTitleQueryBeforePagination(t *testing.T) {
 		t.Fatalf("missing title predicate: %s", where)
 	}
 	if len(args) != 2 || args[1] != "%sample%" {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
+func TestBuildResourceWhereUsesNormalizedKeywordLinks(t *testing.T) {
+	t.Parallel()
+	where, args := buildResourceWhere(ResourceFilter{Keyword: " Sample ", KeywordType: "movie", IncludeInvalid: true})
+	if !strings.Contains(where, "resource_keyword_links") || !strings.Contains(where, "resource_keyword_terms") {
+		t.Fatalf("keyword predicates did not use normalized links: %s", where)
+	}
+	if strings.Contains(where, "resource_keywords") {
+		t.Fatalf("keyword predicates still use legacy associations: %s", where)
+	}
+	if len(args) != 2 || args[0] != "sample" || args[1] != "movie" {
 		t.Fatalf("args = %#v", args)
 	}
 }
