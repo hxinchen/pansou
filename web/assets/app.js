@@ -5706,6 +5706,16 @@
     return labels[status] || status || '未返回';
   }
 
+  function sourceSearchCompletionLabel(status) {
+    var labels = { complete: '完整完成', partial: '部分完成', processing: '处理中' };
+    return labels[status] || status || '完成状态未返回';
+  }
+
+  function sourceSearchStopReasonLabel(reason) {
+    var labels = { deadline: '达到搜索时限' };
+    return labels[reason] || reason || '部分来源未完成';
+  }
+
   function sourceSearchLinkHost(value) {
     try { return new URL(String(value || '')).host || '未知域名'; }
     catch (error) { return '未知域名'; }
@@ -5744,15 +5754,27 @@
     });
     var computedTotal = types.reduce(function (total, type) { return total + arrayFrom(merged[type], ['items', 'links']).length; }, 0);
     var total = numberValue(pick(data, ['total'], computedTotal), computedTotal);
+    var completion = String(pick(data, ['completion'], 'complete') || 'complete').toLowerCase();
+    var stopReason = String(pick(data, ['stop_reason'], '') || '');
+    var partialSources = arrayFrom(data, ['partial_sources']);
+    var sourceStatuses = pick(data, ['source_statuses'], {}) || {};
+    if (!partialSources.length) {
+      partialSources = Object.keys(sourceStatuses).filter(function (source) {
+        return String(pick(sourceStatuses[source], ['completion'], '')).toLowerCase() === 'partial';
+      });
+    }
+    var execution = pick(data, ['execution'], null);
     var sourcePreview = searchState.actualSources.slice(0, 4).join('、');
     var sourceText = searchState.actualSources.length ? sourcePreview + (searchState.actualSources.length > 4 ? ' 等 ' + searchState.actualSources.length + ' 个' : '') : '未返回来源标记';
-    var summary = '<div class="source-search-summary"><strong>' + formatNumber(total) + '</strong><span>条结果</span><span class="type-badge">' + formatNumber(searchState.elapsedMS) + ' ms</span><span class="type-badge cache-' + escapeHTML(searchState.cacheStatus || 'not_recorded') + '">' + escapeHTML(sourceSearchCacheLabel(searchState.cacheStatus)) + '</span><span class="type-badge" title="' + escapeHTML(searchState.actualSources.join('\n')) + '">实际来源：' + escapeHTML(sourceText) + '</span></div>';
+    var executionText = execution ? '已完成 ' + formatNumber(pick(execution, ['completed'], 0)) + ' / 已执行 ' + formatNumber(pick(execution, ['executed'], 0)) + ' · 延后 ' + formatNumber(pick(execution, ['deferred'], 0)) + ' · 取消 ' + formatNumber(pick(execution, ['cancelled'], 0)) : '';
+    var summary = '<div class="source-search-summary"><strong>' + formatNumber(total) + '</strong><span>条结果</span><span class="type-badge">' + formatNumber(searchState.elapsedMS) + ' ms</span><span class="type-badge cache-' + escapeHTML(searchState.cacheStatus || 'not_recorded') + '">' + escapeHTML(sourceSearchCacheLabel(searchState.cacheStatus)) + '</span><span class="type-badge completion-' + escapeHTML(completion) + '">' + escapeHTML(sourceSearchCompletionLabel(completion)) + '</span>' + (executionText ? '<span class="type-badge" title="' + escapeHTML(executionText) + '">' + escapeHTML(executionText) + '</span>' : '') + '<span class="type-badge" title="' + escapeHTML(searchState.actualSources.join('\n')) + '">实际来源：' + escapeHTML(sourceText) + '</span></div>';
+    var partialNotice = completion === 'partial' ? '<div class="source-search-partial"><div>' + icon('triangle-alert') + '<strong>' + escapeHTML(sourceSearchStopReasonLabel(stopReason)) + '</strong></div><p title="' + escapeHTML(partialSources.join('\n')) + '">未完成来源：' + escapeHTML(partialSources.length ? partialSources.join('、') : '响应未提供来源明细') + '</p></div>' : '';
     if (!types.length) {
-      target.innerHTML = summary + '<div class="empty-state compact-empty">' + icon('package-open') + '<h3>没有找到匹配资源</h3><p>可调整来源、网盘类型或启用强制刷新后重试。</p></div>';
+      target.innerHTML = summary + partialNotice + '<div class="empty-state compact-empty">' + icon('package-open') + '<h3>没有找到匹配资源</h3><p>可调整来源、网盘类型或启用强制刷新后重试。</p></div>';
       refreshIcons(target);
       return;
     }
-    target.innerHTML = summary + types.map(function (type) {
+    target.innerHTML = summary + partialNotice + types.map(function (type) {
       var items = arrayFrom(merged[type], ['items', 'links']);
       var cards = items.map(function (item) {
         var url = String(pick(item, ['url', 'link'], '') || '');

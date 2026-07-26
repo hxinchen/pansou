@@ -319,10 +319,6 @@ func (s *HybridSearchService) refreshInBackground(request ContextSearchRequest) 
 }
 
 func (s *HybridSearchService) persist(keyword string, response model.SearchResponse) {
-	if response.IsPartial() {
-		log.Printf("skip persisting partial live search for %q (%d results)", keyword, response.Total)
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if s.recorder != nil {

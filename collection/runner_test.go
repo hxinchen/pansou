@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -710,6 +711,53 @@ func TestRecordExternalUpdatesManagedKeywordCooldown(t *testing.T) {
 	}
 	if completion.NextEligibleAt == nil || !completion.NextEligibleAt.Equal(now.Add(24*time.Hour)) {
 		t.Fatalf("external next eligible = %v", completion.NextEligibleAt)
+	}
+	if err := runner.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecordExternalPersistsPartialResultsAndKeepsPartialStatus(t *testing.T) {
+	now := time.Date(2026, 7, 27, 6, 0, 0, 0, time.UTC)
+	repository := &fakeRunRepository{
+		found:        &Keyword{ID: 9, Value: "Alpha", Normalized: "alpha", Cooldown: 24 * time.Hour},
+		ingestResult: IngestResult{New: 1},
+	}
+	runner := NewRunner(repository, nil, nil, nil, runnerTestConfig(now))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := runner.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	response := model.SearchResponse{
+		Total:          1,
+		Results:        []model.SearchResult{{Title: "partial result"}},
+		Completion:     model.SearchCompletionPartial,
+		StopReason:     model.SearchStopReasonDeadline,
+		PartialSources: []string{"plugin:slow"},
+		Execution:      &model.SearchExecution{Executed: 2, Completed: 1, Cancelled: 1},
+	}
+	batch, err := runner.RecordExternal(ctx, "Alpha", response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch.Status != StatusPartial {
+		t.Fatalf("external batch status = %q, want partial", batch.Status)
+	}
+	repository.mu.Lock()
+	completion := repository.itemCompletions[0]
+	batchCompletion := repository.batchCompletions[0]
+	ingestCount := len(repository.ingestRequests)
+	repository.mu.Unlock()
+	if ingestCount != 1 || completion.Status != StatusPartial || batchCompletion.Status != StatusPartial {
+		t.Fatalf("partial completion/ingests = %+v/%+v/%d", completion, batchCompletion, ingestCount)
+	}
+	if completion.NextEligibleAt != nil {
+		t.Fatalf("partial search advanced keyword cooldown: %v", completion.NextEligibleAt)
+	}
+	external := completion.SourceSummary["external"]
+	if external.Status != string(StatusPartial) || !strings.Contains(external.Error, "plugin:slow") || !strings.Contains(completion.Error, "stop_reason=deadline") {
+		t.Fatalf("partial source summary = %+v; item error = %q", external, completion.Error)
 	}
 	if err := runner.Stop(ctx); err != nil {
 		t.Fatal(err)

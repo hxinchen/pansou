@@ -137,7 +137,7 @@ func TestStatusValidators(t *testing.T) {
 			t.Errorf("IsValidCheckStatus(%q) = false", status)
 		}
 	}
-	for _, status := range []string{RunSuccess, RunSuccessEmpty, RunFailed} {
+	for _, status := range []string{RunSuccess, RunSuccessEmpty, RunPartial, RunFailed} {
 		if !IsTerminalRunStatus(status) {
 			t.Errorf("IsTerminalRunStatus(%q) = false", status)
 		}

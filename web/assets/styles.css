@@ -2270,6 +2270,9 @@ input[type="checkbox"] {
 .type-badge.cache-bypass { background: var(--amber-soft); color: var(--amber); }
 .type-badge.cache-not_applicable { background: #f0f1f3; color: var(--muted); }
 .type-badge.cache-not_recorded { background: #f0f1f3; color: var(--muted); font-weight: 600; }
+.type-badge.completion-complete { background: var(--green-soft); color: var(--green); }
+.type-badge.completion-partial { background: var(--amber-soft); color: var(--amber); }
+.type-badge.completion-processing { background: var(--blue-soft); color: var(--blue); }
 .compact-empty { min-height: 220px; }
 
 .credential-warning {
@@ -4998,6 +5001,37 @@ textarea.plugin-config-input {
 .source-search-summary strong {
   margin-right: 4px;
   font-size: 18px;
+}
+
+.source-search-partial {
+  margin: -4px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid #ead8a9;
+  border-radius: 6px;
+  background: var(--amber-soft);
+  color: #755515;
+}
+
+.source-search-partial div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.source-search-partial svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+
+.source-search-partial p {
+  margin: 5px 0 0 22px;
+  overflow: hidden;
+  color: #755515;
+  font-size: 11px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .source-search-disk-group + .source-search-disk-group {

@@ -227,8 +227,8 @@ func (r *Runner) RecordExternalSource(ctx context.Context, value string, source 
 		return nil, ErrEmptyKeyword
 	}
 
-	// External live search is already complete. Serialize only its persistence
-	// window with recovery/claiming so it cannot be mistaken for resumable work.
+	// The external search already reached its response boundary, either complete
+	// or partial. Serialize only persistence so it cannot become resumable work.
 	r.persistMu.Lock()
 	defer r.persistMu.Unlock()
 
@@ -313,11 +313,20 @@ func (r *Runner) RecordExternalSource(ctx context.Context, value string, source 
 		entry.Status = string(StatusSuccessEmpty)
 		summary[summaryKey] = entry
 	}
+	if ingestErr == nil && response.IsPartial() {
+		entry := summary[summaryKey]
+		entry.Status = string(StatusPartial)
+		entry.Error = externalPartialMessage(response)
+		summary[summaryKey] = entry
+	}
 
 	completion.FinishedAt = r.now()
 	if ingestErr != nil {
 		completion.Status = StatusFailed
 		completion.Error = ingestErr.Error()
+	} else if response.IsPartial() {
+		completion.Status = StatusPartial
+		completion.Error = externalPartialMessage(response)
 	} else {
 		completion.Status = DetermineRunStatus(count > 0, count == 0)
 	}
@@ -335,6 +344,32 @@ func (r *Runner) RecordExternalSource(ctx context.Context, value string, source 
 	batch.Status = completion.Status
 	batch.FinishedAt = &completion.FinishedAt
 	return &batch, ingestErr
+}
+
+func externalPartialMessage(response model.SearchResponse) string {
+	parts := []string{"partial live search"}
+	if response.StopReason != "" {
+		parts = append(parts, "stop_reason="+response.StopReason)
+	}
+	if response.Execution != nil {
+		parts = append(parts, fmt.Sprintf(
+			"execution=%d/%d completed, %d cancelled, %d deferred",
+			response.Execution.Completed,
+			response.Execution.Executed,
+			response.Execution.Cancelled,
+			response.Execution.Deferred,
+		))
+	}
+	if len(response.PartialSources) > 0 {
+		const displayedSources = 10
+		end := min(len(response.PartialSources), displayedSources)
+		sources := strings.Join(response.PartialSources[:end], ",")
+		if remaining := len(response.PartialSources) - end; remaining > 0 {
+			sources += fmt.Sprintf(",+%d more", remaining)
+		}
+		parts = append(parts, "partial_sources="+sources)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (r *Runner) scheduleLoop(ctx context.Context) {

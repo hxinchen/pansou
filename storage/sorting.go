@@ -60,7 +60,7 @@ var collectionRunSortFields = map[string]sortField{
 	"id":              {Expression: "cr.id"},
 	"trigger":         {Expression: "lower(cr.trigger)", TieBreaker: "cr.id", NullsLast: true},
 	"status":          {Expression: "CASE cr.status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 WHEN 'success' THEN 2 WHEN 'success_empty' THEN 3 WHEN 'partial' THEN 4 WHEN 'failed' THEN 5 ELSE 6 END", TieBreaker: "cr.id"},
-	"progress":        {Expression: "CASE WHEN count(i.id)=0 THEN 0 ELSE count(i.id) FILTER (WHERE i.status IN ('success','success_empty','failed'))::numeric/count(i.id) END", TieBreaker: "cr.id"},
+	"progress":        {Expression: "CASE WHEN count(i.id)=0 THEN 0 ELSE count(i.id) FILTER (WHERE i.status IN ('success','success_empty','partial','failed'))::numeric/count(i.id) END", TieBreaker: "cr.id"},
 	"new_count":       {Expression: "COALESCE(sum(i.new_count),0)", TieBreaker: "cr.id"},
 	"duplicate_count": {Expression: "COALESCE(sum(i.duplicate_count),0)", TieBreaker: "cr.id"},
 	"started_at":      {Expression: "COALESCE(cr.started_at,cr.created_at)", TieBreaker: "cr.id", NullsLast: true},

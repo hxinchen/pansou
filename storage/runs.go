@@ -23,7 +23,7 @@ const runSelect = `
 		count(i.id)::int AS total_items,
 		count(i.id) FILTER (WHERE i.status='pending')::int AS pending_items,
 		count(i.id) FILTER (WHERE i.status='running')::int AS running_items,
-		count(i.id) FILTER (WHERE i.status IN ('success','success_empty','failed'))::int AS completed_items,
+		count(i.id) FILTER (WHERE i.status IN ('success','success_empty','partial','failed'))::int AS completed_items,
 		count(i.id) FILTER (WHERE i.status='success')::int AS success_items,
 		count(i.id) FILTER (WHERE i.status='success_empty')::int AS empty_items,
 		count(i.id) FILTER (WHERE i.status='failed')::int AS failed_items,
@@ -444,14 +444,17 @@ func finalizeRunTx(ctx context.Context, tx pgx.Tx, runID int64, at time.Time) er
 		return nil
 	}
 
-	var hasSuccess, hasEmpty bool
+	var hasSuccess, hasEmpty, hasPartial bool
 	if err := tx.QueryRow(ctx, `SELECT
 		EXISTS(SELECT 1 FROM collection_run_items WHERE run_id=$1 AND (status='success' OR found_count>0)),
-		EXISTS(SELECT 1 FROM collection_run_items WHERE run_id=$1 AND status='success_empty')`, runID).Scan(&hasSuccess, &hasEmpty); err != nil {
+		EXISTS(SELECT 1 FROM collection_run_items WHERE run_id=$1 AND status='success_empty'),
+		EXISTS(SELECT 1 FROM collection_run_items WHERE run_id=$1 AND status='partial')`, runID).Scan(&hasSuccess, &hasEmpty, &hasPartial); err != nil {
 		return fmt.Errorf("read terminal collection run state: %w", err)
 	}
 	status := RunFailed
-	if hasSuccess {
+	if hasPartial {
+		status = RunPartial
+	} else if hasSuccess {
 		status = RunSuccess
 	} else if hasEmpty {
 		status = RunSuccessEmpty
@@ -470,14 +473,14 @@ func finalizeRunTx(ctx context.Context, tx pgx.Tx, runID int64, at time.Time) er
 func buildRunErrorSummaryTx(ctx context.Context, tx pgx.Tx, runID int64) (string, error) {
 	var total int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM collection_run_items
-		WHERE run_id=$1 AND status='failed'`, runID).Scan(&total); err != nil {
+		WHERE run_id=$1 AND status IN ('partial','failed')`, runID).Scan(&total); err != nil {
 		return "", fmt.Errorf("count collection run errors: %w", err)
 	}
 	if total == 0 {
 		return "", nil
 	}
 	rows, err := tx.Query(ctx, `SELECT left(error_message, $2) FROM collection_run_items
-		WHERE run_id=$1 AND status='failed' ORDER BY id LIMIT $3`, runID, runErrorItemLimit, runErrorDisplayLimit)
+		WHERE run_id=$1 AND status IN ('partial','failed') ORDER BY id LIMIT $3`, runID, runErrorItemLimit, runErrorDisplayLimit)
 	if err != nil {
 		return "", fmt.Errorf("list collection run errors: %w", err)
 	}
@@ -823,7 +826,7 @@ func (s *Store) RecoverRunningItems(ctx context.Context) (int64, error) {
 }
 
 func terminalRunStatus(status string) bool {
-	return status == RunSuccess || status == RunSuccessEmpty || status == RunFailed
+	return status == RunSuccess || status == RunSuccessEmpty || status == RunPartial || status == RunFailed
 }
 
 // IsTerminalRunStatus reports whether status can complete an item or run.

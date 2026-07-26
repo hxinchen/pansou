@@ -26,6 +26,7 @@ const (
 	RunRunning      = "running"
 	RunSuccess      = "success"
 	RunSuccessEmpty = "success_empty"
+	RunPartial      = "partial"
 	RunFailed       = "failed"
 )
 

@@ -365,6 +365,50 @@ func TestHybridSearchForceBypassesDatabase(t *testing.T) {
 	}
 }
 
+func TestHybridSearchPersistsPartialLiveResults(t *testing.T) {
+	store := &fakeResourceStore{}
+	partial := sampleLiveResponse()
+	partial.Completion = model.SearchCompletionPartial
+	partial.PartialSources = []string{"plugin:slow"}
+	live := &fakeLiveSearch{response: partial}
+	hybrid := NewHybridSearchService(live, store, time.Hour)
+
+	response, err := hybrid.Search("sample", nil, 1, true, "all", "all", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if !response.IsPartial() || store.upserts != 1 {
+		t.Fatalf("partial response/upserts = %v/%d, want true/1", response.IsPartial(), store.upserts)
+	}
+	if !store.lastUpsert.IsPartial() || len(store.lastUpsert.Results) != 1 {
+		t.Fatalf("persisted partial response = %+v", store.lastUpsert)
+	}
+}
+
+func TestHybridSearchRecordsPartialLiveResultsAsExternalRun(t *testing.T) {
+	store := &fakeResourceStore{}
+	partial := sampleLiveResponse()
+	partial.Completion = model.SearchCompletionPartial
+	partial.StopReason = model.SearchStopReasonDeadline
+	live := &fakeLiveSearch{response: partial}
+	hybrid := NewHybridSearchService(live, store, time.Hour)
+	var recorded model.SearchResponse
+	hybrid.SetExternalResultRecorder(func(_ context.Context, _ string, response model.SearchResponse) error {
+		recorded = response
+		return nil
+	})
+
+	if _, err := hybrid.Search("sample", nil, 1, true, "all", "all", nil, nil, nil); err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if !recorded.IsPartial() || len(recorded.Results) != 1 {
+		t.Fatalf("recorded response = %+v", recorded)
+	}
+	if store.upserts != 0 {
+		t.Fatalf("direct upserts = %d, want recorder to own persistence", store.upserts)
+	}
+}
+
 func TestHybridSearchDatabaseFailureFallsBackToLive(t *testing.T) {
 	store := &fakeResourceStore{err: errors.New("database unavailable")}
 	live := &fakeLiveSearch{response: sampleLiveResponse()}

@@ -42,6 +42,7 @@ const (
 	StatusRunning      RunStatus = "running"
 	StatusSuccess      RunStatus = "success"
 	StatusSuccessEmpty RunStatus = "success_empty"
+	StatusPartial      RunStatus = "partial"
 	StatusFailed       RunStatus = "failed"
 )
 
