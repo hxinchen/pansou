@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	defaultSearchResponseTimeout = 25 * time.Second
-	statusClientClosedRequest    = 499
+	defaultSearchResponseTimeout  = 25 * time.Second
+	defaultSearchExecutionTimeout = 12 * time.Second
+	statusClientClosedRequest     = 499
 )
 
 func searchResponseTimeout() time.Duration {
@@ -29,6 +30,13 @@ func searchResponseTimeout() time.Duration {
 		return config.AppConfig.SearchResponseTimeout
 	}
 	return defaultSearchResponseTimeout
+}
+
+func searchExecutionTimeout() time.Duration {
+	if config.AppConfig != nil && config.AppConfig.SearchExecutionTimeout > 0 {
+		return config.AppConfig.SearchExecutionTimeout
+	}
+	return defaultSearchExecutionTimeout
 }
 
 // 保存搜索服务的实例
@@ -240,12 +248,18 @@ func SearchHandler(c *gin.Context) {
 		identity.Role = principal.Role
 	}
 	requestCtx := c.Request.Context()
-	responseCtx, cancelResponse := context.WithTimeout(requestCtx, searchResponseTimeout())
+	executionBudget := searchExecutionTimeout()
+	responseTimeout := searchResponseTimeout()
+	if responseTimeout <= executionBudget {
+		responseTimeout = executionBudget + 2*time.Second
+	}
+	responseCtx, cancelResponse := context.WithTimeout(requestCtx, responseTimeout)
 	defer cancelResponse()
 	result, err := service.SearchWithContext(responseCtx, searchService, service.ContextSearchRequest{
 		Keyword: req.Keyword, Channels: req.Channels, Concurrency: req.Concurrency,
 		ForceRefresh: req.ForceRefresh, ResultType: req.ResultType, SourceType: req.SourceType,
 		Plugins: req.Plugins, CloudTypes: req.CloudTypes, Ext: req.Ext, Identity: identity,
+		ExecutionBudget: executionBudget,
 	})
 	finalizeSearchCacheStatus(c)
 

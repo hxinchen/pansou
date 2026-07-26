@@ -306,6 +306,7 @@ func (s *HybridSearchService) refreshInBackground(request ContextSearchRequest) 
 			s.refreshMu.Unlock()
 		}()
 		request.ForceRefresh = true
+		request.ExecutionBudget = 0
 		request.Ext = cloneExt(request.Ext)
 		request.Ext["search_priority"] = "background"
 		response, err := SearchWithContext(context.Background(), s.live, request)

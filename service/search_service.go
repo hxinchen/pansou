@@ -255,6 +255,8 @@ func mergeSearchExecution(groups ...model.SearchExecution) *model.SearchExecutio
 		merged.Executed += group.Executed
 		merged.Cached += group.Cached
 		merged.Deferred += group.Deferred
+		merged.Completed += group.Completed
+		merged.Cancelled += group.Cancelled
 		if group.Strategy != "" {
 			if merged.Strategy == "" {
 				merged.Strategy = group.Strategy
@@ -685,6 +687,8 @@ func filterResponseByType(response model.SearchResponse, resultType string) mode
 			PartialSources: response.PartialSources,
 			SourceStatuses: response.SourceStatuses,
 			Execution:      response.Execution,
+			StopReason:     response.StopReason,
+			ElapsedMS:      response.ElapsedMS,
 		}
 	case "all":
 		return response
@@ -697,6 +701,8 @@ func filterResponseByType(response model.SearchResponse, resultType string) mode
 			PartialSources: response.PartialSources,
 			SourceStatuses: response.SourceStatuses,
 			Execution:      response.Execution,
+			StopReason:     response.StopReason,
+			ElapsedMS:      response.ElapsedMS,
 		}
 	default:
 		// // 默认返回全部
@@ -709,6 +715,8 @@ func filterResponseByType(response model.SearchResponse, resultType string) mode
 			PartialSources: response.PartialSources,
 			SourceStatuses: response.SourceStatuses,
 			Execution:      response.Execution,
+			StopReason:     response.StopReason,
+			ElapsedMS:      response.ElapsedMS,
 		}
 	}
 }
@@ -1576,7 +1584,11 @@ func (s *SearchService) searchTGWithStatus(ctx context.Context, keyword string, 
 	if staleChannels > 0 {
 		strategy = "channel-cache-swr"
 	}
-	execution := model.SearchExecution{Requested: len(channels), Executed: len(taskResults), Cached: len(channels) - len(tasks), Strategy: strategy}
+	cachedCount := len(channels) - len(tasks)
+	execution := model.SearchExecution{
+		Requested: len(channels), Executed: len(taskResults), Cached: cachedCount,
+		Completed: cachedCount + len(taskResults), Cancelled: len(tasks) - len(taskResults), Strategy: strategy,
+	}
 	if cacheInitialized && config.AppConfig.CacheEnabled {
 		go func(res []model.SearchResult, isComplete bool) {
 			ttl := aggregateSearchCacheTTL(res, isComplete, time.Duration(config.AppConfig.CacheTTLMinutes)*time.Minute)
@@ -1922,7 +1934,10 @@ func (s *SearchService) searchPluginsWithStatus(ctx context.Context, keyword str
 	} else if deepSearch {
 		strategy = "deep"
 	}
-	execution := model.SearchExecution{Requested: len(tasks), Executed: executedCount, Deferred: len(tasks) - executedCount, Strategy: strategy}
+	execution := model.SearchExecution{
+		Requested: len(tasks), Executed: executedCount, Deferred: len(tasks) - executedCount,
+		Completed: len(results), Cancelled: executedCount - len(results), Strategy: strategy,
+	}
 
 	// 恢复主程序缓存更新：确保最终合并结果被正确缓存
 	if cacheInitialized && config.AppConfig.CacheEnabled {
@@ -2152,7 +2167,10 @@ func (s *SearchService) searchPluginsForIdentityWithStatus(ctx context.Context, 
 			partialSources = append(partialSources, "plugin:"+item.plugin.Name())
 		}
 	}
-	managedExecution := model.SearchExecution{Requested: len(tasks), Executed: len(managedResults), Strategy: "credential"}
+	managedExecution := model.SearchExecution{
+		Requested: len(tasks), Executed: len(managedResults), Completed: len(managedResults),
+		Cancelled: len(tasks) - len(managedResults), Strategy: "credential",
+	}
 	mergedExecution := mergeSearchExecution(legacyBatch.Execution, managedExecution)
 	result := sourceSearchBatch{Results: mergeSearchResults(nil, allResults), Complete: complete, PartialSources: partialSources, SourceStatuses: sourceStatuses}
 	if mergedExecution != nil {

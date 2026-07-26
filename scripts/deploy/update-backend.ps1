@@ -15,6 +15,7 @@ param(
     [switch]$EnableProxyPool,
     [int]$LinkCheckWorkers = 8,
     [int]$LinkCheckPerPlatform = 2,
+	[int]$SearchExecutionTimeoutSeconds = 12,
 	[int]$ResourceRetentionDays = 60,
 	[int]$ResourceCleanupIntervalSeconds = 86400,
 	[int]$ResourceCleanupBatchSize = 1000,
@@ -160,6 +161,7 @@ PROXY_POOL_ENABLED_VALUE=$proxyPoolEnabledQ
 GRACEFUL_STOP_SECONDS=$GracefulStopSeconds
 LINK_CHECK_WORKERS_VALUE=$LinkCheckWorkers
 LINK_CHECK_PLATFORM_VALUE=$LinkCheckPerPlatform
+SEARCH_EXECUTION_TIMEOUT_VALUE=$SearchExecutionTimeoutSeconds
 RESOURCE_RETENTION_DAYS_VALUE=$ResourceRetentionDays
 RESOURCE_CLEANUP_INTERVAL_VALUE=$ResourceCleanupIntervalSeconds
 RESOURCE_CLEANUP_BATCH_SIZE_VALUE=$ResourceCleanupBatchSize
@@ -403,6 +405,7 @@ if ! docker run -d \
 	-e SEARCH_CIRCUIT_FAILURES=5 \
 	-e SEARCH_CIRCUIT_COOLDOWN_SECONDS=300 \
 	-e SEARCH_METRICS_FLUSH_SECONDS=60 \
+	-e SEARCH_EXECUTION_TIMEOUT_SECONDS=`$SEARCH_EXECUTION_TIMEOUT_VALUE \
 	-e "SEARCH_TIERED_ROLLOUT_ENABLED=`$TIERED_SEARCH_VALUE" \
 	-e "PROXY_POOL_ENABLED=`$PROXY_POOL_ENABLED_VALUE" \
 	-e PROXY_POOL_HEALTH_ENABLED=true \

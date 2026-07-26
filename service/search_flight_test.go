@@ -56,6 +56,76 @@ func TestExecuteSearchFlightContinuesAfterCallerDeadline(t *testing.T) {
 	}
 }
 
+func TestExecuteSearchFlightExecutionBudgetReturnsPartial(t *testing.T) {
+	var group singleflight.Group
+	request := ContextSearchRequest{
+		Keyword: "deadline", ResultType: "merged_by_type", SourceType: "all",
+		ExecutionBudget: 20 * time.Millisecond,
+	}
+	response, err := executeSearchFlight(context.Background(), &group, "deadline", request, func(ctx context.Context) (model.SearchResponse, error) {
+		<-ctx.Done()
+		return model.SearchResponse{
+			Total: 1, PartialSources: []string{"plugin:slow", "plugin:slow"},
+			Execution: &model.SearchExecution{Requested: 2, Executed: 1, Completed: 1, Cancelled: 1},
+		}, ctx.Err()
+	})
+	if err != nil {
+		t.Fatalf("deadline search error = %v", err)
+	}
+	if response.Completion != model.SearchCompletionPartial || response.StopReason != model.SearchStopReasonDeadline {
+		t.Fatalf("deadline response = %+v", response)
+	}
+	if response.Total != 1 || response.ElapsedMS < 15 {
+		t.Fatalf("partial result or elapsed time missing: %+v", response)
+	}
+	if len(response.PartialSources) != 1 || response.PartialSources[0] != "plugin:slow" {
+		t.Fatalf("partial sources = %#v", response.PartialSources)
+	}
+	if status := response.SourceStatuses["plugin:slow"]; status.Message != model.SearchStopReasonDeadline {
+		t.Fatalf("deadline source status = %+v", status)
+	}
+}
+
+func TestSearchFlightKeySeparatesExecutionBudgets(t *testing.T) {
+	request := ContextSearchRequest{Keyword: "same", ResultType: "all", SourceType: "all"}
+	withoutBudget, err := buildSearchFlightKey("test", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ExecutionBudget = 12 * time.Second
+	withBudget, err := buildSearchFlightKey("test", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutBudget == withBudget {
+		t.Fatal("execution policies must not share a singleflight key")
+	}
+}
+
+func TestNestedSearchFlightsShareOneExecutionBudget(t *testing.T) {
+	var outerGroup, innerGroup singleflight.Group
+	request := ContextSearchRequest{
+		Keyword: "nested", ResultType: "all", SourceType: "all",
+		ExecutionBudget: 25 * time.Millisecond,
+	}
+	started := time.Now()
+	response, err := executeSearchFlight(context.Background(), &outerGroup, "outer", request, func(outerCtx context.Context) (model.SearchResponse, error) {
+		return executeSearchFlight(outerCtx, &innerGroup, "inner", request, func(innerCtx context.Context) (model.SearchResponse, error) {
+			<-innerCtx.Done()
+			return model.SearchResponse{}, innerCtx.Err()
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed >= 45*time.Millisecond {
+		t.Fatalf("nested search restarted the execution budget: %s", elapsed)
+	}
+	if response.StopReason != model.SearchStopReasonDeadline {
+		t.Fatalf("nested deadline response = %+v", response)
+	}
+}
+
 func TestExecuteSearchFlightReplaysRecentlyCompletedResult(t *testing.T) {
 	var group singleflight.Group
 	var calls atomic.Int32

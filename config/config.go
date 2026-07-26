@@ -49,7 +49,8 @@ type Config struct {
 	HTTPWriteTimeout             time.Duration // 写入超时
 	HTTPIdleTimeout              time.Duration // 空闲超时
 	HTTPMaxConns                 int           // 最大连接数
-	SearchResponseTimeout        time.Duration // 搜索接口前台软响应预算
+	SearchResponseTimeout        time.Duration // 搜索接口 HTTP 响应兜底超时
+	SearchExecutionTimeout       time.Duration // 网页和外部 API 实时搜索执行预算
 	TGSearchWorkers              int           // 单次 TG 搜索最大并发
 	SearchSchedulerEnabled       bool          // 是否启用全局搜索调度器
 	SearchActiveLimit            int           // 活跃实时搜索上限
@@ -181,6 +182,7 @@ func Init() {
 		HTTPIdleTimeout:              getHTTPIdleTimeout(),
 		HTTPMaxConns:                 getHTTPMaxConns(),
 		SearchResponseTimeout:        getDurationSeconds("SEARCH_RESPONSE_TIMEOUT_SECONDS", 25*time.Second),
+		SearchExecutionTimeout:       getDurationSeconds("SEARCH_EXECUTION_TIMEOUT_SECONDS", 12*time.Second),
 		TGSearchWorkers:              getPositiveInt("TG_SEARCH_WORKERS", 20),
 		SearchSchedulerEnabled:       getBool("SEARCH_SCHEDULER_ENABLED", true),
 		SearchActiveLimit:            getPositiveInt("SEARCH_ACTIVE_LIMIT", 8),

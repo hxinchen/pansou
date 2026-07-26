@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"time"
 
 	"pansou/model"
 )
@@ -23,17 +24,20 @@ type SearchIdentity struct {
 }
 
 type ContextSearchRequest struct {
-	Keyword        string
-	Channels       []string
-	Concurrency    int
-	ForceRefresh   bool
-	ResultType     string
-	SourceType     string
-	Plugins        []string
-	CloudTypes     []string
-	Ext            map[string]interface{}
-	Identity       SearchIdentity
-	requiresLiveTG bool
+	Keyword      string
+	Channels     []string
+	Concurrency  int
+	ForceRefresh bool
+	ResultType   string
+	SourceType   string
+	Plugins      []string
+	CloudTypes   []string
+	Ext          map[string]interface{}
+	Identity     SearchIdentity
+	// ExecutionBudget is set only by interactive API callers. A zero value
+	// preserves the full, caller-independent execution used by collectors.
+	ExecutionBudget time.Duration
+	requiresLiveTG  bool
 }
 
 type ContextSearchProvider interface {

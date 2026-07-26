@@ -32,14 +32,18 @@ func (s routerTestSearch) Search(string, []string, int, bool, string, string, []
 func (routerTestSearch) GetPluginManager() *plugin.PluginManager { return nil }
 
 type contextRouterTestSearch struct {
-	search func(context.Context) (model.SearchResponse, error)
+	search    func(context.Context) (model.SearchResponse, error)
+	onRequest func(service.ContextSearchRequest)
 }
 
 func (s contextRouterTestSearch) Search(string, []string, int, bool, string, string, []string, []string, map[string]interface{}) (model.SearchResponse, error) {
 	return s.search(context.Background())
 }
 
-func (s contextRouterTestSearch) SearchContext(ctx context.Context, _ service.ContextSearchRequest) (model.SearchResponse, error) {
+func (s contextRouterTestSearch) SearchContext(ctx context.Context, request service.ContextSearchRequest) (model.SearchResponse, error) {
+	if s.onRequest != nil {
+		s.onRequest(request)
+	}
 	return s.search(ctx)
 }
 
@@ -273,23 +277,35 @@ func TestPartialSearchReturns200AndCompletionMetadata(t *testing.T) {
 	}
 }
 
-func TestSearchSoftDeadlineReturnsProcessingResponse(t *testing.T) {
+func TestSearchExecutionDeadlineReturnsPartialResponse(t *testing.T) {
 	previous := config.AppConfig
 	config.AppConfig = testConfig(false)
-	config.AppConfig.SearchResponseTimeout = 20 * time.Millisecond
+	config.AppConfig.SearchExecutionTimeout = 20 * time.Millisecond
+	config.AppConfig.SearchResponseTimeout = time.Second
 	defer func() { config.AppConfig = previous }()
 
-	provider := contextRouterTestSearch{search: func(ctx context.Context) (model.SearchResponse, error) {
-		<-ctx.Done()
-		return model.SearchResponse{}, ctx.Err()
-	}}
+	var observedBudget time.Duration
+	provider := contextRouterTestSearch{
+		onRequest: func(request service.ContextSearchRequest) { observedBudget = request.ExecutionBudget },
+		search: func(context.Context) (model.SearchResponse, error) {
+			time.Sleep(20 * time.Millisecond)
+			return model.SearchResponse{
+				Total: 1, Completion: model.SearchCompletionPartial,
+				StopReason: model.SearchStopReasonDeadline, ElapsedMS: 20,
+				PartialSources: []string{"plugin:slow"},
+			}, nil
+		},
+	}
 	router := SetupRouter(provider)
 	request := httptest.NewRequest(http.MethodGet, "/api/search?kw=test", nil)
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202; body=%s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+	if observedBudget != 20*time.Millisecond {
+		t.Fatalf("execution budget = %s", observedBudget)
 	}
 	if got := response.Header().Get("Retry-After"); got != "2" {
 		t.Fatalf("Retry-After = %q, want 2", got)
@@ -300,8 +316,8 @@ func TestSearchSoftDeadlineReturnsProcessingResponse(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Data.Completion != model.SearchCompletionProcessing || payload.Data.Total != 0 {
-		t.Fatalf("processing response = %+v", payload.Data)
+	if payload.Data.Completion != model.SearchCompletionPartial || payload.Data.StopReason != model.SearchStopReasonDeadline || payload.Data.Total != 1 {
+		t.Fatalf("deadline response = %+v", payload.Data)
 	}
 }
 

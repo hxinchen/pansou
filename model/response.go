@@ -47,6 +47,7 @@ const (
 	SearchCompletionComplete   SearchCompletion = "complete"
 	SearchCompletionPartial    SearchCompletion = "partial"
 	SearchCompletionProcessing SearchCompletion = "processing"
+	SearchStopReasonDeadline                    = "deadline"
 )
 
 // SourceStatus exposes useful progress for a source that returned a partial
@@ -60,14 +61,16 @@ type SourceStatus struct {
 	Message    string           `json:"message,omitempty" sonic:"message,omitempty"`
 }
 
-// SearchExecution explains how the source budget was consumed. A tiered
-// search can be complete by policy while intentionally deferring low-value
-// sources; clients can use this metadata to offer a deep-search action.
+// SearchExecution explains how the source budget was consumed. Executed is
+// the selected or started work, Completed is the terminal work available to
+// this response, and Cancelled is work abandoned at the request deadline.
 type SearchExecution struct {
 	Requested int    `json:"requested" sonic:"requested"`
 	Executed  int    `json:"executed" sonic:"executed"`
 	Cached    int    `json:"cached" sonic:"cached"`
 	Deferred  int    `json:"deferred" sonic:"deferred"`
+	Completed int    `json:"completed,omitempty" sonic:"completed,omitempty"`
+	Cancelled int    `json:"cancelled,omitempty" sonic:"cancelled,omitempty"`
 	Strategy  string `json:"strategy,omitempty" sonic:"strategy,omitempty"`
 }
 
@@ -80,6 +83,8 @@ type SearchResponse struct {
 	PartialSources []string                `json:"partial_sources,omitempty" sonic:"partial_sources,omitempty"`
 	SourceStatuses map[string]SourceStatus `json:"source_statuses,omitempty" sonic:"source_statuses,omitempty"`
 	Execution      *SearchExecution        `json:"execution,omitempty" sonic:"execution,omitempty"`
+	StopReason     string                  `json:"stop_reason,omitempty" sonic:"stop_reason,omitempty"`
+	ElapsedMS      int64                   `json:"elapsed_ms,omitempty" sonic:"elapsed_ms,omitempty"`
 }
 
 func (r SearchResponse) IsPartial() bool {
