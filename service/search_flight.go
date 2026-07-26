@@ -22,7 +22,10 @@ type searchFlightValue struct {
 	cacheStatus SearchCacheStatus
 }
 
-const searchFlightReplayTTL = 5 * time.Second
+const (
+	searchFlightReplayTTL          = 5 * time.Second
+	searchDeadlineAggregationGrace = 2 * time.Second
+)
 
 type searchFlightReplayKey struct {
 	group *singleflight.Group
@@ -99,15 +102,30 @@ func executeSearchFlight(
 
 	select {
 	case <-ctx.Done():
+		if request.ExecutionBudget > 0 {
+			if _, inherited := ctx.Value(searchExecutionDeadlineContextKey{}).(struct{}); inherited {
+				timer := time.NewTimer(searchDeadlineAggregationGrace)
+				defer timer.Stop()
+				select {
+				case shared := <-result:
+					return searchFlightResponse(ctx, shared)
+				case <-timer.C:
+				}
+			}
+		}
 		return model.SearchResponse{}, ctx.Err()
 	case shared := <-result:
-		value, ok := shared.Val.(searchFlightValue)
-		if !ok {
-			return model.SearchResponse{}, fmt.Errorf("invalid shared search result")
-		}
-		MarkSearchCacheStatus(ctx, value.cacheStatus)
-		return value.response, shared.Err
+		return searchFlightResponse(ctx, shared)
 	}
+}
+
+func searchFlightResponse(ctx context.Context, shared singleflight.Result) (model.SearchResponse, error) {
+	value, ok := shared.Val.(searchFlightValue)
+	if !ok {
+		return model.SearchResponse{}, fmt.Errorf("invalid shared search result")
+	}
+	MarkSearchCacheStatus(ctx, value.cacheStatus)
+	return value.response, shared.Err
 }
 
 func buildSearchFlightKey(prefix string, request ContextSearchRequest) (string, error) {

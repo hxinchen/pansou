@@ -112,7 +112,10 @@ func TestNestedSearchFlightsShareOneExecutionBudget(t *testing.T) {
 	response, err := executeSearchFlight(context.Background(), &outerGroup, "outer", request, func(outerCtx context.Context) (model.SearchResponse, error) {
 		return executeSearchFlight(outerCtx, &innerGroup, "inner", request, func(innerCtx context.Context) (model.SearchResponse, error) {
 			<-innerCtx.Done()
-			return model.SearchResponse{}, innerCtx.Err()
+			return model.SearchResponse{
+				Total:   1,
+				Results: []model.SearchResult{{UniqueID: "completed-before-deadline"}},
+			}, innerCtx.Err()
 		})
 	})
 	if err != nil {
@@ -123,6 +126,9 @@ func TestNestedSearchFlightsShareOneExecutionBudget(t *testing.T) {
 	}
 	if response.StopReason != model.SearchStopReasonDeadline {
 		t.Fatalf("nested deadline response = %+v", response)
+	}
+	if response.Total != 1 || len(response.Results) != 1 {
+		t.Fatalf("nested deadline discarded completed results: %+v", response)
 	}
 }
 
