@@ -56,6 +56,7 @@ import (
 	_ "pansou/plugin/dyyjpro"
 	_ "pansou/plugin/erxiao"
 	_ "pansou/plugin/feikuai"
+	_ "pansou/plugin/fourkhd"
 	_ "pansou/plugin/fox4k"
 	_ "pansou/plugin/gaoqing888"
 	_ "pansou/plugin/gying"

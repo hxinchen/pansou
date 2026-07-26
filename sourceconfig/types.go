@@ -97,6 +97,8 @@ func DefaultCatalog(pluginNames []string) (*Catalog, error) {
 		case "aisoupan":
 			descriptor.DisplayName, descriptor.Description = "心悦搜索（Aisoupan）", "管理员配置 Bearer TOKEN 后，通过 Aisoupan 搜索接口获取资源"
 			descriptor.RequiresAccount, descriptor.LoginType = true, "token"
+		case "4khd":
+			descriptor.DisplayName, descriptor.Description = "4KHD", "使用服务器环境密钥搜索夸克和百度网盘资源"
 		}
 		descriptors = append(descriptors, descriptor)
 	}
