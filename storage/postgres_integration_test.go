@@ -73,6 +73,10 @@ func TestPostgresStorageLifecycle(t *testing.T) {
 		SELECT 1 FROM schema_migrations WHERE version=10)`).Scan(&migrated); err != nil || !migrated {
 		t.Fatalf("detail pagination migration: migrated=%v err=%v", migrated, err)
 	}
+	if err := store.pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM schema_migrations WHERE version=28)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("partial status migration: migrated=%v err=%v", migrated, err)
+	}
 	var legacyRunSummaryColumn bool
 	if err := store.pool.QueryRow(ctx, `SELECT EXISTS (
 		SELECT 1 FROM information_schema.columns
