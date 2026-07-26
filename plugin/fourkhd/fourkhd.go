@@ -20,15 +20,16 @@ import (
 )
 
 const (
-	pluginName       = "4khd"
-	apiKeyEnv        = "FOURKHD_API_KEY"
-	defaultAPIURL    = "https://api.4khd.top/api/search"
-	defaultPriority  = 3
-	requestTimeout   = 20 * time.Second
-	requestInterval  = 1100 * time.Millisecond
-	maximumBodyBytes = 8 << 20
-	cacheTTL         = time.Hour
-	maximumCacheKeys = 512
+	pluginName        = "4khd"
+	apiKeyEnv         = "FOURKHD_API_KEY"
+	defaultAPIURL     = "https://api.4khd.top/api/search"
+	defaultPriority   = 3
+	requestTimeout    = 20 * time.Second
+	requestInterval   = 1100 * time.Millisecond
+	maximumBodyBytes  = 8 << 20
+	cacheTTL          = time.Hour
+	maximumCacheKeys  = 512
+	supportedPanQuery = "quark,baidu,tianyiyun,aliyun,uc,115,123,pikpak,xunlei,magnet,ed2k"
 )
 
 var sharedRequestGate = newRateGate(requestInterval)
@@ -225,7 +226,7 @@ func (p *Plugin) searchImpl(client *http.Client, keyword string, _ map[string]in
 	query := endpoint.Query()
 	query.Set("api_key", apiKey)
 	query.Set("q", keyword)
-	query.Set("pan", "quark,baidu")
+	query.Set("pan", supportedPanQuery)
 	endpoint.RawQuery = query.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
@@ -299,27 +300,90 @@ func convertResults(items []apiItem) []model.SearchResult {
 }
 
 func normalizeLinkType(declaredType, rawURL string) (string, bool) {
+	lowerURL := strings.ToLower(strings.TrimSpace(rawURL))
+	actualType := ""
+	switch {
+	case strings.HasPrefix(lowerURL, "magnet:?xt=urn:btih:"):
+		actualType = "magnet"
+	case strings.HasPrefix(lowerURL, "ed2k://|file|"):
+		actualType = "ed2k"
+	}
+
+	if actualType != "" {
+		declared := normalizeDeclaredType(declaredType)
+		return actualType, declared == "" || declared == actualType
+	}
+
 	parsed, err := url.Parse(rawURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return "", false
 	}
 	host := strings.ToLower(parsed.Hostname())
-	actualType := ""
-	switch host {
-	case "pan.quark.cn":
+	switch {
+	case hostMatches(host, "pan.quark.cn"):
 		actualType = "quark"
-	case "pan.baidu.com":
+	case hostMatches(host, "pan.baidu.com"):
 		actualType = "baidu"
+	case hostMatches(host, "aliyundrive.com", "alipan.com"):
+		actualType = "aliyun"
+	case hostMatches(host, "drive.uc.cn", "pan.uc.cn"):
+		actualType = "uc"
+	case hostMatches(host, "cloud.189.cn", "content.21cn.com"):
+		actualType = "tianyi"
+	case hostMatches(host, "115.com", "115cdn.com", "anxia.com"):
+		actualType = "115"
+	case hostMatches(host, "123pan.com", "123pan.cn", "123684.com", "123685.com", "123865.com", "123912.com", "123592.com"):
+		actualType = "123"
+	case hostMatches(host, "mypikpak.com", "pikpak.com"):
+		actualType = "pikpak"
+	case hostMatches(host, "pan.xunlei.com"):
+		actualType = "xunlei"
 	default:
 		return "", false
 	}
-	declaredType = strings.ToLower(strings.TrimSpace(declaredType))
-	if declaredType == "quark" || declaredType == "baidu" {
-		if declaredType != actualType {
-			return "", false
-		}
+	declared := normalizeDeclaredType(declaredType)
+	if declared != "" && declared != actualType {
+		return "", false
 	}
 	return actualType, true
+}
+
+func normalizeDeclaredType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "quark":
+		return "quark"
+	case "baidu":
+		return "baidu"
+	case "aliyun", "alipan":
+		return "aliyun"
+	case "uc":
+		return "uc"
+	case "tianyiyun", "tianyi":
+		return "tianyi"
+	case "115":
+		return "115"
+	case "123", "123pan":
+		return "123"
+	case "pikpak":
+		return "pikpak"
+	case "xunlei":
+		return "xunlei"
+	case "magnet":
+		return "magnet"
+	case "ed2k":
+		return "ed2k"
+	default:
+		return ""
+	}
+}
+
+func hostMatches(host string, domains ...string) bool {
+	for _, domain := range domains {
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractPassword(rawURL string) string {

@@ -36,7 +36,7 @@ func TestSearchSuccessBuildsQueryAndConvertsResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if query.Get("api_key") != "test-secret" || query.Get("q") != "扫毒风暴" || query.Get("pan") != "quark,baidu" {
+	if query.Get("api_key") != "test-secret" || query.Get("q") != "扫毒风暴" || query.Get("pan") != supportedPanQuery {
 		t.Fatalf("unexpected query: %#v", query)
 	}
 	if len(results) != 2 {
@@ -47,6 +47,40 @@ func TestSearchSuccessBuildsQueryAndConvertsResults(t *testing.T) {
 	}
 	if results[1].Links[0].Type != "baidu" || results[1].Links[0].Password != "abcd" {
 		t.Fatalf("unexpected second result: %#v", results[1])
+	}
+}
+
+func TestNormalizeLinkTypeSupportsAllRequestedPanTypes(t *testing.T) {
+	tests := []struct {
+		declared string
+		rawURL   string
+		want     string
+	}{
+		{declared: "quark", rawURL: "https://pan.quark.cn/s/quark", want: "quark"},
+		{declared: "baidu", rawURL: "https://pan.baidu.com/s/baidu", want: "baidu"},
+		{declared: "tianyiyun", rawURL: "https://cloud.189.cn/t/tianyi", want: "tianyi"},
+		{declared: "aliyun", rawURL: "https://www.alipan.com/s/aliyun", want: "aliyun"},
+		{declared: "uc", rawURL: "https://drive.uc.cn/s/uc", want: "uc"},
+		{declared: "115", rawURL: "https://115.com/s/one115", want: "115"},
+		{declared: "123", rawURL: "https://www.123684.com/s/one123", want: "123"},
+		{declared: "pikpak", rawURL: "https://mypikpak.com/s/pikpak", want: "pikpak"},
+		{declared: "xunlei", rawURL: "https://pan.xunlei.com/s/xunlei", want: "xunlei"},
+		{declared: "magnet", rawURL: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", want: "magnet"},
+		{declared: "ed2k", rawURL: "ed2k://|file|example.mkv|123|0123456789ABCDEF0123456789ABCDEF|/", want: "ed2k"},
+	}
+	for _, test := range tests {
+		t.Run(test.declared, func(t *testing.T) {
+			got, ok := normalizeLinkType(test.declared, test.rawURL)
+			if !ok || got != test.want {
+				t.Fatalf("normalizeLinkType(%q, %q)=(%q, %v), want (%q, true)", test.declared, test.rawURL, got, ok, test.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeLinkTypeRejectsDeclaredTypeMismatch(t *testing.T) {
+	if got, ok := normalizeLinkType("baidu", "https://pan.quark.cn/s/wrong"); ok || got != "" {
+		t.Fatalf("normalizeLinkType mismatch=(%q, %v), want rejected", got, ok)
 	}
 }
 
