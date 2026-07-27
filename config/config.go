@@ -86,7 +86,6 @@ type Config struct {
 	DatabaseURL                 string
 	CollectionInterval          time.Duration
 	DefaultCooldown             time.Duration
-	ResourceRetention           time.Duration
 	ResourceCleanupInterval     time.Duration
 	ResourceCleanupBatchSize    int
 	LinkCheckWorkers            int
@@ -218,7 +217,6 @@ func Init() {
 		DatabaseURL:                 strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		CollectionInterval:          getDurationSeconds("COLLECTION_INTERVAL_SECONDS", 60*time.Second),
 		DefaultCooldown:             getDurationHours("COLLECTION_DEFAULT_COOLDOWN_HOURS", 7*24*time.Hour),
-		ResourceRetention:           getDurationDays("RESOURCE_RETENTION_DAYS", 60*24*time.Hour),
 		ResourceCleanupInterval:     getDurationSeconds("RESOURCE_CLEANUP_INTERVAL_SECONDS", 24*time.Hour),
 		ResourceCleanupBatchSize:    getPositiveInt("RESOURCE_CLEANUP_BATCH_SIZE", 1000),
 		LinkCheckWorkers:            getPositiveInt("LINK_CHECK_WORKERS", 8),

@@ -16,7 +16,6 @@ param(
     [int]$LinkCheckWorkers = 8,
     [int]$LinkCheckPerPlatform = 2,
 	[int]$SearchExecutionTimeoutSeconds = 12,
-	[int]$ResourceRetentionDays = 60,
 	[int]$ResourceCleanupIntervalSeconds = 86400,
 	[int]$ResourceCleanupBatchSize = 1000,
     [int]$GracefulStopSeconds = 30,
@@ -162,7 +161,6 @@ GRACEFUL_STOP_SECONDS=$GracefulStopSeconds
 LINK_CHECK_WORKERS_VALUE=$LinkCheckWorkers
 LINK_CHECK_PLATFORM_VALUE=$LinkCheckPerPlatform
 SEARCH_EXECUTION_TIMEOUT_VALUE=$SearchExecutionTimeoutSeconds
-RESOURCE_RETENTION_DAYS_VALUE=$ResourceRetentionDays
 RESOURCE_CLEANUP_INTERVAL_VALUE=$ResourceCleanupIntervalSeconds
 RESOURCE_CLEANUP_BATCH_SIZE_VALUE=$ResourceCleanupBatchSize
 ROLLBACK_CONTAINER=pansou-api-rollback
@@ -441,7 +439,6 @@ if ! docker run -d \
 	-e LINK_CHECK_BACKLOG_INTERVAL_SECONDS=300 \
 	-e LINK_CHECK_WRITE_BATCH_SIZE=16 \
 	-e LINK_CHECK_WRITE_FLUSH_SECONDS=1 \
-	-e RESOURCE_RETENTION_DAYS=`$RESOURCE_RETENTION_DAYS_VALUE \
 	-e RESOURCE_CLEANUP_INTERVAL_SECONDS=`$RESOURCE_CLEANUP_INTERVAL_VALUE \
 	-e RESOURCE_CLEANUP_BATCH_SIZE=`$RESOURCE_CLEANUP_BATCH_SIZE_VALUE \
   -e CACHE_PATH=/app/cache \

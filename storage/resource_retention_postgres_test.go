@@ -21,11 +21,12 @@ func TestCleanupTerminalResources(t *testing.T) {
 		lastSeenAt time.Time
 	}
 	fixtures := []fixture{
-		{name: "old-invalid", status: CheckInvalid, checkedAt: old, lastSeenAt: old},
-		{name: "old-expired", status: CheckExpired, checkedAt: old, lastSeenAt: old},
-		{name: "rediscovered", status: CheckInvalid, checkedAt: old, lastSeenAt: recent},
-		{name: "recent-invalid", status: CheckInvalid, checkedAt: recent, lastSeenAt: old},
-		{name: "old-valid", status: CheckValid, checkedAt: old, lastSeenAt: old},
+		{name: "invalid", status: CheckInvalid, checkedAt: old, lastSeenAt: old},
+		{name: "recent-expired", status: CheckExpired, checkedAt: recent, lastSeenAt: recent},
+		{name: "rediscovered-cancelled", status: CheckCancelled, checkedAt: old, lastSeenAt: recent},
+		{name: "recent-violation", status: CheckViolation, checkedAt: recent, lastSeenAt: old},
+		{name: "valid", status: CheckValid, checkedAt: old, lastSeenAt: old},
+		{name: "unknown", status: CheckUnknown, checkedAt: old, lastSeenAt: old},
 	}
 
 	for index, item := range fixtures {
@@ -43,9 +44,9 @@ func TestCleanupTerminalResources(t *testing.T) {
 		}
 	}
 
-	deleted, err := store.CleanupTerminalResources(ctx, now, 60*24*time.Hour, 1, 10)
-	if err != nil || deleted != 2 {
-		t.Fatalf("cleanup deleted=%d err=%v, want 2", deleted, err)
+	deleted, err := store.CleanupTerminalResources(ctx, 1, 10)
+	if err != nil || deleted != 4 {
+		t.Fatalf("cleanup deleted=%d err=%v, want 4", deleted, err)
 	}
 	var resources, sources int
 	if err := store.pool.QueryRow(ctx, "SELECT count(*) FROM resources").Scan(&resources); err != nil {
@@ -54,7 +55,7 @@ func TestCleanupTerminalResources(t *testing.T) {
 	if err := store.pool.QueryRow(ctx, "SELECT count(*) FROM resource_sources").Scan(&sources); err != nil {
 		t.Fatalf("count sources: %v", err)
 	}
-	if resources != 3 || sources != 3 {
-		t.Fatalf("remaining resources/sources = %d/%d, want 3/3", resources, sources)
+	if resources != 2 || sources != 2 {
+		t.Fatalf("remaining resources/sources = %d/%d, want 2/2", resources, sources)
 	}
 }

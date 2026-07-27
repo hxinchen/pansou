@@ -23,14 +23,14 @@ func startResourceRetentionCleanup(ctx context.Context, store *storage.Store) {
 		run := func() {
 			cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 			defer cancel()
-			deleted, err := store.CleanupTerminalResources(cleanupCtx, time.Now(), config.AppConfig.ResourceRetention,
-				config.AppConfig.ResourceCleanupBatchSize, resourceCleanupMaxBatches)
+			deleted, err := store.CleanupTerminalResources(cleanupCtx, config.AppConfig.ResourceCleanupBatchSize,
+				resourceCleanupMaxBatches)
 			if err != nil {
 				log.Printf("终态资源清理: %v", err)
 				return
 			}
 			if deleted > 0 {
-				log.Printf("终态资源清理: 删除 %d 条超过保留期的资源", deleted)
+				log.Printf("终态资源清理: 删除 %d 条终态资源", deleted)
 			}
 		}
 
