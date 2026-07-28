@@ -3,6 +3,8 @@
 
   var API = {
     overview: '/api/admin/overview',
+    overviewLive: '/api/admin/overview/live',
+    overviewStream: '/api/admin/overview/stream',
     search: '/api/search',
     trends: '/api/admin/trends',
     resources: '/api/admin/resources',
@@ -46,10 +48,11 @@
   var ACTIVE_STATUSES = ['pending', 'running'];
   var ACTIVE_KEYWORD_SYNC_STATUSES = ['queued', 'running'];
   var OVERVIEW_DAYS = 7;
-  var OVERVIEW_ACTIVE_REFRESH_MS = 5000;
-  var OVERVIEW_IDLE_REFRESH_MS = 30000;
-  var OVERVIEW_FAST_REFRESH_MS = 2000;
-  var OVERVIEW_FAST_REFRESH_LIMIT = 3;
+  var OVERVIEW_FULL_REFRESH_MS = 60000;
+  var OVERVIEW_CACHE_RETRY_MS = 2000;
+  var OVERVIEW_LIVE_POLL_MS = 5000;
+  var OVERVIEW_STREAM_WATCHDOG_MS = 30000;
+  var OVERVIEW_STREAM_RETRY_MS = [1000, 2000, 5000, 10000, 15000];
   var viewLabels = {
     overview: '数据概览',
     resources: '资源库',
@@ -80,7 +83,12 @@
       sortBy: 'resource_count', sortDir: 'desc', controller: null, mode: 'list',
       detail: { sourceType: '', sourceKey: '', data: null, page: 1, pageSize: 20, total: 0, pages: 1, sortBy: 'resource_count', sortDir: 'desc', controller: null }
     },
-    overviewRefresh: { timer: null, controller: null, serial: 0, fastRetryCount: 0 },
+    overviewRefresh: {
+      timer: null, controller: null, serial: 0,
+      streamController: null, streamTimer: null, watchdogTimer: null,
+      streamSerial: 0, streamFailures: 0, pollTimer: null, pollController: null,
+      activityObservedAt: 0, countersObservedAt: 0, lastActive: null
+    },
     resources: { items: [], page: 1, pageSize: PAGE_SIZE, total: 0, pages: 1, query: {}, sortBy: '', sortDir: '' },
     mihomo: { overview: null, subscriptions: [], query: '', region: '', switching: '', benchmarking: false, subscriptionSaving: false, subscriptionUpdating: '', subscriptionDeleting: '' },
     proxyPool: { summary: null, nodes: [], nodePage: 1, nodePages: 1, nodeTotal: 0, batches: [], batchPage: 1, batchPages: 1, batchTotal: 0, policies: [], query: '', status: '', probing: false, probeIDs: new Set() },
@@ -830,7 +838,7 @@
     var button = document.querySelector('[data-action="refresh-view"] svg');
     if (button) button.classList.add('spin');
     var request = state.view === 'overview'
-      ? loadOverview(true, { forceRefresh: true })
+      ? Promise.all([loadOverview(true, { forceRefresh: true }), refreshOverviewLiveSnapshot({ silent: true })])
       : loadView(state.view, true);
     Promise.resolve(request).finally(function () {
       if (button) button.classList.remove('spin');
@@ -858,6 +866,14 @@
     state.overviewRefresh.timer = null;
   }
 
+  function clearOverviewStreamTimers() {
+    var refresh = state.overviewRefresh;
+    if (refresh.streamTimer) window.clearTimeout(refresh.streamTimer);
+    if (refresh.watchdogTimer) window.clearTimeout(refresh.watchdogTimer);
+    refresh.streamTimer = null;
+    refresh.watchdogTimer = null;
+  }
+
   function setOverviewRefreshStatus(refreshing) {
     var element = byId('overview-refresh-status');
     if (!element) return;
@@ -874,6 +890,7 @@
       state.overviewRefresh.controller.abort();
       state.overviewRefresh.controller = null;
     }
+    stopOverviewLive();
     setOverviewRefreshStatus(false);
   }
 
@@ -889,6 +906,11 @@
     var run = pick(data, ['active_run', 'active_batch', 'current_run', 'current_batch'], null);
     var status = String(pick(run, ['status', 'state'], '')).toLowerCase();
     return ACTIVE_STATUSES.indexOf(status) !== -1;
+  }
+
+  function overviewObservedAt(value) {
+    var date = toDate(value);
+    return date ? date.getTime() : 0;
   }
 
   function formatOverviewClock(value) {
@@ -918,25 +940,209 @@
     showAlert('overview-alert', '');
   }
 
-  function scheduleOverviewRefresh(data) {
+  function scheduleOverviewRefresh(delay, forceRefresh) {
     clearOverviewRefreshTimer();
     if (!overviewCanRefresh()) return;
-
-    var stale = boolValue(pick(data, ['stale'], false), false);
-    var refreshing = boolValue(pick(data, ['refreshing'], false), false);
-    var delay;
-    if (stale && refreshing && state.overviewRefresh.fastRetryCount < OVERVIEW_FAST_REFRESH_LIMIT) {
-      state.overviewRefresh.fastRetryCount += 1;
-      delay = OVERVIEW_FAST_REFRESH_MS;
-    } else {
-      if (!stale || !refreshing) state.overviewRefresh.fastRetryCount = 0;
-      delay = overviewHasActiveRun(data) ? OVERVIEW_ACTIVE_REFRESH_MS : OVERVIEW_IDLE_REFRESH_MS;
-    }
-
     state.overviewRefresh.timer = window.setTimeout(function () {
       state.overviewRefresh.timer = null;
-      loadOverview(true, { background: true });
+      loadOverview(true, { background: true, forceRefresh: Boolean(forceRefresh) });
+    }, delay === undefined ? OVERVIEW_FULL_REFRESH_MS : Math.max(0, delay));
+  }
+
+  function stopOverviewFallbackPolling() {
+    var refresh = state.overviewRefresh;
+    if (refresh.pollTimer) window.clearTimeout(refresh.pollTimer);
+    if (refresh.pollController) refresh.pollController.abort();
+    refresh.pollTimer = null;
+    refresh.pollController = null;
+  }
+
+  function stopOverviewLive() {
+    var refresh = state.overviewRefresh;
+    refresh.streamSerial += 1;
+    clearOverviewStreamTimers();
+    stopOverviewFallbackPolling();
+    if (refresh.streamController) refresh.streamController.abort();
+    refresh.streamController = null;
+    refresh.streamFailures = 0;
+  }
+
+  function overviewLiveCanRun(serial) {
+    return overviewCanRefresh() && serial === state.overviewRefresh.streamSerial;
+  }
+
+  function armOverviewStreamWatchdog(serial) {
+    var refresh = state.overviewRefresh;
+    if (refresh.watchdogTimer) window.clearTimeout(refresh.watchdogTimer);
+    refresh.watchdogTimer = window.setTimeout(function () {
+      refresh.watchdogTimer = null;
+      if (overviewLiveCanRun(serial) && refresh.streamController) refresh.streamController.abort();
+    }, OVERVIEW_STREAM_WATCHDOG_MS);
+  }
+
+  function applyOverviewActivity(payload) {
+    payload = payload || {};
+    var observedAt = overviewObservedAt(pick(payload, ['observed_at'], null));
+    if (observedAt && observedAt < state.overviewRefresh.activityObservedAt) return;
+    if (observedAt) state.overviewRefresh.activityObservedAt = observedAt;
+
+    var current = state.overview || {};
+    var activeRun = pick(payload, ['active_run'], null);
+    var recentRuns = arrayFrom(payload, ['recent_runs']);
+    state.overview = Object.assign({}, current, { active_run: activeRun, recent_runs: recentRuns });
+    renderActiveBatch(activeRun);
+    renderRecentRuns(recentRuns);
+    refreshIcons(byId('active-batch'));
+
+    var active = overviewHasActiveRun({ active_run: activeRun });
+    if (state.overviewRefresh.lastActive === true && !active) {
+      scheduleOverviewRefresh(0, true);
+    }
+    state.overviewRefresh.lastActive = active;
+    if (observedAt) updateTimestamp(new Date(observedAt));
+  }
+
+  function applyOverviewCounters(payload) {
+    payload = payload || {};
+    var observedAt = overviewObservedAt(pick(payload, ['observed_at'], null));
+    if (observedAt && observedAt < state.overviewRefresh.countersObservedAt) return;
+    if (observedAt) state.overviewRefresh.countersObservedAt = observedAt;
+    var fields = ['resource_count', 'today_new', 'last_seven_days_new', 'keyword_count', 'enabled_keyword_count', 'status_counts'];
+    var counters = {};
+    fields.forEach(function (field) {
+      if (Object.prototype.hasOwnProperty.call(payload, field)) counters[field] = payload[field];
+    });
+    state.overview = Object.assign({}, state.overview || {}, counters);
+    renderOverviewCounters(state.overview);
+    if (observedAt) updateTimestamp(new Date(observedAt));
+  }
+
+  function applyOverviewLivePayload(payload) {
+    payload = payload || {};
+    if (payload.activity) applyOverviewActivity(payload.activity);
+    if (payload.counters) applyOverviewCounters(payload.counters);
+  }
+
+  function handleOverviewStreamBlock(block, serial) {
+    if (!overviewLiveCanRun(serial)) return;
+    armOverviewStreamWatchdog(serial);
+    if (block.comment || !block.data) return;
+    var payload;
+    try {
+      payload = JSON.parse(block.data);
+    } catch (error) {
+      return;
+    }
+    if (block.name === 'activity') applyOverviewActivity(payload);
+    else if (block.name === 'counters') applyOverviewCounters(payload);
+    else if (block.name === 'heartbeat') state.overviewRefresh.streamFailures = 0;
+    else if (block.name === 'status' && payload.state === 'degraded') {
+      showAlert('overview-alert', '实时概览暂时降级，正在保留最近一次数据。', 'warning');
+    } else if (block.name === 'status' && payload.state === 'healthy') {
+      updateOverviewFreshness(state.overview || {});
+    }
+    if (block.name === 'activity' || block.name === 'counters' || block.name === 'heartbeat') {
+      state.overviewRefresh.streamFailures = 0;
+      stopOverviewFallbackPolling();
+    }
+  }
+
+  async function readOverviewStream(response, serial) {
+    if (!response.body || typeof response.body.getReader !== 'function' || !window.PanSouSSE) {
+      throw new APIError('浏览器不支持流式概览', 0, null);
+    }
+    var reader = response.body.getReader();
+    var decoder = new TextDecoder();
+    var parser = window.PanSouSSE.createParser(function (block) { handleOverviewStreamBlock(block, serial); });
+    while (overviewLiveCanRun(serial)) {
+      var result = await reader.read();
+      if (result.done) break;
+      parser.feed(decoder.decode(result.value, { stream: true }));
+    }
+    parser.feed(decoder.decode());
+    parser.end();
+    if (overviewLiveCanRun(serial)) throw new APIError('实时概览连接已结束', 0, null);
+  }
+
+  function scheduleOverviewStreamReconnect(serial) {
+    if (!overviewLiveCanRun(serial)) return;
+    var failures = state.overviewRefresh.streamFailures;
+    var delay = OVERVIEW_STREAM_RETRY_MS[Math.min(Math.max(failures - 1, 0), OVERVIEW_STREAM_RETRY_MS.length - 1)];
+    state.overviewRefresh.streamTimer = window.setTimeout(function () {
+      state.overviewRefresh.streamTimer = null;
+      connectOverviewStream(serial);
     }, delay);
+  }
+
+  async function connectOverviewStream(serial) {
+    if (!overviewLiveCanRun(serial) || state.overviewRefresh.streamController) return;
+    var controller = new AbortController();
+    state.overviewRefresh.streamController = controller;
+    armOverviewStreamWatchdog(serial);
+    try {
+      var response = await fetch(API.overviewStream, {
+        headers: { Accept: 'text/event-stream', Authorization: 'Bearer ' + state.token },
+        cache: 'no-store',
+        signal: controller.signal
+      });
+      if (response.status === 401 || response.status === 403) {
+        expireSession(response.status === 401 ? '登录状态已失效，请重新登录' : '当前账号需要管理员权限，请使用管理员账号登录');
+        return;
+      }
+      if (!response.ok) throw new APIError(response.statusText || '实时概览连接失败', response.status, null);
+      await readOverviewStream(response, serial);
+    } catch (error) {
+      if (!overviewLiveCanRun(serial)) return;
+      state.overviewRefresh.streamFailures += 1;
+      if (state.overviewRefresh.streamFailures >= 2) startOverviewFallbackPolling();
+    } finally {
+      if (state.overviewRefresh.streamController === controller) state.overviewRefresh.streamController = null;
+      if (overviewLiveCanRun(serial)) scheduleOverviewStreamReconnect(serial);
+    }
+  }
+
+  function startOverviewLive() {
+    if (!overviewCanRefresh()) return;
+    var refresh = state.overviewRefresh;
+    if (refresh.streamController || refresh.streamTimer) return;
+    refresh.streamSerial += 1;
+    refresh.streamFailures = 0;
+    connectOverviewStream(refresh.streamSerial);
+  }
+
+  async function refreshOverviewLiveSnapshot(options) {
+    options = options || {};
+    var controller = options.controller || new AbortController();
+    try {
+      var payload = await apiRequest(API.overviewLive, { signal: controller.signal });
+      if (overviewCanRefresh()) applyOverviewLivePayload(payload);
+      return payload;
+    } catch (error) {
+      if (!options.silent && error.name !== 'AbortError') throw error;
+      return null;
+    }
+  }
+
+  function startOverviewFallbackPolling() {
+    var refresh = state.overviewRefresh;
+    if (!overviewCanRefresh() || refresh.pollTimer || refresh.pollController) return;
+    var poll = function () {
+      if (!overviewCanRefresh() || refresh.streamFailures < 2) {
+        stopOverviewFallbackPolling();
+        return;
+      }
+      var controller = new AbortController();
+      refresh.pollController = controller;
+      refreshOverviewLiveSnapshot({ controller: controller, silent: true }).finally(function () {
+        if (refresh.pollController === controller) refresh.pollController = null;
+        if (!overviewCanRefresh() || refresh.streamFailures < 2) return;
+        refresh.pollTimer = window.setTimeout(function () {
+          refresh.pollTimer = null;
+          poll();
+        }, OVERVIEW_LIVE_POLL_MS);
+      });
+    };
+    poll();
   }
 
   function openMenu() {
@@ -1091,8 +1297,9 @@
 
   async function loadOverview(force, options) {
     options = options || {};
+    startOverviewLive();
     if (state.loaded.overview && !force) {
-      scheduleOverviewRefresh(state.overview || {});
+      scheduleOverviewRefresh();
       return;
     }
     if (!overviewCanRefresh()) {
@@ -1101,7 +1308,6 @@
     }
 
     clearOverviewRefreshTimer();
-    if (options.forceRefresh) state.overviewRefresh.fastRetryCount = 0;
 
     var hasExistingData = Boolean(state.overview);
     if (!hasExistingData) {
@@ -1143,28 +1349,45 @@
       }
       if (serial !== state.overviewRefresh.serial) return;
 
+      var generatedAt = overviewObservedAt(overviewGeneratedAt(overviewResult));
+      var current = state.overview || {};
+      if (state.overviewRefresh.activityObservedAt > generatedAt) {
+        overviewResult.active_run = pick(current, ['active_run'], null);
+        overviewResult.recent_runs = arrayFrom(current, ['recent_runs']);
+      }
+      if (state.overviewRefresh.countersObservedAt > generatedAt) {
+        ['resource_count', 'today_new', 'last_seven_days_new', 'keyword_count', 'enabled_keyword_count', 'status_counts'].forEach(function (field) {
+          if (Object.prototype.hasOwnProperty.call(current, field)) overviewResult[field] = current[field];
+        });
+      }
       state.overview = overviewResult;
       state.overviewTrends = trendsResult || [];
       state.loaded.overview = true;
       renderOverview(overviewResult, state.overviewTrends);
-      updateTimestamp(overviewGeneratedAt(overviewResult));
+      state.overviewRefresh.lastActive = overviewHasActiveRun(overviewResult);
+      var newestAt = Math.max(generatedAt, state.overviewRefresh.activityObservedAt, state.overviewRefresh.countersObservedAt);
+      updateTimestamp(newestAt ? new Date(newestAt) : overviewGeneratedAt(overviewResult));
       updateOverviewFreshness(overviewResult);
       if (trendError && !boolValue(pick(overviewResult, ['stale'], false), false)) {
         showAlert('overview-alert', '概览已更新，但趋势数据加载失败：' + (trendError.message || '请求失败'), 'warning');
       }
-      scheduleOverviewRefresh(overviewResult);
+      if (boolValue(pick(overviewResult, ['stale'], false), false) && boolValue(pick(overviewResult, ['refreshing'], false), false)) {
+        scheduleOverviewRefresh(OVERVIEW_CACHE_RETRY_MS);
+      } else {
+        scheduleOverviewRefresh();
+      }
     } catch (error) {
       if (serial !== state.overviewRefresh.serial || (error && error.name === 'AbortError')) return;
       if (state.overview) {
         state.loaded.overview = true;
         updateOverviewFreshness(state.overview, error);
-        scheduleOverviewRefresh(state.overview);
+        scheduleOverviewRefresh();
       } else {
         state.loaded.overview = false;
         showAlert('overview-alert', error.message || '概览数据加载失败');
         renderOverview({}, []);
         updateTimestamp(null);
-        scheduleOverviewRefresh({});
+        scheduleOverviewRefresh();
       }
     } finally {
       if (serial === state.overviewRefresh.serial) {
@@ -1175,6 +1398,15 @@
   }
 
   function renderOverview(data, trends) {
+    renderOverviewCounters(data);
+    renderTrendChart(trends);
+    renderSourceChart(data);
+    renderActiveBatch(pick(data, ['active_run', 'active_batch', 'current_run', 'current_batch'], null));
+    renderRecentRuns(arrayFrom(pick(data, ['recent_runs', 'runs', 'collection_runs'], []), ['items', 'runs']));
+    refreshIcons();
+  }
+
+  function renderOverviewCounters(data) {
     var statusCounts = normalizeStatusCounts(pick(data, ['status_counts', 'resource_statuses', 'validation_status'], {}));
     var totalResources = numberValue(pick(data, ['resource_count', 'resources_total', 'total_resources', 'total'], 0));
     var validCount = numberValue(pick(data, ['valid_count', 'valid_resources'], pick(statusCounts, ['valid'], 0)));
@@ -1197,12 +1429,8 @@
       '</article>';
     }).join('');
 
-    renderTrendChart(trends);
     renderStatusChart(statusCounts, totalResources);
-    renderSourceChart(data);
-    renderActiveBatch(pick(data, ['active_run', 'active_batch', 'current_run', 'current_batch'], null));
-    renderRecentRuns(arrayFrom(pick(data, ['recent_runs', 'runs', 'collection_runs'], []), ['items', 'runs']));
-    refreshIcons();
+    refreshIcons(byId('stat-grid'));
   }
 
   function normalizeStatusCounts(data) {
@@ -6670,7 +6898,7 @@
         stopKeywordSyncDetailPolling();
         return;
       }
-      if (state.view === 'overview') loadOverview(true, { background: true });
+      if (state.view === 'overview') loadOverview(false, { background: true });
       if (state.view === 'resources') loadLinkCheckStatus({ force: true, silent: Boolean(state.linkCheckStatus.data) });
       if (document.visibilityState === 'visible' && state.view === 'runs') loadRuns({ silent: true, force: true });
       if (document.visibilityState === 'visible' && state.view === 'keywords' && state.keywords.tab === 'api' && keywordSourcesHaveActiveRun()) loadKeywordSources(true, { silent: true });

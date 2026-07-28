@@ -448,6 +448,15 @@ type SourceContributionDetail struct {
 
 type StatusCounts map[string]int64
 
+type OverviewCounters struct {
+	ResourceCount       int64        `json:"resource_count"`
+	TodayNew            int64        `json:"today_new"`
+	LastSevenDaysNew    int64        `json:"last_seven_days_new"`
+	KeywordCount        int64        `json:"keyword_count"`
+	EnabledKeywordCount int64        `json:"enabled_keyword_count"`
+	StatusCounts        StatusCounts `json:"status_counts"`
+}
+
 type OverviewStats struct {
 	ResourceCount       int64                              `json:"resource_count"`
 	TodayNew            int64                              `json:"today_new"`

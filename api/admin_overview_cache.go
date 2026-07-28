@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	defaultAdminOverviewCacheTTL       = 10 * time.Second
+	defaultAdminOverviewCacheTTL       = 60 * time.Second
 	defaultAdminOverviewRefreshTimeout = 15 * time.Second
 	defaultAdminOverviewCacheEntries   = 16
 	defaultAdminOverviewTrendDays      = 7
@@ -55,7 +55,7 @@ type adminOverviewActivity struct {
 }
 
 // adminOverviewCache keeps only the expensive dashboard snapshot in the
-// ten-second cache. Collection activity is queried on every overview request;
+// minute cache. Collection activity is queried on every overview request;
 // its last successful value is retained solely as an outage fallback.
 type adminOverviewCache struct {
 	store          adminOverviewStore

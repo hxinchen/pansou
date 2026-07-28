@@ -29,6 +29,7 @@ type AdminHandler struct {
 	credentials          *credential.Service
 	keywordSources       *keywordsync.Service
 	overviewCache        *adminOverviewCache
+	overviewLiveHub      *adminOverviewLiveHub
 	linkCheckStatusCache *adminLinkCheckStatusCache
 	searchCache          *cache.EnhancedTwoLevelCache
 	now                  func() time.Time
@@ -53,6 +54,7 @@ func NewAdminHandler(store *storage.Store, runner *collection.Runner, sources ..
 	}
 	if store != nil {
 		handler.overviewCache = newAdminOverviewCache(store)
+		handler.overviewLiveHub = newAdminOverviewLiveHub(store)
 	}
 	return handler
 }
@@ -64,6 +66,8 @@ func (h *AdminHandler) Register(group *gin.RouterGroup) {
 	group.GET("/search-scheduler/suggestions", h.searchSchedulerSuggestions)
 	group.POST("/search-scheduler/suggestions/apply", h.applySearchSchedulerSuggestions)
 	group.GET("/overview", h.overview)
+	group.GET("/overview/live", h.overviewLive)
+	group.GET("/overview/stream", h.overviewStream)
 	group.GET("/trends", h.trends)
 	group.GET("/runtime-diagnostics", h.runtimeDiagnostics)
 	group.GET("/source-contributions", h.listSourceContributions)

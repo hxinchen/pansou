@@ -83,11 +83,13 @@ func TestAdminRoutesRequireJWT(t *testing.T) {
 	defer func() { config.AppConfig = previous }()
 
 	router := SetupRouter(routerTestSearch{})
-	request := httptest.NewRequest(http.MethodGet, "/api/admin/overview", nil)
-	response := httptest.NewRecorder()
-	router.ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401; body=%s", response.Code, response.Body.String())
+	for _, path := range []string{"/api/admin/overview", "/api/admin/overview/live", "/api/admin/overview/stream"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("GET %s status = %d, want 401; body=%s", path, response.Code, response.Body.String())
+		}
 	}
 }
 
@@ -188,7 +190,7 @@ func TestAdminShellAndAssetsDisableCaching(t *testing.T) {
 	defer func() { config.AppConfig = previous }()
 
 	router := SetupRouter(routerTestSearch{})
-	for _, path := range []string{"/admin/", "/admin/assets/app.js?v=202607191945"} {
+	for _, path := range []string{"/admin/", "/admin/assets/app.js?v=202607281430", "/admin/assets/sse.js?v=202607281430"} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, request)

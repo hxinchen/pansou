@@ -60,23 +60,6 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 	if s == nil || s.pool == nil {
 		return OverviewStats{}, fmt.Errorf("storage is disabled")
 	}
-	now := s.now()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	tomorrow := today.AddDate(0, 0, 1)
-	sevenDaysAgo := today.AddDate(0, 0, -6)
-
-	type resourceResult struct {
-		resourceCount    int64
-		todayNew         int64
-		lastSevenDaysNew int64
-		statusCounts     StatusCounts
-		err              error
-	}
-	type keywordResult struct {
-		keywordCount        int64
-		enabledKeywordCount int64
-		err                 error
-	}
 	type sourcesResult struct {
 		topSources       []SourceContribution
 		sourceTypeTotals map[string]SourceContributionTotal
@@ -84,62 +67,18 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 		err              error
 	}
 
-	resourcesCh := make(chan resourceResult, 1)
-	keywordsCh := make(chan keywordResult, 1)
+	countersCh := make(chan struct {
+		value OverviewCounters
+		err   error
+	}, 1)
 	sourcesCh := make(chan sourcesResult, 1)
 
 	go func() {
-		var result resourceResult
-		var pending, valid, invalid, expired, cancelled, violation, locked, unknown, unsupported int64
-		result.err = s.pool.QueryRow(ctx, `
-			SELECT
-				count(*),
-				count(*) FILTER (WHERE first_seen_at >= $1 AND first_seen_at < $2),
-				count(*) FILTER (WHERE first_seen_at >= $3 AND first_seen_at < $2),
-				count(*) FILTER (WHERE check_status = 'pending'),
-				count(*) FILTER (WHERE check_status = 'valid'),
-				count(*) FILTER (WHERE check_status = 'invalid'),
-				count(*) FILTER (WHERE check_status = 'expired'),
-				count(*) FILTER (WHERE check_status = 'cancelled'),
-				count(*) FILTER (WHERE check_status = 'violation'),
-				count(*) FILTER (WHERE check_status = 'locked'),
-				count(*) FILTER (WHERE check_status = 'unknown'),
-				count(*) FILTER (WHERE check_status = 'unsupported')
-			FROM resources`, today, tomorrow, sevenDaysAgo).Scan(
-			&result.resourceCount,
-			&result.todayNew,
-			&result.lastSevenDaysNew,
-			&pending,
-			&valid,
-			&invalid,
-			&expired,
-			&cancelled,
-			&violation,
-			&locked,
-			&unknown,
-			&unsupported,
-		)
-		if result.err != nil {
-			result.err = fmt.Errorf("load resource overview statistics: %w", result.err)
-		} else {
-			result.statusCounts = StatusCounts{
-				CheckPending: pending, CheckValid: valid, CheckInvalid: invalid,
-				CheckExpired: expired, CheckCancelled: cancelled, CheckViolation: violation,
-				CheckLocked: locked, CheckUnknown: unknown, CheckUnsupported: unsupported,
-			}
-		}
-		resourcesCh <- result
-	}()
-
-	go func() {
-		var result keywordResult
-		result.err = s.pool.QueryRow(ctx, `
-			SELECT count(*), count(*) FILTER (WHERE enabled)
-			FROM keywords`).Scan(&result.keywordCount, &result.enabledKeywordCount)
-		if result.err != nil {
-			result.err = fmt.Errorf("load keyword overview statistics: %w", result.err)
-		}
-		keywordsCh <- result
+		value, err := s.OverviewCounters(ctx)
+		countersCh <- struct {
+			value OverviewCounters
+			err   error
+		}{value: value, err: err}
 	}()
 
 	go func() {
@@ -256,28 +195,122 @@ func (s *Store) OverviewSnapshot(ctx context.Context) (OverviewStats, error) {
 		sourcesCh <- result
 	}()
 
-	resources := <-resourcesCh
-	keywords := <-keywordsCh
+	counters := <-countersCh
 	sources := <-sourcesCh
-	if resources.err != nil {
-		return OverviewStats{}, resources.err
-	}
-	if keywords.err != nil {
-		return OverviewStats{}, keywords.err
+	if counters.err != nil {
+		return OverviewStats{}, counters.err
 	}
 	if sources.err != nil {
 		return OverviewStats{}, sources.err
 	}
 	return OverviewStats{
+		ResourceCount:       counters.value.ResourceCount,
+		TodayNew:            counters.value.TodayNew,
+		LastSevenDaysNew:    counters.value.LastSevenDaysNew,
+		KeywordCount:        counters.value.KeywordCount,
+		EnabledKeywordCount: counters.value.EnabledKeywordCount,
+		StatusCounts:        counters.value.StatusCounts,
+		TopSources:          sources.topSources,
+		SourceTypeTotals:    sources.sourceTypeTotals,
+		TopSourcesByType:    sources.topSourcesByType,
+	}, nil
+}
+
+// OverviewCounters loads the exact, frequently changing counters without the
+// source contribution and trend aggregations used by the full dashboard.
+func (s *Store) OverviewCounters(ctx context.Context) (OverviewCounters, error) {
+	if s == nil || s.pool == nil {
+		return OverviewCounters{}, fmt.Errorf("storage is disabled")
+	}
+	now := s.now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	tomorrow := today.AddDate(0, 0, 1)
+	sevenDaysAgo := today.AddDate(0, 0, -6)
+
+	type resourceResult struct {
+		resourceCount    int64
+		todayNew         int64
+		lastSevenDaysNew int64
+		statusCounts     StatusCounts
+		err              error
+	}
+	type keywordResult struct {
+		keywordCount        int64
+		enabledKeywordCount int64
+		err                 error
+	}
+	resourcesCh := make(chan resourceResult, 1)
+	keywordsCh := make(chan keywordResult, 1)
+
+	go func() {
+		var result resourceResult
+		var pending, valid, invalid, expired, cancelled, violation, locked, unknown, unsupported int64
+		result.err = s.pool.QueryRow(ctx, `
+			SELECT
+				count(*),
+				count(*) FILTER (WHERE first_seen_at >= $1 AND first_seen_at < $2),
+				count(*) FILTER (WHERE first_seen_at >= $3 AND first_seen_at < $2),
+				count(*) FILTER (WHERE check_status = 'pending'),
+				count(*) FILTER (WHERE check_status = 'valid'),
+				count(*) FILTER (WHERE check_status = 'invalid'),
+				count(*) FILTER (WHERE check_status = 'expired'),
+				count(*) FILTER (WHERE check_status = 'cancelled'),
+				count(*) FILTER (WHERE check_status = 'violation'),
+				count(*) FILTER (WHERE check_status = 'locked'),
+				count(*) FILTER (WHERE check_status = 'unknown'),
+				count(*) FILTER (WHERE check_status = 'unsupported')
+			FROM resources`, today, tomorrow, sevenDaysAgo).Scan(
+			&result.resourceCount,
+			&result.todayNew,
+			&result.lastSevenDaysNew,
+			&pending,
+			&valid,
+			&invalid,
+			&expired,
+			&cancelled,
+			&violation,
+			&locked,
+			&unknown,
+			&unsupported,
+		)
+		if result.err != nil {
+			result.err = fmt.Errorf("load resource overview statistics: %w", result.err)
+		} else {
+			result.statusCounts = StatusCounts{
+				CheckPending: pending, CheckValid: valid, CheckInvalid: invalid,
+				CheckExpired: expired, CheckCancelled: cancelled, CheckViolation: violation,
+				CheckLocked: locked, CheckUnknown: unknown, CheckUnsupported: unsupported,
+			}
+		}
+		resourcesCh <- result
+	}()
+
+	go func() {
+		var result keywordResult
+		result.err = s.pool.QueryRow(ctx, `
+			SELECT count(*), count(*) FILTER (WHERE enabled)
+			FROM keywords`).Scan(&result.keywordCount, &result.enabledKeywordCount)
+		if result.err != nil {
+			result.err = fmt.Errorf("load keyword overview statistics: %w", result.err)
+		}
+		keywordsCh <- result
+	}()
+
+	resources := <-resourcesCh
+	keywords := <-keywordsCh
+	if resources.err != nil {
+		return OverviewCounters{}, resources.err
+	}
+	if keywords.err != nil {
+		return OverviewCounters{}, keywords.err
+	}
+	return OverviewCounters{
 		ResourceCount:       resources.resourceCount,
 		TodayNew:            resources.todayNew,
 		LastSevenDaysNew:    resources.lastSevenDaysNew,
 		KeywordCount:        keywords.keywordCount,
 		EnabledKeywordCount: keywords.enabledKeywordCount,
 		StatusCounts:        resources.statusCounts,
-		TopSources:          sources.topSources,
-		SourceTypeTotals:    sources.sourceTypeTotals,
-		TopSourcesByType:    sources.topSourcesByType,
 	}, nil
 }
 

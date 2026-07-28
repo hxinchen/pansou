@@ -142,6 +142,15 @@ func TestPostgresOverviewSnapshotActivityAndTrends(t *testing.T) {
 	if snapshot.KeywordCount != 2 || snapshot.EnabledKeywordCount != 1 {
 		t.Fatalf("snapshot keyword counters = %+v", snapshot)
 	}
+	counters, err := store.OverviewCounters(ctx)
+	if err != nil {
+		t.Fatalf("OverviewCounters: %v", err)
+	}
+	if counters.ResourceCount != snapshot.ResourceCount || counters.TodayNew != snapshot.TodayNew ||
+		counters.LastSevenDaysNew != snapshot.LastSevenDaysNew || counters.KeywordCount != snapshot.KeywordCount ||
+		counters.EnabledKeywordCount != snapshot.EnabledKeywordCount {
+		t.Fatalf("lightweight counters do not match snapshot: counters=%+v snapshot=%+v", counters, snapshot)
+	}
 	wantStatuses := StatusCounts{
 		CheckPending: 1, CheckValid: 3, CheckInvalid: 1, CheckUnknown: 1, CheckUnsupported: 1,
 		CheckExpired: 1, CheckCancelled: 1, CheckViolation: 1, CheckLocked: 1,
