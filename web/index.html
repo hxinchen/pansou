@@ -3,13 +3,30 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <meta name="theme-color" content="#ffffff">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f5f6f7">
+  <script>
+    (function () {
+      var theme = 'light';
+      try {
+        var stored = window.localStorage.getItem('pansou-theme');
+        theme = stored === 'light' || stored === 'dark'
+          ? stored
+          : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      } catch (error) {
+        theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      }
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
+      var themeColor = document.querySelector('meta[name="theme-color"]');
+      if (themeColor) themeColor.setAttribute('content', theme === 'dark' ? '#060b14' : '#f5f6f7');
+    }());
+  </script>
   <title>PanSou 管理台</title>
   <link rel="icon" type="image/png" sizes="512x512" href="./assets/admin-icon.png">
   <link rel="apple-touch-icon" href="./assets/admin-icon.png">
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-  <link rel="stylesheet" href="./assets/styles.css?v=202607270559">
+  <link rel="stylesheet" href="./assets/styles.css?v=202607291600">
 </head>
 <body>
   <div id="login-view" class="auth-layout" hidden>
@@ -20,6 +37,16 @@
           <strong>PanSou</strong>
           <small>资源管理台</small>
         </span>
+      </div>
+      <div class="theme-switch login-theme-switch" role="group" aria-label="外观主题">
+        <button type="button" data-theme-choice="dark" aria-pressed="false" title="使用深色主题">
+          <i data-lucide="moon" aria-hidden="true"></i>
+          <span>深色</span>
+        </button>
+        <button type="button" data-theme-choice="light" aria-pressed="false" title="使用浅色主题">
+          <i data-lucide="sun" aria-hidden="true"></i>
+          <span>浅色</span>
+        </button>
       </div>
       <div class="login-heading">
         <p class="eyebrow">ADMIN ACCESS</p>
@@ -146,6 +173,16 @@
         <div class="topbar-actions">
           <span id="overview-refresh-status" class="refresh-status" aria-live="polite" hidden></span>
           <span id="last-updated" class="last-updated" aria-live="polite"></span>
+          <div class="theme-switch topbar-theme-switch" role="group" aria-label="外观主题">
+            <button type="button" data-theme-choice="dark" aria-pressed="false" title="使用深色主题">
+              <i data-lucide="moon" aria-hidden="true"></i>
+              <span>深色</span>
+            </button>
+            <button type="button" data-theme-choice="light" aria-pressed="false" title="使用浅色主题">
+              <i data-lucide="sun" aria-hidden="true"></i>
+              <span>浅色</span>
+            </button>
+          </div>
           <button class="icon-button" type="button" data-action="refresh-view" aria-label="刷新当前页面" title="刷新">
             <i data-lucide="refresh-cw" aria-hidden="true"></i>
           </button>
@@ -1542,6 +1579,6 @@
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
   <script src="./assets/sse.js?v=202607281430"></script>
-  <script src="./assets/app.js?v=202607281430"></script>
+  <script src="./assets/app.js?v=202607291600"></script>
 </body>
 </html>

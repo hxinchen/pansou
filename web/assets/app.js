@@ -44,6 +44,9 @@
   var TOKEN_KEY = 'pansou.admin.token';
   var USER_KEY = 'pansou.admin.user';
   var ROLE_KEY = 'pansou.admin.role';
+  var THEME_KEY = 'pansou-theme';
+  var themeMedia = null;
+  var hasExplicitThemeChoice = false;
   var PAGE_SIZE = 20;
   var ACTIVE_STATUSES = ['pending', 'running'];
   var ACTIVE_KEYWORD_SYNC_STATUSES = ['queued', 'running'];
@@ -249,6 +252,87 @@
   function refreshIcons(root) {
     if (window.lucide && typeof window.lucide.createIcons === 'function') {
       window.lucide.createIcons({ attrs: { 'stroke-width': 1.8 }, root: root || document });
+    }
+  }
+
+  function readStoredTheme() {
+    try {
+      var stored = window.localStorage.getItem(THEME_KEY);
+      return stored === 'light' || stored === 'dark' ? stored : '';
+    } catch (error) {
+      return '';
+    }
+  }
+
+  function preferredTheme() {
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
+  function cssColor(name, fallback) {
+    var value = window.getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return value || fallback;
+  }
+
+  function chartPalette() {
+    return {
+      accent: cssColor('--blue', '#1769e0'),
+      success: cssColor('--green', '#16835b'),
+      warning: cssColor('--amber', '#a26108'),
+      danger: cssColor('--red', '#c23838'),
+      violet: cssColor('--violet', '#7557c5'),
+      ink: cssColor('--ink', '#15171a'),
+      muted: cssColor('--subtle', '#9299a3'),
+      axis: cssColor('--chart-axis', '#59616b'),
+      grid: cssColor('--chart-grid', '#eceef0'),
+      tooltip: cssColor('--chart-tooltip', '#17191d'),
+      tooltipText: cssColor('--chart-tooltip-text', '#ffffff'),
+      accentArea: cssColor('--chart-accent-area', 'rgba(23,105,224,0.18)')
+    };
+  }
+
+  function syncThemeControls(theme) {
+    document.querySelectorAll('[data-theme-choice]').forEach(function (button) {
+      var active = button.dataset.themeChoice === theme;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  function rerenderChartsForTheme() {
+    if (state.overview && byId('trend-chart')) renderOverview(state.overview, state.overviewTrends || []);
+    if (state.usage.overview && byId('usage-trend-chart')) renderUsageOverview();
+    window.setTimeout(resizeCharts, 0);
+  }
+
+  function applyTheme(theme, persist) {
+    theme = theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+
+    if (persist) {
+      hasExplicitThemeChoice = true;
+      try {
+        window.localStorage.setItem(THEME_KEY, theme);
+      } catch (error) {
+        // The selected theme still applies for this session when storage is unavailable.
+      }
+    }
+
+    var themeColor = document.querySelector('meta[name="theme-color"]');
+    if (themeColor) themeColor.setAttribute('content', cssColor('--canvas', theme === 'dark' ? '#060b14' : '#f5f6f7'));
+    syncThemeControls(theme);
+    rerenderChartsForTheme();
+  }
+
+  function setupTheme() {
+    var storedTheme = readStoredTheme();
+    hasExplicitThemeChoice = Boolean(storedTheme);
+    applyTheme(storedTheme || document.documentElement.dataset.theme || preferredTheme(), false);
+    themeMedia = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    if (themeMedia) {
+      themeMedia.addEventListener('change', function (event) {
+        if (!hasExplicitThemeChoice) applyTheme(event.matches ? 'dark' : 'light', false);
+      });
     }
   }
 
@@ -804,6 +888,10 @@
       if (link.dataset.view === view) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
     });
+    var activeMobileLink = document.querySelector('.mobile-nav [data-view="' + view + '"]');
+    if (activeMobileLink && window.matchMedia('(max-width: 900px)').matches) {
+      activeMobileLink.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    }
     byId('current-view-label').textContent = viewLabels[view];
     closeMenu();
     stopDetailPolling();
@@ -1465,25 +1553,26 @@
   function renderTrendChart(trends) {
     var chart = chartFor('trend-chart');
     if (!chart) return;
+    var palette = chartPalette();
     var points = normalizeTrend(trends);
     chart.setOption({
       animationDuration: 420,
-      color: ['#1769e0', '#16835b'],
-      tooltip: { trigger: 'axis', backgroundColor: '#17191d', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
+      color: [palette.accent, palette.success],
+      tooltip: { trigger: 'axis', backgroundColor: palette.tooltip, borderWidth: 0, textStyle: { color: palette.tooltipText, fontSize: 11 } },
       grid: { left: 8, right: 10, top: 24, bottom: 4, containLabel: true },
       xAxis: {
         type: 'category',
         boundaryGap: false,
         data: points.map(function (point) { return String(point.date).slice(5); }),
-        axisLine: { lineStyle: { color: '#dfe2e6' } },
+        axisLine: { lineStyle: { color: palette.grid } },
         axisTick: { show: false },
-        axisLabel: { color: '#8c939d', fontSize: 10 }
+        axisLabel: { color: palette.muted, fontSize: 10 }
       },
       yAxis: {
         type: 'value',
         minInterval: 1,
-        splitLine: { lineStyle: { color: '#eceef0', type: 'dashed' } },
-        axisLabel: { color: '#8c939d', fontSize: 10 }
+        splitLine: { lineStyle: { color: palette.grid, type: 'dashed' } },
+        axisLabel: { color: palette.muted, fontSize: 10 }
       },
       series: [
         {
@@ -1493,7 +1582,7 @@
           symbol: 'circle',
           symbolSize: 5,
           lineStyle: { width: 2 },
-          areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(23,105,224,0.18)' }, { offset: 1, color: 'rgba(23,105,224,0.01)' }] } },
+          areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: palette.accentArea }, { offset: 1, color: 'rgba(0,0,0,0)' }] } },
           data: points.map(function (point) { return point.added; })
         },
         {
@@ -1510,16 +1599,17 @@
 
   function renderStatusChart(counts, totalResources) {
     var chart = chartFor('status-chart');
+    var palette = chartPalette();
     var statuses = [
-      { key: 'valid', label: '有效', color: '#16835b' },
-      { key: 'pending', label: '待检测', color: '#9ca3ad' },
-      { key: 'locked', label: '需提取码', color: '#a26108' },
-      { key: 'unknown', label: '未知', color: '#d28a24' },
-      { key: 'unsupported', label: '不支持', color: '#7557c5' },
-      { key: 'expired', label: '已过期', color: '#b7791f' },
-      { key: 'cancelled', label: '取消分享', color: '#6b727b' },
-      { key: 'violation', label: '违规', color: '#c23838' },
-      { key: 'invalid', label: '失效', color: '#c23838' }
+      { key: 'valid', label: '有效', color: palette.success },
+      { key: 'pending', label: '待检测', color: palette.muted },
+      { key: 'locked', label: '需提取码', color: palette.warning },
+      { key: 'unknown', label: '未知', color: palette.warning },
+      { key: 'unsupported', label: '不支持', color: palette.violet },
+      { key: 'expired', label: '已过期', color: palette.warning },
+      { key: 'cancelled', label: '取消分享', color: palette.axis },
+      { key: 'violation', label: '违规', color: palette.danger },
+      { key: 'invalid', label: '失效', color: palette.danger }
     ];
     var values = statuses.map(function (item) {
       return { name: item.label, value: numberValue(pick(counts, [item.key], 0)), itemStyle: { color: item.color } };
@@ -1529,14 +1619,14 @@
     if (chart) {
       chart.setOption({
         animationDuration: 420,
-        tooltip: { trigger: 'item', formatter: '{b}<br/>{c} ({d}%)', backgroundColor: '#17191d', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
+        tooltip: { trigger: 'item', formatter: '{b}<br/>{c} ({d}%)', backgroundColor: palette.tooltip, borderWidth: 0, textStyle: { color: palette.tooltipText, fontSize: 11 } },
         title: {
           text: formatNumber(total),
           subtext: '全部资源',
           left: 'center',
           top: '34%',
-          textStyle: { color: '#1c1f24', fontSize: 20, fontWeight: 700 },
-          subtextStyle: { color: '#9299a3', fontSize: 9 }
+          textStyle: { color: palette.ink, fontSize: 20, fontWeight: 700 },
+          subtextStyle: { color: palette.muted, fontSize: 9 }
         },
         series: [{
           type: 'pie',
@@ -1628,6 +1718,7 @@
     data = data || {};
     var chart = chartFor('source-chart');
     if (!chart) return;
+    var palette = chartPalette();
     var scope = state.sourceContributions.scope;
     var sources = sourceContributionList(data, scope).reverse();
     var scopeLabel = scope === 'plugin' ? '插件' : (scope === 'tg' ? 'TG' : '全部');
@@ -1638,12 +1729,12 @@
       : '<span>' + escapeHTML(scopeLabel) + '资源覆盖</span><strong>独立资源 ' + formatNumber(pick(totals, ['resource_count'], 0)) + '</strong>';
     chart.setOption({
       animationDuration: 420,
-      color: ['#1769e0'],
+      color: [palette.accent],
       tooltip: {
         trigger: 'item',
-        backgroundColor: '#17191d',
+        backgroundColor: palette.tooltip,
         borderWidth: 0,
-        textStyle: { color: '#fff', fontSize: 11 },
+        textStyle: { color: palette.tooltipText, fontSize: 11 },
         formatter: function (params) {
           var item = params.data || {};
           return escapeHTML(item.label || params.name || '来源') + '<br>独立资源 ' + formatNumber(item.value);
@@ -1653,15 +1744,15 @@
       xAxis: {
         type: 'value',
         minInterval: 1,
-        splitLine: { lineStyle: { color: '#eceef0', type: 'dashed' } },
-        axisLabel: { color: '#8c939d', fontSize: 9 }
+        splitLine: { lineStyle: { color: palette.grid, type: 'dashed' } },
+        axisLabel: { color: palette.muted, fontSize: 9 }
       },
       yAxis: {
         type: 'category',
         data: sources.map(function (source) { return String(source.name).slice(0, 18); }),
         axisLine: { show: false },
         axisTick: { show: false },
-        axisLabel: { color: '#59616b', fontSize: 10 }
+        axisLabel: { color: palette.axis, fontSize: 10 }
       },
       series: [{
         type: 'bar',
@@ -4703,16 +4794,17 @@
   function renderUsageTrendChart(data) {
     var chart = chartFor('usage-trend-chart');
     if (!chart) return;
+    var palette = chartPalette();
     var points = normalizeUsageTrend(data);
     chart.setOption({
       animationDuration: 420,
-      color: ['#1769e0', '#16835b', '#c23838'],
-      tooltip: { trigger: 'axis', backgroundColor: '#17191d', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
+      color: [palette.accent, palette.success, palette.danger],
+      tooltip: { trigger: 'axis', backgroundColor: palette.tooltip, borderWidth: 0, textStyle: { color: palette.tooltipText, fontSize: 11 } },
       grid: { left: 8, right: 10, top: 24, bottom: 4, containLabel: true },
-      xAxis: { type: 'category', boundaryGap: false, data: points.map(function (point) { return String(point.time).replace('T', ' ').slice(5, 16); }), axisLine: { lineStyle: { color: '#dfe2e6' } }, axisTick: { show: false }, axisLabel: { color: '#8c939d', fontSize: 9, hideOverlap: true } },
-      yAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: '#eceef0', type: 'dashed' } }, axisLabel: { color: '#8c939d', fontSize: 9 } },
+      xAxis: { type: 'category', boundaryGap: false, data: points.map(function (point) { return String(point.time).replace('T', ' ').slice(5, 16); }), axisLine: { lineStyle: { color: palette.grid } }, axisTick: { show: false }, axisLabel: { color: palette.muted, fontSize: 9, hideOverlap: true } },
+      yAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: palette.grid, type: 'dashed' } }, axisLabel: { color: palette.muted, fontSize: 9 } },
       series: [
-        { name: '请求', type: 'line', smooth: 0.25, symbol: 'none', lineStyle: { width: 2 }, areaStyle: { color: 'rgba(23,105,224,0.10)' }, data: points.map(function (point) { return point.requests; }) },
+        { name: '请求', type: 'line', smooth: 0.25, symbol: 'none', lineStyle: { width: 2 }, areaStyle: { color: palette.accentArea }, data: points.map(function (point) { return point.requests; }) },
         { name: '成功', type: 'line', smooth: 0.25, symbol: 'none', lineStyle: { width: 1.5 }, data: points.map(function (point) { return point.success; }) },
         { name: '限流', type: 'bar', barMaxWidth: 8, data: points.map(function (point) { return point.limited; }) }
       ]
@@ -4732,21 +4824,23 @@
   }
 
   function httpStatusColor(code) {
+    var palette = chartPalette();
     var value = Number(code);
-    if (value >= 200 && value < 300) return '#16835b';
-    if (value === 429) return '#a26108';
-    if (value >= 400 && value < 500) return '#d28a24';
-    if (value >= 500) return '#c23838';
-    return '#9299a3';
+    if (value >= 200 && value < 300) return palette.success;
+    if (value === 429) return palette.warning;
+    if (value >= 400 && value < 500) return palette.warning;
+    if (value >= 500) return palette.danger;
+    return palette.muted;
   }
 
   function renderUsageStatusChart(data) {
     var chart = chartFor('usage-status-chart');
+    var palette = chartPalette();
     var statuses = normalizeHTTPStatuses(data);
     if (chart) {
       chart.setOption({
         animationDuration: 420,
-        tooltip: { trigger: 'item', formatter: 'HTTP {b}<br/>{c} ({d}%)', backgroundColor: '#17191d', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
+        tooltip: { trigger: 'item', formatter: 'HTTP {b}<br/>{c} ({d}%)', backgroundColor: palette.tooltip, borderWidth: 0, textStyle: { color: palette.tooltipText, fontSize: 11 } },
         series: [{ type: 'pie', radius: ['55%', '76%'], center: ['50%', '48%'], label: { show: false }, data: statuses.map(function (item) { return { name: item.code, value: item.count, itemStyle: { color: httpStatusColor(item.code) } }; }) }]
       }, true);
     }
@@ -4758,6 +4852,7 @@
   function renderUsageUsersChart(users) {
     var chart = chartFor('usage-users-chart');
     if (!chart) return;
+    var palette = chartPalette();
     var normalized = users.map(function (user) {
       return {
         name: pick(user, ['username', 'name'], '用户 #' + pick(user, ['user_id', 'id'], '')),
@@ -4766,11 +4861,11 @@
     }).sort(function (a, b) { return b.count - a.count; }).slice(0, 10).reverse();
     chart.setOption({
       animationDuration: 420,
-      color: ['#1769e0'],
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: '#17191d', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
+      color: [palette.accent],
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: palette.tooltip, borderWidth: 0, textStyle: { color: palette.tooltipText, fontSize: 11 } },
       grid: { left: 8, right: 16, top: 12, bottom: 5, containLabel: true },
-      xAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: '#eceef0', type: 'dashed' } }, axisLabel: { color: '#8c939d', fontSize: 9 } },
-      yAxis: { type: 'category', data: normalized.map(function (user) { return String(user.name).slice(0, 18); }), axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: '#59616b', fontSize: 10 } },
+      xAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: palette.grid, type: 'dashed' } }, axisLabel: { color: palette.muted, fontSize: 9 } },
+      yAxis: { type: 'category', data: normalized.map(function (user) { return String(user.name).slice(0, 18); }), axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: palette.axis, fontSize: 10 } },
       series: [{ type: 'bar', barMaxWidth: 13, itemStyle: { borderRadius: [0, 3, 3, 0] }, data: normalized.map(function (user) { return user.count; }) }]
     }, true);
   }
@@ -6573,6 +6668,11 @@
   }
 
   function handleActionClick(event) {
+    var themeChoice = event.target.closest('[data-theme-choice]');
+    if (themeChoice) {
+      applyTheme(themeChoice.dataset.themeChoice, true);
+      return;
+    }
     var viewLink = event.target.closest('[data-view]');
     if (viewLink) {
       event.preventDefault();
@@ -6914,6 +7014,7 @@
   }
 
   function initialize() {
+    setupTheme();
     byId('today-label').textContent = new Intl.DateTimeFormat('zh-CN', {
       year: 'numeric',
       month: 'long',
