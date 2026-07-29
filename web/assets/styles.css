@@ -21,6 +21,7 @@
   --red: #c23838;
   --red-soft: #feeeee;
   --violet: #7557c5;
+  --violet-soft: #f0ecfb;
   --on-accent: #ffffff;
   --focus-ring: rgba(23, 105, 224, 0.24);
   --chart-axis: #59616b;
@@ -44,16 +45,16 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
   --ink: #e8f1ff;
-  --muted: #a8b4c5;
-  --subtle: #718097;
-  --line: #1d2a3d;
-  --line-strong: #2a3a52;
-  --canvas: #060b14;
-  --surface: #0a1220;
-  --surface-soft: #0d1727;
-  --surface-muted: #111d2f;
-  --surface-hover: #101b2c;
-  --surface-overlay: rgba(10, 18, 32, 0.92);
+  --muted: #b2bed0;
+  --subtle: #8291a8;
+  --line: #22324a;
+  --line-strong: #314660;
+  --canvas: #050a12;
+  --surface: #0a1424;
+  --surface-soft: #0e1a2d;
+  --surface-muted: #13233a;
+  --surface-hover: #122139;
+  --surface-overlay: rgba(10, 20, 36, 0.94);
   --blue: #27b9e6;
   --blue-hover: #52c9ef;
   --blue-soft: #0b2d3d;
@@ -64,6 +65,7 @@
   --red: #ff7484;
   --red-soft: #361a24;
   --violet: #aa91ff;
+  --violet-soft: #251e43;
   --on-accent: #041018;
   --focus-ring: rgba(39, 185, 230, 0.34);
   --chart-axis: #98a6ba;
@@ -889,7 +891,7 @@ button {
 .stat-icon.blue { background: var(--blue-soft); color: var(--blue); }
 .stat-icon.green { background: var(--green-soft); color: var(--green); }
 .stat-icon.amber { background: var(--amber-soft); color: var(--amber); }
-.stat-icon.violet { background: #f0ecfb; color: var(--violet); }
+.stat-icon.violet { background: var(--violet-soft); color: var(--violet); }
 
 .stat-icon svg {
   width: 16px;
@@ -1146,7 +1148,7 @@ button {
   display: grid;
   gap: 2px;
   padding: 0 12px;
-  background: white;
+  background: var(--surface);
 }
 
 .batch-metrics > div:first-child { padding-left: 0; }
@@ -6460,8 +6462,13 @@ dialog {
 
 :root[data-theme="dark"] #view-routing,
 :root[data-theme="dark"] #view-proxy-pool {
-  --muted: #a8b4c5;
-  --subtle: #718097;
+  --muted: #b2bed0;
+  --subtle: #8291a8;
+}
+
+:root[data-theme="dark"] .stat-card,
+:root[data-theme="dark"] .panel {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
 :root[data-theme="dark"] .auth-art {
@@ -6562,6 +6569,26 @@ dialog {
 :root[data-theme="dark"] .mihomo-subscription-state {
   background: var(--surface-muted);
   color: var(--muted);
+}
+
+:root[data-theme="dark"] .stat-icon.blue {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+:root[data-theme="dark"] .stat-icon.green {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+:root[data-theme="dark"] .stat-icon.amber {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+:root[data-theme="dark"] .stat-icon.violet {
+  background: var(--violet-soft);
+  color: var(--violet);
 }
 
 :root[data-theme="dark"] .skeleton-card,
